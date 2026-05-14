@@ -97,9 +97,9 @@ Reference direction:
 
 - [x] Admin GUI with command menu, overview, client list, and activity log.
 - [x] Client GUI with status and activity log.
-- [ ] Add admin search/filter for clients.
-- [ ] Add clearer status badges: online, offline, reconnecting, stale.
-- [ ] Show client fingerprint, hostname, user, OS, and last seen.
+- [x] Add admin search/filter for clients.
+- [x] Add clearer status badges: online, offline, reconnecting, stale.
+- [x] Show client fingerprint, hostname, user, OS, and last seen.
 - [ ] Add a simple command result panel.
 - [ ] Preserve terminal mode for smoke checks.
 

@@ -266,6 +266,7 @@ pub struct ClientInfo {
     pub username: String,
     pub gui_available: bool,
     pub started_at_epoch_ms: u128,
+    pub last_seen_epoch_ms: u128,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -347,6 +348,7 @@ impl Message {
                     writer.string(&client.username);
                     writer.bool(client.gui_available);
                     writer.u128(client.started_at_epoch_ms);
+                    writer.u128(client.last_seen_epoch_ms);
                 }
             }
             Self::Command {
@@ -399,6 +401,7 @@ impl Message {
                         username: reader.string()?,
                         gui_available: reader.bool()?,
                         started_at_epoch_ms: reader.u128()?,
+                        last_seen_epoch_ms: reader.u128()?,
                     });
                 }
                 Self::Clients(clients)

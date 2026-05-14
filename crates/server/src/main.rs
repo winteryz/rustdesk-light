@@ -41,6 +41,7 @@ struct Peer {
     sender: Sender<Message>,
     client_info: Option<ClientInfo>,
     last_seen_epoch_ms: u128,
+    last_heartbeat_epoch_ms: u128,
     last_ping_epoch_ms: u128,
 }
 
@@ -122,6 +123,7 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
                         username,
                         gui_available,
                         started_at_epoch_ms: now_epoch_ms(),
+                        last_seen_epoch_ms: now_epoch_ms(),
                     })
                 } else {
                     None
@@ -184,6 +186,7 @@ fn event_loop(events_rx: Receiver<ServerEvent>) {
                         sender,
                         client_info: None,
                         last_seen_epoch_ms: now_epoch_ms(),
+                        last_heartbeat_epoch_ms: 0,
                         last_ping_epoch_ms: 0,
                     },
                 );
@@ -204,6 +207,7 @@ fn event_loop(events_rx: Receiver<ServerEvent>) {
                     peer.session_token = Some(token.clone());
                     peer.client_info = info.clone();
                     peer.last_seen_epoch_ms = now_epoch_ms();
+                    peer.last_heartbeat_epoch_ms = now_epoch_ms();
                     let _ = peer.sender.send(Message::Session { token });
                 }
                 println!(
@@ -295,6 +299,16 @@ fn event_loop(events_rx: Receiver<ServerEvent>) {
                     }
                     Message::Pong => {
                         mark_seen(peer_id, &mut peers);
+                        mark_heartbeat(peer_id, &mut peers);
+                        if peers.get(&peer_id).and_then(|peer| peer.role.as_ref())
+                            == Some(&Role::Client)
+                        {
+                            println!(
+                                "audit event=heartbeat peer=#{peer_id} identity={}",
+                                peer_identity(peer_id, &peers)
+                            );
+                            broadcast_clients(&peers);
+                        }
                     }
                     other => eprintln!("peer #{peer_id} sent unsupported message: {other:?}"),
                 }
@@ -319,6 +333,12 @@ fn event_loop(events_rx: Receiver<ServerEvent>) {
 fn mark_seen(peer_id: usize, peers: &mut HashMap<usize, Peer>) {
     if let Some(peer) = peers.get_mut(&peer_id) {
         peer.last_seen_epoch_ms = now_epoch_ms();
+    }
+}
+
+fn mark_heartbeat(peer_id: usize, peers: &mut HashMap<usize, Peer>) {
+    if let Some(peer) = peers.get_mut(&peer_id) {
+        peer.last_heartbeat_epoch_ms = now_epoch_ms();
     }
 }
 
@@ -432,7 +452,11 @@ fn broadcast_clients(peers: &HashMap<usize, Peer>) {
 fn online_clients(peers: &HashMap<usize, Peer>) -> Vec<ClientInfo> {
     peers
         .values()
-        .filter_map(|peer| peer.client_info.clone())
+        .filter_map(|peer| {
+            let mut info = peer.client_info.clone()?;
+            info.last_seen_epoch_ms = peer.last_heartbeat_epoch_ms;
+            Some(info)
+        })
         .collect()
 }
 

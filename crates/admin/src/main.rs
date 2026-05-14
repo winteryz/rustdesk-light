@@ -3,6 +3,7 @@ use rdl_protocol::{
     read_envelope, write_envelope_with_token, ClientInfo, CommandKind, Message, Role,
     DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT,
 };
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, BufRead};
 use std::net::{Shutdown, TcpStream};
@@ -271,9 +272,23 @@ struct AdminApp {
     input_tx: Sender<AdminInput>,
     event_rx: Receiver<AdminEvent>,
     connected: bool,
-    clients: Vec<ClientInfo>,
+    clients: Vec<ClientRow>,
+    client_filter: String,
     selected_client_id: Option<String>,
     log_lines: Vec<String>,
+}
+
+#[derive(Clone)]
+struct ClientRow {
+    info: ClientInfo,
+    status: ClientStatus,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ClientStatus {
+    Online,
+    Stale,
+    Offline,
 }
 
 impl AdminApp {
@@ -290,6 +305,7 @@ impl AdminApp {
             event_rx,
             connected: false,
             clients: Vec::new(),
+            client_filter: String::new(),
             selected_client_id: None,
             log_lines: vec!["admin gui started".to_string()],
         }
@@ -305,14 +321,17 @@ impl AdminApp {
                 AdminEvent::Disconnected => {
                     self.connected = false;
                     self.log_lines.push("disconnected from server".to_string());
+                    for client in &mut self.clients {
+                        client.status = ClientStatus::Offline;
+                    }
                 }
                 AdminEvent::Clients(clients) => {
                     self.log_lines
                         .push(format!("online clients refreshed: {}", clients.len()));
-                    self.clients = clients;
+                    self.merge_clients(clients);
                     if self.selected_client_id.is_none() {
                         self.selected_client_id =
-                            self.clients.first().map(|client| client.id.clone());
+                            self.clients.first().map(|client| client.info.id.clone());
                     }
                 }
                 AdminEvent::Ack {
@@ -335,11 +354,50 @@ impl AdminApp {
         }
     }
 
-    fn selected_client(&self) -> Option<&ClientInfo> {
-        let selected_id = self.selected_client_id.as_deref()?;
+    fn merge_clients(&mut self, clients: Vec<ClientInfo>) {
+        let online_ids: HashSet<String> = clients.iter().map(|client| client.id.clone()).collect();
+        for client in clients {
+            if let Some(existing) = self.clients.iter_mut().find(|row| row.info.id == client.id) {
+                existing.info = client;
+                existing.status = ClientStatus::Online;
+            } else {
+                self.clients.push(ClientRow {
+                    info: client,
+                    status: ClientStatus::Online,
+                });
+            }
+        }
+
+        for row in &mut self.clients {
+            if !online_ids.contains(&row.info.id) && row.status != ClientStatus::Stale {
+                row.status = ClientStatus::Offline;
+            }
+        }
+    }
+
+    fn filtered_clients(&self) -> Vec<ClientRow> {
+        let filter = self.client_filter.trim().to_ascii_lowercase();
         self.clients
             .iter()
-            .find(|client| client.id.as_str() == selected_id)
+            .filter(|row| {
+                if filter.is_empty() {
+                    return true;
+                }
+                row.info.id.to_ascii_lowercase().contains(&filter)
+                    || row.info.fingerprint.to_ascii_lowercase().contains(&filter)
+                    || row.info.hostname.to_ascii_lowercase().contains(&filter)
+                    || row.info.username.to_ascii_lowercase().contains(&filter)
+                    || row.info.os.to_ascii_lowercase().contains(&filter)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn online_client_count(&self) -> usize {
+        self.clients
+            .iter()
+            .filter(|row| row.status == ClientStatus::Online)
+            .count()
     }
 
     fn send_command(&mut self, client_id: &str, command: CommandKind) {
@@ -379,7 +437,7 @@ impl AdminApp {
                     if primary_button(ui, "Refresh").clicked() {
                         let _ = self.input_tx.send(AdminInput::List);
                     }
-                    status_pill(ui, self.connected);
+                    connection_status_pill(ui, self.connected);
                     ui.label(
                         egui::RichText::new(format!("{}:{}", self.config.ip, self.config.port))
                             .color(COLOR_MUTED),
@@ -397,10 +455,15 @@ impl AdminApp {
                 metric(
                     &mut columns[0],
                     "Online clients",
-                    self.clients.len().to_string(),
+                    self.online_client_count().to_string(),
                 );
                 metric(
                     &mut columns[1],
+                    "Known clients",
+                    self.clients.len().to_string(),
+                );
+                metric(
+                    &mut columns[2],
                     "Selected",
                     self.selected_client_id
                         .as_deref()
@@ -408,15 +471,15 @@ impl AdminApp {
                         .to_string(),
                 );
                 metric(
-                    &mut columns[2],
+                    &mut columns[3],
                     "Connection",
-                    if self.connected { "Online" } else { "Offline" }.to_string(),
+                    if self.connected {
+                        "Online"
+                    } else {
+                        "Reconnecting"
+                    }
+                    .to_string(),
                 );
-                if let Some(client) = self.selected_client() {
-                    metric(&mut columns[3], "Host", client.hostname.clone());
-                } else {
-                    metric(&mut columns[3], "Host", "None".to_string());
-                }
             });
         });
     }
@@ -433,9 +496,16 @@ impl AdminApp {
                     );
                 });
             });
+            ui.add_space(8.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.client_filter)
+                    .hint_text("Search by id, fingerprint, host, user, or OS")
+                    .desired_width(f32::INFINITY),
+            );
             ui.add_space(10.0);
 
-            if self.clients.is_empty() {
+            let clients = self.filtered_clients();
+            if clients.is_empty() {
                 empty_state(ui);
                 return;
             }
@@ -445,32 +515,37 @@ impl AdminApp {
                 .show(ui, |ui| {
                     egui::Grid::new("client_table")
                         .striped(true)
-                        .num_columns(5)
-                        .spacing([18.0, 10.0])
-                        .min_col_width(92.0)
+                        .num_columns(7)
+                        .spacing([14.0, 10.0])
+                        .min_col_width(82.0)
                         .show(ui, |ui| {
+                            table_header(ui, "Status");
                             table_header(ui, "Client ID");
+                            table_header(ui, "Fingerprint");
                             table_header(ui, "Host");
-                            table_header(ui, "OS");
                             table_header(ui, "User");
-                            table_header(ui, "GUI");
+                            table_header(ui, "OS");
+                            table_header(ui, "Last Heartbeat");
                             ui.end_row();
 
-                            let clients = self.clients.clone();
-                            for client in clients {
+                            for row in clients {
+                                let client = row.info;
                                 let selected =
                                     self.selected_client_id.as_deref() == Some(client.id.as_str());
-                                let response = ui.selectable_label(selected, &client.id);
+                                client_status_badge(ui, row.status);
+                                let response =
+                                    ui.selectable_label(selected, compact_id(&client.id));
                                 if response.clicked() {
                                     self.selected_client_id = Some(client.id.clone());
                                 }
                                 response
                                     .context_menu(|ui| render_context_menu(ui, &client.id, self));
 
+                                ui.label(egui::RichText::new(&client.fingerprint).size(12.0));
                                 ui.label(&client.hostname);
-                                ui.label(&client.os);
                                 ui.label(&client.username);
-                                ui.label(if client.gui_available { "Yes" } else { "No" });
+                                ui.label(&client.os);
+                                ui.label(last_seen_label(client.last_seen_epoch_ms));
                                 ui.end_row();
                             }
                         });
@@ -525,6 +600,7 @@ const COLOR_MUTED: egui::Color32 = egui::Color32::from_rgb(96, 108, 124);
 const COLOR_ACCENT: egui::Color32 = egui::Color32::from_rgb(35, 99, 188);
 const COLOR_GOOD: egui::Color32 = egui::Color32::from_rgb(24, 135, 84);
 const COLOR_BAD: egui::Color32 = egui::Color32::from_rgb(190, 58, 58);
+const COLOR_WARN: egui::Color32 = egui::Color32::from_rgb(179, 116, 28);
 
 fn apply_admin_theme(ctx: &egui::Context) {
     install_cjk_font(ctx);
@@ -611,12 +687,25 @@ fn table_header(ui: &mut egui::Ui, title: &str) {
     );
 }
 
-fn status_pill(ui: &mut egui::Ui, connected: bool) {
+fn connection_status_pill(ui: &mut egui::Ui, connected: bool) {
     let (text, color) = if connected {
         ("Online", COLOR_GOOD)
     } else {
-        ("Offline", COLOR_BAD)
+        ("Reconnecting", COLOR_BAD)
     };
+    status_badge(ui, text, color);
+}
+
+fn client_status_badge(ui: &mut egui::Ui, status: ClientStatus) {
+    let (text, color) = match status {
+        ClientStatus::Online => ("Online", COLOR_GOOD),
+        ClientStatus::Stale => ("Stale", COLOR_WARN),
+        ClientStatus::Offline => ("Offline", COLOR_BAD),
+    };
+    status_badge(ui, text, color);
+}
+
+fn status_badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     egui::Frame::default()
         .fill(color.gamma_multiply(0.10))
         .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.35)))
@@ -625,6 +714,47 @@ fn status_pill(ui: &mut egui::Ui, connected: bool) {
         .show(ui, |ui| {
             ui.label(egui::RichText::new(text).color(color).strong());
         });
+}
+
+fn compact_id(value: &str) -> String {
+    if value.len() > 22 {
+        format!("{}...", &value[..22])
+    } else {
+        value.to_string()
+    }
+}
+
+fn last_seen_label(last_seen_epoch_ms: u128) -> String {
+    if last_seen_epoch_ms == 0 {
+        return "Never".to_string();
+    }
+    format_epoch_utc(last_seen_epoch_ms / 1000)
+}
+
+fn format_epoch_utc(epoch_seconds: u128) -> String {
+    let seconds = epoch_seconds as i64;
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
+    let days = days_since_epoch + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_param = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_param + 2) / 5 + 1;
+    let month = month_param + if month_param < 10 { 3 } else { -9 };
+    year += if month <= 2 { 1 } else { 0 };
+    (year, month, day)
 }
 
 fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
