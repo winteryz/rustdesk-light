@@ -1,211 +1,256 @@
 # ROADMAP
 
-This roadmap turns the project from an empty workspace into a practical lightweight cross-platform remote assistance program with `server`, `client`, and `admin` modules.
+This project is a lightweight Rust remote assistance tool with three small parts:
 
-## Guiding Principles
+- `rdl-server`: presence, routing, and relay.
+- `rdl-client`: endpoint agent with GUI status and terminal fallback.
+- `rdl-admin`: operator GUI for listing clients and sending commands.
+- `rdl_protocol`: shared wire protocol and command model.
 
-- Build the safe remote-assistance path first: identity, consent, authentication, audit logs, and revocation before powerful operations.
-- Keep `server` dumb and reliable: presence, routing, relay, auth, and observability; avoid storing secrets or executing commands on the relay.
-- Keep platform-specific code behind narrow traits so Windows, macOS, and Linux can advance independently.
-- Prefer proven libraries for screen capture, input injection, audio, GUI, crypto, and multiplexing.
-- Every dangerous operation must have an explicit policy gate and audit event before it becomes functional.
+The project can reference `D:\workspace\code\rust\rustdesk` and
+`D:\workspace\code\rust\rustdesk-server` for architecture, naming, transport
+ideas, and platform backends, but it should not copy their full production
+complexity. The goal is a practical small tool first.
+
+## Principles
+
+- Keep the protocol consistent before adding features.
+- Keep the server simple: register peers, track presence, route messages, and log events.
+- Keep GUI lightweight with `egui/eframe`.
+- Keep headless/terminal mode working for testing and recovery.
+- Add risky capabilities gradually, with explicit user-visible behavior.
+- Prefer small, testable milestones over a large professional remote-desktop stack.
 
 ## Milestone 0: Workspace Foundation
 
 - [x] Create Rust workspace.
 - [x] Add `server`, `client`, `admin`, and shared `protocol` crates.
-- [x] Add `--ip` and `--port` startup arguments for `client` and `admin`.
-- [x] Add terminal `server`.
-- [x] Add GUI environment detection with terminal fallback for `client` and `admin`.
-- [x] Add online client registration and admin-visible client list.
-- [x] Add full admin command/menu vocabulary.
-- [x] Add command forwarding stubs from `admin` to `client`.
+- [x] Add `--ip` and `--port` startup arguments.
+- [x] Add terminal server.
+- [x] Add GUI startup with terminal fallback.
+- [x] Add online client registration.
+- [x] Add admin-visible client list.
+- [x] Add admin command/menu vocabulary.
+- [x] Add command forwarding stubs.
+- [x] Improve admin and client UI shells.
 
-## Milestone 1: Real Transport And Identity
+## Milestone 1: Stable Binary Transport Protocol
 
-- [ ] Replace ad-hoc text frames with a versioned binary or JSON protocol.
-- [ ] Add message ids, correlation ids, errors, request/response envelopes, and heartbeats.
-- [ ] Add TLS or Noise-based encryption.
-- [ ] Add server-issued session tokens.
-- [ ] Add client fingerprints and admin identities.
-- [ ] Add reconnect, exponential backoff, and stale-session cleanup.
-- [ ] Add structured logs and audit events.
-- [ ] Add integration tests for registration, list, command forwarding, reconnect, and offline clients.
+This is the next important milestone. All later features depend on this being stable.
 
-## Milestone 2: GUI Shells
+- [ ] Replace the current ad-hoc pipe-separated text frames with one shared versioned binary protocol.
+- [ ] Use one format everywhere: client, admin, and server must encode/decode the same message model.
+- [ ] Use RustDesk as the architectural reference: framed transport plus typed messages, but keep this project much smaller than RustDesk's full protobuf/rendezvous stack.
+- [ ] Start with a simple custom binary frame instead of JSON:
+  - magic bytes: `RDL1`
+  - protocol version
+  - frame length
+  - message id
+  - optional correlation id
+  - role: `client`, `admin`, or `server`
+  - message kind
+  - payload length
+  - payload bytes
+- [ ] Keep payloads typed in `rdl_protocol`; do not let server/client/admin invent separate encodings.
+- [ ] Keep strings as length-prefixed UTF-8 inside the binary payload.
+- [ ] Keep command enum values stable and documented.
+- [ ] Add encode/decode tests for every message type.
+- [ ] Add protocol errors as first-class messages.
+- [ ] Add heartbeat messages: `ping`, `pong`, and last-seen timestamps.
+- [ ] Add basic reconnect with backoff for client and admin.
+- [ ] Add stale client cleanup on the server.
+- [ ] Add integration tests for:
+  - client registration
+  - admin registration
+  - client list
+  - command forwarding
+  - command ack forwarding
+  - reconnect
+  - offline client command failure
 
-- [x] Choose GUI stack: `egui/eframe` for the lightweight native first pass.
-- [x] Implement first admin main window with online client table, action panel, logs, and context menu.
-- [x] Implement first client window with connection status, server config, client id, and session activity log.
-- [ ] Add grouping, status badges, search, filters, and richer admin table controls.
-- [ ] Add client consent settings and session permission controls.
-- [ ] Preserve terminal mode for headless Linux and recovery workflows.
-- [ ] Add packaging assets for Windows, macOS, and Linux.
+Notes:
 
-## Milestone 3: Consent, Policy, And Permissions
+- Do not use JSON for the transport protocol.
+- Do not pull in RustDesk's full protocol directly; implement a small compatible design style in `rdl_protocol`.
+- Protobuf can be considered later if the custom binary protocol grows too much, but Milestone 1 should be readable and maintainable in this repo.
+- Add a small protocol dump/debug tool or test helper so binary frames remain inspectable during development.
+- TLS/Noise encryption is intentionally not required in this milestone; first make the protocol consistent and tested.
 
-- [ ] Add per-client policy model for allowed capabilities.
-- [ ] Add local consent prompt for interactive sessions.
-- [ ] Add unattended mode with explicit enrollment key.
-- [ ] Add audit trail for every admin action.
-- [ ] Add role-based admin permissions.
-- [ ] Add kill switch to disable all remote control on a client.
+## Milestone 2: Identity And Local Trust
 
-## Milestone 4: System Information
+Keep identity useful but lightweight.
 
-- [ ] Implement computer information.
-- [ ] Implement clipboard read/write with platform permission checks.
-- [ ] Implement active connections.
-- [ ] Implement performance monitor.
-- [ ] Implement event logs.
-- [ ] Implement proxy capability reporting.
+- [ ] Add stable client fingerprint based on host/user/os plus generated local id.
+- [ ] Persist client id/fingerprint in a local config file.
+- [ ] Add admin identity string and display it in server logs.
+- [ ] Add server-issued session token after successful registration.
+- [ ] Require token on follow-up messages after registration.
+- [ ] Add clear server audit logs for connect, register, disconnect, list, command, and ack.
+- [ ] Add a simple enrollment key option later if unattended access is needed.
+
+Reference direction:
+
+- RustDesk has richer identity, rendezvous, and relay behavior. This project only needs the small subset required to keep peers recognizable and messages attributable.
+
+## Milestone 3: UI And Operator Workflow
+
+- [x] Admin GUI with command menu, overview, client list, and activity log.
+- [x] Client GUI with status and activity log.
+- [ ] Add admin search/filter for clients.
+- [ ] Add clearer status badges: online, offline, reconnecting, stale.
+- [ ] Show client fingerprint, hostname, user, OS, and last seen.
+- [ ] Add a simple command result panel.
+- [ ] Preserve terminal mode for smoke tests.
+
+## Milestone 4: Basic Client Capabilities
+
+Implement read-only and low-risk commands first.
+
+- [ ] Computer info.
+- [ ] Clipboard read/write as explicit command stubs, then real implementation.
+- [ ] Active connections.
+- [ ] Process list.
+- [ ] Performance snapshot.
+- [ ] Event log summary where available.
+
+Reference direction:
+
+- Look at RustDesk platform modules for how it separates OS-specific behavior, but keep this repo's API much smaller.
 
 ## Milestone 5: User Interaction
 
-- [ ] Implement message box.
-- [ ] Implement balloon/system notification.
-- [ ] Implement text chat.
-- [ ] Implement notepad/text opening behavior per platform.
-- [ ] Implement voice chat after audio permission and codec spike.
+- [ ] Message box.
+- [ ] System notification / balloon tip.
+- [ ] Text chat.
+- [ ] Open text in notepad or platform equivalent.
 
-## Milestone 6: File And Terminal Management
+These are useful before full remote desktop because they validate bidirectional command/result flow.
 
-- [ ] Implement authenticated file browser.
-- [ ] Implement upload/download with resume and hash verification.
-- [ ] Implement remote terminal with explicit policy and audit.
-- [ ] Add command timeout, output streaming, cancellation, and PTY support.
-- [ ] Add safe default deny for privileged commands.
+## Milestone 6: File And Terminal Basics
 
-## Milestone 7: System Management
+- [ ] Remote terminal command execution with timeout.
+- [ ] Command output streaming.
+- [ ] File list for a selected directory.
+- [ ] File download.
+- [ ] File upload.
 
-- [ ] Implement process listing and process termination with policy checks.
-- [ ] Implement window listing and focus/close actions where supported.
-- [ ] Implement startup item management.
-- [ ] Implement Windows registry management behind Windows-only feature gates.
-- [ ] Implement driver listing with platform-specific backends.
-- [ ] Implement shutdown and reboot with confirmation and audit.
-- [ ] Implement update, uninstall, and end-client-process flows.
+Keep this simple first. Resume, hashing, cancellation, PTY, and permissions can come later.
 
-## Milestone 8: Real-Time Desktop Control
+## Milestone 7: Screen View First
 
-- [ ] Add screen capture backend per platform.
-- [ ] Add video encoding and adaptive frame rate.
-- [ ] Add input injection backend per platform.
-- [ ] Add clipboard sync for desktop sessions.
-- [ ] Add multi-monitor selection.
-- [ ] Add permission prompts for macOS Screen Recording and Accessibility.
-- [ ] Add Wayland/X11 support detection and fallback.
+Build view-only remote desktop before input control.
 
-## Milestone 9: Media Devices
+- [ ] Capture screen frame on client.
+- [ ] Send compressed image frames to admin.
+- [ ] Display remote screen in admin.
+- [ ] Add frame rate limit.
+- [ ] Add single-monitor first.
 
-- [ ] Add camera capability discovery.
-- [ ] Add camera streaming with visible local indicator.
-- [ ] Add microphone/audio capture with visible local indicator.
-- [ ] Add admin-side playback and recording policy.
+Reference direction:
 
-## Milestone 10: Execution And Automation
+- Use RustDesk as a reference for screen capture and encoding choices, but start with the smallest working frame transport.
 
-- [ ] Implement execute file.
-- [ ] Implement code execution only under explicit policy, sandboxing, and audit.
-- [ ] Implement static command templates.
-- [ ] Implement task creation/scheduling.
-- [ ] Implement command presets with signing and versioning.
+## Milestone 8: Remote Control
 
-## Milestone 11: Plugins
+- [ ] Mouse movement.
+- [ ] Mouse click.
+- [ ] Keyboard input.
+- [ ] Clipboard sync during remote session.
+- [ ] Local visible indicator while remote control is active.
 
-- [ ] Define plugin manifest and capability declarations.
-- [ ] Add plugin manager UI.
-- [ ] Add signed plugin loading.
-- [ ] Add plugin sandbox and permission prompts.
-- [ ] Add first-party examples for read-only info panels.
+This should only be implemented after screen view and protocol reliability are good enough.
 
-## Milestone 12: Production Hardening
+## Milestone 9: Packaging And Runtime
 
-- [ ] Add persistent config files.
-- [ ] Add auto-update channel.
-- [ ] Add service/daemon mode.
-- [ ] Add NAT traversal or relay optimization.
-- [ ] Add metrics and health checks.
-- [ ] Add rate limiting and abuse protection on server.
-- [ ] Add release builds for Windows, macOS, and Linux.
-- [ ] Add end-to-end tests on all supported platforms.
+- [ ] Persistent config files.
+- [ ] Server config file.
+- [ ] Windows build artifact.
+- [ ] Linux build artifact.
+- [ ] Optional service/daemon mode.
+- [ ] Basic release script.
 
-## Admin Context Menu Map
+## Not Planned For Now
+
+These are useful in a professional product but too heavy for the current lightweight goal:
+
+- Plugin sandbox.
+- Full role-based access control.
+- Enterprise audit database.
+- Multi-tenant server.
+- NAT traversal optimization.
+- Camera and microphone streaming.
+- Auto-update system.
+- Signed plugin loading.
+- Complex task scheduler.
+
+They can be reconsidered only after the basic remote assistance flow works reliably.
+
+## Command Menu Map
 
 ```text
-会话
-├─ 客户端
-│  ├─ 更新客户端: update_client
-│  ├─ 卸载客户端: uninstall_client
-│  └─ 结束客户端进程: kill_client_process
-│
-├─ 系统电源
-│  ├─ 关机: shutdown
-│  └─ 重启: reboot
-│
-└─ 会话管理
-   ├─ 移动到分组: move_to_group
-   ├─ 克隆客户端设置: clone_client_settings
-   └─ 删除客户端: delete_client
+Session
+  Client
+    Update Client: update_client
+    Uninstall Client: uninstall_client
+    Kill Client Process: kill_client_process
+  Power
+    Shutdown: shutdown
+    Reboot: reboot
+  Session Management
+    Move To Group: move_to_group
+    Clone Client Settings: clone_client_settings
+    Delete Client: delete_client
 
-远程管理
-├─ 文件与终端
-│  ├─ 文件管理: file_manager
-│  └─ 远程终端: remote_terminal
-│
-├─ 系统管理
-│  ├─ 进程管理: process_manager
-│  ├─ 窗口管理: window_manager
-│  ├─ 启动项管理: startup_manager
-│  ├─ 注册表管理: registry_manager
-│  ├─ 驱动管理: driver_manager
-│  └─ 事件日志: event_log
-│
-└─ 系统监控
-   ├─ 活动连接: active_connections
-   └─ 性能监视: performance_monitor
+Remote Management
+  Files And Terminal
+    File Manager: file_manager
+    Remote Terminal: remote_terminal
+  System Tools
+    Process Manager: process_manager
+    Window Manager: window_manager
+    Startup Manager: startup_manager
+    Registry Manager: registry_manager
+    Driver Manager: driver_manager
+    Event Log: event_log
+  Monitoring
+    Active Connections: active_connections
+    Performance Monitor: performance_monitor
 
-实时控制
-├─ 桌面控制
-│  └─ 远程桌面: remote_desktop
-│
-└─ 媒体设备
-   ├─ 摄像头: camera
-   └─ 音频监听: audio_listen
+Live Control
+  Desktop
+    Remote Desktop: remote_desktop
+  Media Devices
+    Camera: camera
+    Audio Listen: audio_listen
 
-用户交互
-├─ 用户提示
-│  ├─ 消息框: message_box
-│  └─ 气泡提示: balloon_tip
-│
-├─ 通信功能
-│  ├─ 文本聊天: text_chat
-│  └─ 语音聊天: voice_chat
-│
-└─ 文本交互
-   └─ 记事本打开文本: open_text_in_notepad
+User Interaction
+  Prompts
+    Message Box: message_box
+    Balloon Tip: balloon_tip
+  Communication
+    Text Chat: text_chat
+    Voice Chat: voice_chat
+  Text Actions
+    Open Text In Notepad: open_text_in_notepad
 
-系统信息
-├─ 基础信息
-│  ├─ 计算机信息: computer_info
-│  └─ 剪贴板: clipboard
-│
-└─ 网络能力
-   └─ 代理: proxy
+System Info
+  Basics
+    Computer Info: computer_info
+    Clipboard: clipboard
+  Network
+    Proxy: proxy
 
-执行
-├─ 代码与文件执行
-│  ├─ 执行文件: execute_file
-│  └─ 代码执行: execute_code
-│
-├─ 任务功能
-│  ├─ 执行静态命令: execute_static_command
-│  └─ 创建任务: create_task
-│
-└─ 自动化
-   └─ 命令预设: command_preset
+Execute
+  Code And Files
+    Execute File: execute_file
+    Execute Code: execute_code
+  Tasks
+    Execute Static Command: execute_static_command
+    Create Task: create_task
+  Automation
+    Command Preset: command_preset
 
-插件
-└─ 扩展功能
-   └─ 插件管理: plugin_manager
+Plugins
+  Extensions
+    Plugin Manager: plugin_manager
 ```
