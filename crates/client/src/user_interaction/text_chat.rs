@@ -14,6 +14,7 @@ pub(crate) struct ChatWindow {
     outbound: Arc<Mutex<Vec<String>>>,
     open: bool,
     close_requested: Arc<AtomicBool>,
+    focus_requested: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -29,9 +30,11 @@ pub(crate) fn receive_admin_message(window: &mut Option<ChatWindow>, text: Strin
         outbound: Arc::new(Mutex::new(Vec::new())),
         open: true,
         close_requested: Arc::new(AtomicBool::new(false)),
+        focus_requested: Arc::new(AtomicBool::new(false)),
     });
     window.open = true;
     window.close_requested.store(false, Ordering::Relaxed);
+    window.focus_requested.store(true, Ordering::Relaxed);
     push_line(window, "Admin", &text);
 }
 
@@ -58,8 +61,12 @@ pub(crate) fn render_window(ctx: &egui::Context, window: &mut Option<ChatWindow>
     let draft = window.draft.clone();
     let outbound_queue = window.outbound.clone();
     let close_requested = window.close_requested.clone();
+    let focus_requested = window.focus_requested.clone();
 
     ctx.show_viewport_immediate(viewport_id, builder, move |ui, _class| {
+        if focus_requested.swap(false, Ordering::Relaxed) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         if ui.ctx().input(|input| input.viewport().close_requested()) {
             close_requested.store(true, Ordering::Relaxed);
         }

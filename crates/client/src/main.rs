@@ -36,6 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_gui(config: Config) -> eframe::Result {
+    disable_macos_automatic_window_tabbing();
+
     let identity = load_client_identity();
     let (event_tx, event_rx) = mpsc::channel();
     let (input_tx, input_rx) = mpsc::channel();
@@ -79,6 +81,16 @@ fn run_gui(config: Config) -> eframe::Result {
         }),
     )
 }
+
+#[cfg(target_os = "macos")]
+fn disable_macos_automatic_window_tabbing() {
+    if let Some(main_thread) = objc2_foundation::MainThreadMarker::new() {
+        objc2_app_kit::NSWindow::setAllowsAutomaticWindowTabbing(false, main_thread);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn disable_macos_automatic_window_tabbing() {}
 
 fn run_terminal(config: Config) -> io::Result<()> {
     let identity = load_client_identity();
