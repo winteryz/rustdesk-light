@@ -107,12 +107,12 @@ Reference direction:
 
 Implement read-only and low-risk commands first.
 
-- [ ] Computer info.
-- [ ] Clipboard read/write as explicit command stubs, then real implementation.
-- [ ] Active connections.
-- [ ] Process list.
-- [ ] Performance snapshot.
-- [ ] Event log summary where available.
+- [x] Computer info.
+- [x] Clipboard read/write as explicit command stubs, then real implementation.
+- [x] Active connections.
+- [x] Process list.
+- [x] Performance snapshot.
+- [x] Event log summary where available.
 
 Reference direction:
 

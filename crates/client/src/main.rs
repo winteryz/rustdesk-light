@@ -1,3 +1,5 @@
+mod capabilities;
+
 use eframe::egui;
 use rdl_protocol::{
     read_envelope, write_envelope_with_token, CommandKind, Message, Role, DEFAULT_SERVER_IP,
@@ -150,7 +152,7 @@ fn client_connection_once(
                 command,
                 payload,
             } => {
-                let detail = handle_command(&command, &payload, gui_mode);
+                let detail = capabilities::handle_command(&command, &payload, gui_mode);
                 let _ = event_tx.send(ClientEvent::Command {
                     command: command.clone(),
                     payload,
@@ -398,31 +400,6 @@ enum ClientEvent {
         payload: String,
     },
     Log(String),
-}
-
-fn handle_command(command: &CommandKind, payload: &str, gui_mode: bool) -> String {
-    match command {
-        CommandKind::ComputerInfo => format!(
-            "hostname={} os={} arch={} user={}",
-            hostname(),
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            username()
-        ),
-        CommandKind::MessageBox | CommandKind::BalloonTip | CommandKind::TextChat => {
-            if gui_mode {
-                format!("shown in client gui log: {payload}")
-            } else {
-                println!("admin message: {payload}");
-                "shown in terminal fallback".to_string()
-            }
-        }
-        _ => format!(
-            "{} accepted as planned stub; payload='{}'",
-            command.as_str(),
-            payload
-        ),
-    }
 }
 
 fn send(
