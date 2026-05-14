@@ -5,7 +5,10 @@ use rdl_protocol::{
 };
 use std::io::{self, BufRead};
 use std::net::{Shutdown, TcpStream};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{
+    mpsc::{self, Receiver, Sender},
+    Arc,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -318,6 +321,13 @@ impl AdminApp {
                             .color(COLOR_MUTED),
                     );
                 }
+                ui.menu_button("中文测试", |ui| {
+                    if ui.button("输出中文日志").clicked() {
+                        self.log_lines
+                            .push("中文日志测试：菜单和日志应正常显示，不应乱码。".to_string());
+                        ui.close();
+                    }
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if primary_button(ui, "Refresh").clicked() {
                         let _ = self.input_tx.send(AdminInput::List);
@@ -431,7 +441,7 @@ impl AdminApp {
                 .max_height(180.0)
                 .show(ui, |ui| {
                     for line in &self.log_lines {
-                        ui.monospace(egui::RichText::new(line).size(12.0).color(COLOR_MUTED));
+                        ui.label(egui::RichText::new(line).size(12.0).color(COLOR_MUTED));
                     }
                 });
         });
@@ -470,6 +480,8 @@ const COLOR_GOOD: egui::Color32 = egui::Color32::from_rgb(24, 135, 84);
 const COLOR_BAD: egui::Color32 = egui::Color32::from_rgb(190, 58, 58);
 
 fn apply_admin_theme(ctx: &egui::Context) {
+    install_cjk_font(ctx);
+
     let mut style = (*ctx.global_style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 7.0);
@@ -483,6 +495,46 @@ fn apply_admin_theme(ctx: &egui::Context) {
     style.visuals.selection.bg_fill = egui::Color32::from_rgb(216, 232, 252);
     style.visuals.selection.stroke.color = COLOR_ACCENT;
     ctx.set_global_style(style);
+}
+
+fn install_cjk_font(ctx: &egui::Context) {
+    let Some(font_bytes) = load_system_cjk_font() else {
+        return;
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    let font_name = "rdl_cjk_fallback".to_string();
+    fonts.font_data.insert(
+        font_name.clone(),
+        Arc::new(egui::FontData::from_owned(font_bytes)),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, font_name.clone());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push(font_name);
+    ctx.set_fonts(fonts);
+}
+
+fn load_system_cjk_font() -> Option<Vec<u8>> {
+    let candidates = [
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\msyh.ttf",
+        "C:\\Windows\\Fonts\\simhei.ttf",
+        "C:\\Windows\\Fonts\\simsun.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    ];
+
+    candidates.iter().find_map(|path| std::fs::read(path).ok())
 }
 
 fn panel(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
