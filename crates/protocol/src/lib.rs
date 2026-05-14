@@ -9,7 +9,7 @@ pub const FRAME_MAGIC: [u8; 4] = *b"RDL1";
 pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 
 const HEADER_LEN: usize = 10;
-const ENVELOPE_FIXED_LEN: usize = 23;
+const ENVELOPE_FIXED_LEN: usize = 27;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Role {
@@ -260,6 +260,7 @@ impl CommandKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientInfo {
     pub id: String,
+    pub fingerprint: String,
     pub hostname: String,
     pub os: String,
     pub username: String,
@@ -272,6 +273,7 @@ pub enum Message {
     Hello {
         role: Role,
         id: String,
+        fingerprint: String,
         hostname: String,
         os: String,
         username: String,
@@ -293,6 +295,9 @@ pub enum Message {
     Error {
         detail: String,
     },
+    Session {
+        token: String,
+    },
     Ping,
     Pong,
 }
@@ -306,8 +311,9 @@ impl Message {
             Self::Command { .. } => 4,
             Self::CommandAck { .. } => 5,
             Self::Error { .. } => 6,
-            Self::Ping => 7,
-            Self::Pong => 8,
+            Self::Session { .. } => 7,
+            Self::Ping => 8,
+            Self::Pong => 9,
         }
     }
 
@@ -316,6 +322,7 @@ impl Message {
             Self::Hello {
                 role,
                 id,
+                fingerprint,
                 hostname,
                 os,
                 username,
@@ -323,6 +330,7 @@ impl Message {
             } => {
                 writer.u8(role.to_code());
                 writer.string(id);
+                writer.string(fingerprint);
                 writer.string(hostname);
                 writer.string(os);
                 writer.string(username);
@@ -333,6 +341,7 @@ impl Message {
                 writer.u32(clients.len() as u32);
                 for client in clients {
                     writer.string(&client.id);
+                    writer.string(&client.fingerprint);
                     writer.string(&client.hostname);
                     writer.string(&client.os);
                     writer.string(&client.username);
@@ -361,6 +370,7 @@ impl Message {
                 writer.string(detail);
             }
             Self::Error { detail } => writer.string(detail),
+            Self::Session { token } => writer.string(token),
         }
     }
 
@@ -370,6 +380,7 @@ impl Message {
             1 => Self::Hello {
                 role: Role::from_code(reader.u8()?)?,
                 id: reader.string()?,
+                fingerprint: reader.string()?,
                 hostname: reader.string()?,
                 os: reader.string()?,
                 username: reader.string()?,
@@ -382,6 +393,7 @@ impl Message {
                 for _ in 0..count {
                     clients.push(ClientInfo {
                         id: reader.string()?,
+                        fingerprint: reader.string()?,
                         hostname: reader.string()?,
                         os: reader.string()?,
                         username: reader.string()?,
@@ -405,8 +417,11 @@ impl Message {
             6 => Self::Error {
                 detail: reader.string()?,
             },
-            7 => Self::Ping,
-            8 => Self::Pong,
+            7 => Self::Session {
+                token: reader.string()?,
+            },
+            8 => Self::Ping,
+            9 => Self::Pong,
             _ => return Err(ProtocolError::InvalidMessageKind(kind)),
         };
         reader.finish()?;
@@ -420,6 +435,7 @@ pub struct Envelope {
     pub message_id: u64,
     pub correlation_id: Option<u64>,
     pub role: Role,
+    pub session_token: String,
     pub message: Message,
 }
 
@@ -427,7 +443,10 @@ pub fn encode_envelope(envelope: &Envelope) -> Result<Vec<u8>, ProtocolError> {
     let mut payload = BinaryWriter::default();
     envelope.message.encode_payload(&mut payload);
     let payload = payload.into_inner();
+    let token = envelope.session_token.as_bytes();
     let remaining_len = ENVELOPE_FIXED_LEN
+        .checked_add(token.len())
+        .ok_or(ProtocolError::FrameTooLarge)?
         .checked_add(payload.len())
         .ok_or(ProtocolError::FrameTooLarge)?;
     if remaining_len > MAX_FRAME_LEN as usize {
@@ -442,7 +461,9 @@ pub fn encode_envelope(envelope: &Envelope) -> Result<Vec<u8>, ProtocolError> {
     frame.extend_from_slice(&envelope.correlation_id.unwrap_or_default().to_be_bytes());
     frame.push(envelope.role.to_code());
     frame.extend_from_slice(&envelope.message.kind_code().to_be_bytes());
+    frame.extend_from_slice(&(token.len() as u32).to_be_bytes());
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(token);
     frame.extend_from_slice(&payload);
     Ok(frame)
 }
@@ -476,7 +497,10 @@ pub fn decode_envelope(frame: &[u8]) -> Result<Envelope, ProtocolError> {
     };
     let role = Role::from_code(reader.u8()?)?;
     let kind = reader.u16()?;
+    let token_len = reader.u32()? as usize;
     let payload_len = reader.u32()? as usize;
+    let session_token = String::from_utf8(reader.bytes(token_len)?.to_vec())
+        .map_err(|_| ProtocolError::InvalidUtf8)?;
     let payload = reader.bytes(payload_len)?;
     reader.finish()?;
 
@@ -485,6 +509,7 @@ pub fn decode_envelope(frame: &[u8]) -> Result<Envelope, ProtocolError> {
         message_id,
         correlation_id,
         role,
+        session_token,
         message: Message::decode_payload(kind, payload)?,
     })
 }
@@ -496,11 +521,23 @@ pub fn write_envelope(
     correlation_id: Option<u64>,
     message: Message,
 ) -> io::Result<()> {
+    write_envelope_with_token(writer, role, message_id, correlation_id, "", message)
+}
+
+pub fn write_envelope_with_token(
+    writer: &mut impl Write,
+    role: Role,
+    message_id: u64,
+    correlation_id: Option<u64>,
+    session_token: &str,
+    message: Message,
+) -> io::Result<()> {
     let envelope = Envelope {
         version: PROTOCOL_VERSION,
         message_id,
         correlation_id,
         role,
+        session_token: session_token.to_string(),
         message,
     };
     let frame = encode_envelope(&envelope).map_err(to_invalid_data)?;

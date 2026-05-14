@@ -49,7 +49,9 @@ This is the next important milestone. All later features depend on this being st
   - optional correlation id
   - role: `client`, `admin`, or `server`
   - message kind
+  - session token length
   - payload length
+  - session token bytes
   - payload bytes
 - [x] Keep payloads typed in `rdl_protocol`; do not let server/client/admin invent separate encodings.
 - [x] Keep strings as length-prefixed UTF-8 inside the binary payload.
@@ -79,12 +81,12 @@ Notes:
 
 Keep identity useful but lightweight.
 
-- [ ] Add stable client fingerprint based on host/user/os plus generated local id.
-- [ ] Persist client id/fingerprint in a local config file.
-- [ ] Add admin identity string and display it in server logs.
-- [ ] Add server-issued session token after successful registration.
-- [ ] Require token on follow-up messages after registration.
-- [ ] Add clear server audit logs for connect, register, disconnect, list, command, and ack.
+- [x] Add stable client fingerprint based on host/user/os plus generated local id.
+- [x] Persist client id/fingerprint in a local config file.
+- [x] Add admin identity string and display it in server logs.
+- [x] Add server-issued session token after successful registration.
+- [x] Require token on follow-up messages after registration.
+- [x] Add clear server audit logs for connect, register, disconnect, list, command, and ack.
 - [ ] Add a simple enrollment key option later if unattended access is needed.
 
 Reference direction:

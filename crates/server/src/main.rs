@@ -18,10 +18,13 @@ enum ServerEvent {
     Registered {
         peer_id: usize,
         role: Role,
+        identity: String,
+        fingerprint: String,
         info: Option<ClientInfo>,
     },
     Message {
         peer_id: usize,
+        session_token: String,
         message: Message,
     },
     Disconnected {
@@ -32,6 +35,9 @@ enum ServerEvent {
 #[derive(Clone)]
 struct Peer {
     role: Option<Role>,
+    identity: Option<String>,
+    fingerprint: Option<String>,
+    session_token: Option<String>,
     sender: Sender<Message>,
     client_info: Option<ClientInfo>,
     last_seen_epoch_ms: u128,
@@ -101,6 +107,7 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
             Message::Hello {
                 role,
                 id,
+                fingerprint,
                 hostname,
                 os,
                 username,
@@ -108,7 +115,8 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
             } => {
                 let info = if role == Role::Client {
                     Some(ClientInfo {
-                        id,
+                        id: id.clone(),
+                        fingerprint: fingerprint.clone(),
                         hostname,
                         os,
                         username,
@@ -121,11 +129,17 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
                 let _ = events_tx.send(ServerEvent::Registered {
                     peer_id,
                     role,
+                    identity: id,
+                    fingerprint,
                     info,
                 });
             }
             message => {
-                let _ = events_tx.send(ServerEvent::Message { peer_id, message });
+                let _ = events_tx.send(ServerEvent::Message {
+                    peer_id,
+                    session_token: envelope.session_token,
+                    message,
+                });
             }
         }
     }
@@ -164,70 +178,135 @@ fn event_loop(events_rx: Receiver<ServerEvent>) {
                     peer_id,
                     Peer {
                         role: None,
+                        identity: None,
+                        fingerprint: None,
+                        session_token: None,
                         sender,
                         client_info: None,
                         last_seen_epoch_ms: now_epoch_ms(),
                         last_ping_epoch_ms: 0,
                     },
                 );
-                println!("peer #{peer_id} connected");
+                println!("audit event=connect peer=#{peer_id}");
             }
             ServerEvent::Registered {
                 peer_id,
                 role,
+                identity,
+                fingerprint,
                 info,
             } => {
+                let token = new_session_token(peer_id, &identity, &fingerprint);
                 if let Some(peer) = peers.get_mut(&peer_id) {
                     peer.role = Some(role.clone());
+                    peer.identity = Some(identity.clone());
+                    peer.fingerprint = Some(fingerprint.clone());
+                    peer.session_token = Some(token.clone());
                     peer.client_info = info.clone();
                     peer.last_seen_epoch_ms = now_epoch_ms();
+                    let _ = peer.sender.send(Message::Session { token });
                 }
-                println!("peer #{peer_id} registered as {}", role.as_str());
+                println!(
+                    "audit event=register peer=#{peer_id} role={} identity={} fingerprint={}",
+                    role.as_str(),
+                    identity,
+                    fingerprint
+                );
                 broadcast_clients(&peers);
             }
-            ServerEvent::Message { peer_id, message } => match message {
-                Message::ListClients => {
-                    mark_seen(peer_id, &mut peers);
-                    send_clients(peer_id, &peers);
-                }
-                Message::Command {
-                    target_id,
-                    command,
-                    payload,
-                } => {
-                    mark_seen(peer_id, &mut peers);
-                    let detail = route_command(&peers, &target_id, command.clone(), payload);
+            ServerEvent::Message {
+                peer_id,
+                session_token,
+                message,
+            } => {
+                if !session_token_valid(peer_id, &session_token, &peers) {
+                    println!(
+                        "audit event=invalid_token peer=#{peer_id} identity={}",
+                        peer_identity(peer_id, &peers)
+                    );
                     if let Some(peer) = peers.get(&peer_id) {
-                        let _ = peer.sender.send(Message::CommandAck {
-                            client_id: target_id,
-                            command,
-                            accepted: detail.is_none(),
-                            detail: detail.unwrap_or_else(|| "forwarded".to_string()),
+                        let _ = peer.sender.send(Message::Error {
+                            detail: "invalid or missing session token".to_string(),
                         });
                     }
+                    continue;
                 }
-                Message::CommandAck { .. } => {
-                    mark_seen(peer_id, &mut peers);
-                    for peer in peers.values() {
-                        if peer.role == Some(Role::Admin) {
-                            let _ = peer.sender.send(message.clone());
+
+                match message {
+                    Message::ListClients => {
+                        mark_seen(peer_id, &mut peers);
+                        println!(
+                            "audit event=list peer=#{peer_id} identity={}",
+                            peer_identity(peer_id, &peers)
+                        );
+                        send_clients(peer_id, &peers);
+                    }
+                    Message::Command {
+                        target_id,
+                        command,
+                        payload,
+                    } => {
+                        mark_seen(peer_id, &mut peers);
+                        println!(
+                            "audit event=command peer=#{peer_id} identity={} target={} command={}",
+                            peer_identity(peer_id, &peers),
+                            target_id,
+                            command.as_str()
+                        );
+                        let detail = route_command(&peers, &target_id, command.clone(), payload);
+                        if let Some(peer) = peers.get(&peer_id) {
+                            let _ = peer.sender.send(Message::CommandAck {
+                                client_id: target_id,
+                                command,
+                                accepted: detail.is_none(),
+                                detail: detail.unwrap_or_else(|| "forwarded".to_string()),
+                            });
                         }
                     }
-                }
-                Message::Ping => {
-                    mark_seen(peer_id, &mut peers);
-                    if let Some(peer) = peers.get(&peer_id) {
-                        let _ = peer.sender.send(Message::Pong);
+                    Message::CommandAck {
+                        client_id,
+                        command,
+                        accepted,
+                        detail,
+                    } => {
+                        mark_seen(peer_id, &mut peers);
+                        let identity = peer_identity(peer_id, &peers);
+                        println!(
+                            "audit event=ack peer=#{peer_id} identity={identity} client={client_id} command={} accepted={accepted}",
+                            command.as_str()
+                        );
+                        let message = Message::CommandAck {
+                            client_id,
+                            command,
+                            accepted,
+                            detail,
+                        };
+                        for peer in peers.values() {
+                            if peer.role == Some(Role::Admin) {
+                                let _ = peer.sender.send(message.clone());
+                            }
+                        }
                     }
+                    Message::Ping => {
+                        mark_seen(peer_id, &mut peers);
+                        if let Some(peer) = peers.get(&peer_id) {
+                            let _ = peer.sender.send(Message::Pong);
+                        }
+                    }
+                    Message::Pong => {
+                        mark_seen(peer_id, &mut peers);
+                    }
+                    other => eprintln!("peer #{peer_id} sent unsupported message: {other:?}"),
                 }
-                Message::Pong => {
-                    mark_seen(peer_id, &mut peers);
-                }
-                other => eprintln!("peer #{peer_id} sent unsupported message: {other:?}"),
-            },
+            }
             ServerEvent::Disconnected { peer_id } => {
                 let removed = peers.remove(&peer_id);
-                println!("peer #{peer_id} disconnected");
+                let identity = removed
+                    .as_ref()
+                    .and_then(|peer| peer.identity.as_deref())
+                    .unwrap_or("unknown")
+                    .to_string();
+                println!("audit event=disconnect peer=#{peer_id} identity={identity}");
                 if removed.and_then(|peer| peer.client_info).is_some() {
                     broadcast_clients(&peers);
                 }
@@ -243,17 +322,55 @@ fn mark_seen(peer_id: usize, peers: &mut HashMap<usize, Peer>) {
     }
 }
 
+fn session_token_valid(peer_id: usize, token: &str, peers: &HashMap<usize, Peer>) -> bool {
+    peers
+        .get(&peer_id)
+        .and_then(|peer| peer.session_token.as_deref())
+        .map(|expected| !expected.is_empty() && expected == token)
+        .unwrap_or(false)
+}
+
+fn peer_identity(peer_id: usize, peers: &HashMap<usize, Peer>) -> String {
+    peers
+        .get(&peer_id)
+        .and_then(|peer| peer.identity.clone())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn new_session_token(peer_id: usize, identity: &str, fingerprint: &str) -> String {
+    format!(
+        "st-{:x}-{:x}-{:x}",
+        now_epoch_ms(),
+        simple_hash(identity),
+        simple_hash(&format!("{peer_id}|{fingerprint}|{}", std::process::id()))
+    )
+}
+
+fn simple_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 fn maintain_peers(peers: &mut HashMap<usize, Peer>) {
     let now = now_epoch_ms();
     let mut stale_client_removed = false;
 
     for (peer_id, peer) in peers.iter_mut() {
-        if now.saturating_sub(peer.last_ping_epoch_ms) >= HEARTBEAT_INTERVAL_MS {
+        if peer.session_token.is_some()
+            && now.saturating_sub(peer.last_ping_epoch_ms) >= HEARTBEAT_INTERVAL_MS
+        {
             peer.last_ping_epoch_ms = now;
             let _ = peer.sender.send(Message::Ping);
         }
         if now.saturating_sub(peer.last_seen_epoch_ms) > STALE_PEER_MS {
-            println!("peer #{peer_id} stale; removing from presence");
+            println!(
+                "audit event=stale peer=#{peer_id} identity={}",
+                peer.identity.as_deref().unwrap_or("unknown")
+            );
         }
     }
 

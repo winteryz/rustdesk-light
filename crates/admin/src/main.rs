@@ -1,10 +1,12 @@
 use eframe::egui;
 use rdl_protocol::{
-    read_envelope, write_envelope, ClientInfo, CommandKind, Message, Role, DEFAULT_SERVER_IP,
-    DEFAULT_SERVER_PORT,
+    read_envelope, write_envelope_with_token, ClientInfo, CommandKind, Message, Role,
+    DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT,
 };
+use std::fs;
 use std::io::{self, BufRead};
 use std::net::{Shutdown, TcpStream};
+use std::path::PathBuf;
 use std::sync::{
     mpsc::{self, Receiver, Sender},
     Arc,
@@ -71,8 +73,9 @@ fn run_terminal(config: Config) -> io::Result<()> {
                 println!("online clients: {}", clients.len());
                 for client in clients {
                     println!(
-                        "- {} | host={} os={} user={} gui={}",
+                        "- {} | fp={} | host={} os={} user={} gui={}",
                         client.id,
+                        client.fingerprint,
                         client.hostname,
                         client.os,
                         client.username,
@@ -133,28 +136,42 @@ fn admin_connection_once(
     input_rx: &Receiver<AdminInput>,
     event_tx: &Sender<AdminEvent>,
 ) -> io::Result<AdminConnectionExit> {
+    let identity = load_admin_identity();
     let mut stream = TcpStream::connect(format!("{}:{}", config.ip, config.port))?;
     stream.set_read_timeout(Some(Duration::from_millis(500)))?;
     let mut next_message_id = 1u64;
     send(
         &mut stream,
         &mut next_message_id,
+        "",
         Message::Hello {
             role: Role::Admin,
-            id: "admin".to_string(),
+            id: identity.id,
+            fingerprint: identity.fingerprint,
             hostname: hostname(),
             os: std::env::consts::OS.to_string(),
             username: username(),
             gui_available: true,
         },
     )?;
-    send(&mut stream, &mut next_message_id, Message::ListClients)?;
+    let session_token = wait_for_session(&mut stream, event_tx)?;
+    send(
+        &mut stream,
+        &mut next_message_id,
+        &session_token,
+        Message::ListClients,
+    )?;
     let _ = event_tx.send(AdminEvent::Connected);
 
     loop {
         while let Ok(input) = input_rx.try_recv() {
             let result = match input {
-                AdminInput::List => send(&mut stream, &mut next_message_id, Message::ListClients),
+                AdminInput::List => send(
+                    &mut stream,
+                    &mut next_message_id,
+                    &session_token,
+                    Message::ListClients,
+                ),
                 AdminInput::Command {
                     target_id,
                     command,
@@ -162,6 +179,7 @@ fn admin_connection_once(
                 } => send(
                     &mut stream,
                     &mut next_message_id,
+                    &session_token,
                     Message::Command {
                         target_id,
                         command,
@@ -211,9 +229,38 @@ fn admin_connection_once(
                     detail,
                 });
             }
-            Message::Ping => send(&mut stream, &mut next_message_id, Message::Pong)?,
+            Message::Ping => send(
+                &mut stream,
+                &mut next_message_id,
+                &session_token,
+                Message::Pong,
+            )?,
             other => {
                 let _ = event_tx.send(AdminEvent::Log(format!("server: {other:?}")));
+            }
+        }
+    }
+}
+
+fn wait_for_session(stream: &mut TcpStream, event_tx: &Sender<AdminEvent>) -> io::Result<String> {
+    loop {
+        let message = match read_envelope(stream) {
+            Ok(envelope) => envelope.message,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+
+        match message {
+            Message::Session { token } => return Ok(token),
+            other => {
+                let _ = event_tx.send(AdminEvent::Log(format!("server before session: {other:?}")));
             }
         }
     }
@@ -877,8 +924,20 @@ fn terminal_input_loop(input_tx: Sender<AdminInput>) {
     }
 }
 
-fn send(writer: &mut TcpStream, next_message_id: &mut u64, message: Message) -> io::Result<()> {
-    let result = write_envelope(writer, Role::Admin, *next_message_id, None, message);
+fn send(
+    writer: &mut TcpStream,
+    next_message_id: &mut u64,
+    session_token: &str,
+    message: Message,
+) -> io::Result<()> {
+    let result = write_envelope_with_token(
+        writer,
+        Role::Admin,
+        *next_message_id,
+        None,
+        session_token,
+        message,
+    );
     *next_message_id = next_message_id.saturating_add(1);
     result
 }
@@ -920,6 +979,99 @@ fn username() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "unknown-user".to_string())
+}
+
+#[derive(Clone)]
+struct LocalIdentity {
+    id: String,
+    fingerprint: String,
+}
+
+fn load_admin_identity() -> LocalIdentity {
+    let path = identity_file_path("admin.identity");
+    if let Ok(text) = fs::read_to_string(&path) {
+        let mut id = String::new();
+        let mut fingerprint = String::new();
+        for line in text.lines() {
+            if let Some(value) = line.strip_prefix("id=") {
+                id = value.trim().to_string();
+            }
+            if let Some(value) = line.strip_prefix("fingerprint=") {
+                fingerprint = value.trim().to_string();
+            }
+        }
+        if !id.is_empty() && !fingerprint.is_empty() {
+            return LocalIdentity { id, fingerprint };
+        }
+    }
+
+    let seed = format!(
+        "{}|{}|{}|{}",
+        username(),
+        hostname(),
+        std::env::consts::OS,
+        rdl_protocol::now_epoch_ms()
+    );
+    let id = format!(
+        "admin-{}-{:08x}",
+        sanitize(&username()),
+        simple_hash(&seed) as u32
+    );
+    let fingerprint = fingerprint_for(&id);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, format!("id={id}\nfingerprint={fingerprint}\n"));
+    LocalIdentity { id, fingerprint }
+}
+
+fn fingerprint_for(id: &str) -> String {
+    format!(
+        "fp-{:016x}",
+        simple_hash(&format!(
+            "{}|{}|{}|{}",
+            id,
+            hostname(),
+            username(),
+            std::env::consts::OS
+        ))
+    )
+}
+
+fn identity_file_path(file_name: &str) -> PathBuf {
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        return PathBuf::from(appdata)
+            .join("rust-desk-light")
+            .join(file_name);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("rust-desk-light")
+            .join(file_name);
+    }
+    PathBuf::from(file_name)
+}
+
+fn sanitize(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    if sanitized.is_empty() {
+        "admin".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn simple_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 #[derive(Clone)]

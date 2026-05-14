@@ -1,10 +1,12 @@
 use eframe::egui;
 use rdl_protocol::{
-    read_envelope, write_envelope, CommandKind, Message, Role, DEFAULT_SERVER_IP,
+    read_envelope, write_envelope_with_token, CommandKind, Message, Role, DEFAULT_SERVER_IP,
     DEFAULT_SERVER_PORT,
 };
+use std::fs;
 use std::io;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
@@ -23,14 +25,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_gui(config: Config) -> eframe::Result {
-    let client_id = stable_client_id();
+    let identity = load_client_identity();
     let (event_tx, event_rx) = mpsc::channel();
     let app_config = config.clone();
-    let network_client_id = client_id.clone();
+    let network_identity = identity.clone();
 
     thread::spawn(move || {
         if let Err(error) =
-            client_network_loop(app_config, network_client_id, true, event_tx.clone())
+            client_network_loop(app_config, network_identity, true, event_tx.clone())
         {
             let _ = event_tx.send(ClientEvent::Log(format!("network stopped: {error}")));
         }
@@ -46,22 +48,23 @@ fn run_gui(config: Config) -> eframe::Result {
     eframe::run_native(
         "rust-desk-light client",
         native_options,
-        Box::new(move |cc| Ok(Box::new(ClientApp::new(cc, config, client_id, event_rx)))),
+        Box::new(move |cc| Ok(Box::new(ClientApp::new(cc, config, identity, event_rx)))),
     )
 }
 
 fn run_terminal(config: Config) -> io::Result<()> {
-    let client_id = stable_client_id();
+    let identity = load_client_identity();
     let (event_tx, event_rx) = mpsc::channel();
     println!(
         "rust-desk-light client terminal fallback, server={}:{}",
         config.ip, config.port
     );
-    println!("client id: {client_id}");
+    println!("client id: {}", identity.id);
+    println!("fingerprint: {}", identity.fingerprint);
     println!("waiting for admin commands; press Ctrl+C to exit");
 
     thread::spawn(move || {
-        if let Err(error) = client_network_loop(config, client_id, false, event_tx.clone()) {
+        if let Err(error) = client_network_loop(config, identity, false, event_tx.clone()) {
             let _ = event_tx.send(ClientEvent::Log(format!("network stopped: {error}")));
         }
     });
@@ -82,18 +85,13 @@ fn run_terminal(config: Config) -> io::Result<()> {
 
 fn client_network_loop(
     config: Config,
-    client_id: String,
+    identity: LocalIdentity,
     gui_mode: bool,
     event_tx: Sender<ClientEvent>,
 ) -> io::Result<()> {
     let mut delay = INITIAL_RECONNECT_DELAY_MS;
     loop {
-        match client_connection_once(
-            config.clone(),
-            client_id.clone(),
-            gui_mode,
-            event_tx.clone(),
-        ) {
+        match client_connection_once(config.clone(), identity.clone(), gui_mode, event_tx.clone()) {
             Ok(()) => delay = INITIAL_RECONNECT_DELAY_MS,
             Err(error) => {
                 let _ = event_tx.send(ClientEvent::Log(format!(
@@ -109,7 +107,7 @@ fn client_network_loop(
 
 fn client_connection_once(
     config: Config,
-    client_id: String,
+    identity: LocalIdentity,
     gui_mode: bool,
     event_tx: Sender<ClientEvent>,
 ) -> io::Result<()> {
@@ -119,18 +117,20 @@ fn client_connection_once(
     send(
         &mut writer,
         &mut next_message_id,
+        "",
         Message::Hello {
             role: Role::Client,
-            id: client_id,
+            id: identity.id.clone(),
+            fingerprint: identity.fingerprint.clone(),
             hostname: hostname(),
             os: std::env::consts::OS.to_string(),
             username: username(),
             gui_available: gui_mode,
         },
     )?;
-    let _ = event_tx.send(ClientEvent::Connected);
 
     let mut reader = stream;
+    let mut session_token = String::new();
     loop {
         let message = match read_envelope(&mut reader) {
             Ok(envelope) => envelope.message,
@@ -141,6 +141,10 @@ fn client_connection_once(
         };
 
         match message {
+            Message::Session { token } => {
+                session_token = token;
+                let _ = event_tx.send(ClientEvent::Connected);
+            }
             Message::Command {
                 target_id,
                 command,
@@ -154,6 +158,7 @@ fn client_connection_once(
                 send(
                     &mut writer,
                     &mut next_message_id,
+                    &session_token,
                     Message::CommandAck {
                         client_id: target_id,
                         command,
@@ -162,7 +167,12 @@ fn client_connection_once(
                     },
                 )?;
             }
-            Message::Ping => send(&mut writer, &mut next_message_id, Message::Pong)?,
+            Message::Ping => send(
+                &mut writer,
+                &mut next_message_id,
+                &session_token,
+                Message::Pong,
+            )?,
             other => {
                 let _ = event_tx.send(ClientEvent::Log(format!("server: {other:?}")));
             }
@@ -174,7 +184,7 @@ fn client_connection_once(
 
 struct ClientApp {
     config: Config,
-    client_id: String,
+    identity: LocalIdentity,
     event_rx: Receiver<ClientEvent>,
     connected: bool,
     log_lines: Vec<String>,
@@ -184,13 +194,13 @@ impl ClientApp {
     fn new(
         cc: &eframe::CreationContext<'_>,
         config: Config,
-        client_id: String,
+        identity: LocalIdentity,
         event_rx: Receiver<ClientEvent>,
     ) -> Self {
         apply_client_theme(&cc.egui_ctx);
         Self {
             config,
-            client_id,
+            identity,
             event_rx,
             connected: false,
             log_lines: vec!["client gui started".to_string()],
@@ -261,7 +271,8 @@ impl ClientApp {
                             "Connecting / Offline"
                         },
                     );
-                    detail_row(ui, "Client ID", &self.client_id);
+                    detail_row(ui, "Client ID", &self.identity.id);
+                    detail_row(ui, "Fingerprint", &self.identity.fingerprint);
                     detail_row(
                         ui,
                         "Server",
@@ -414,22 +425,101 @@ fn handle_command(command: &CommandKind, payload: &str, gui_mode: bool) -> Strin
     }
 }
 
-fn send(writer: &mut TcpStream, next_message_id: &mut u64, message: Message) -> io::Result<()> {
-    let result = write_envelope(writer, Role::Client, *next_message_id, None, message);
+fn send(
+    writer: &mut TcpStream,
+    next_message_id: &mut u64,
+    session_token: &str,
+    message: Message,
+) -> io::Result<()> {
+    let result = write_envelope_with_token(
+        writer,
+        Role::Client,
+        *next_message_id,
+        None,
+        session_token,
+        message,
+    );
     *next_message_id = next_message_id.saturating_add(1);
     result
 }
 
-fn stable_client_id() -> String {
-    format!(
-        "{}-{}-{}",
+#[derive(Clone)]
+struct LocalIdentity {
+    id: String,
+    fingerprint: String,
+}
+
+fn load_client_identity() -> LocalIdentity {
+    let path = identity_file_path("client.identity");
+    if let Ok(text) = fs::read_to_string(&path) {
+        let mut id = String::new();
+        let mut fingerprint = String::new();
+        for line in text.lines() {
+            if let Some(value) = line.strip_prefix("id=") {
+                id = value.trim().to_string();
+            }
+            if let Some(value) = line.strip_prefix("fingerprint=") {
+                fingerprint = value.trim().to_string();
+            }
+        }
+        if !id.is_empty() && !fingerprint.is_empty() {
+            return LocalIdentity { id, fingerprint };
+        }
+    }
+
+    let seed = format!(
+        "{}|{}|{}|{}|{}",
         hostname(),
+        username(),
         std::env::consts::OS,
-        std::env::consts::ARCH
+        std::env::consts::ARCH,
+        rdl_protocol::now_epoch_ms()
+    );
+    let id = format!("client-{:016x}", simple_hash(&seed));
+    let fingerprint = fingerprint_for(&id);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, format!("id={id}\nfingerprint={fingerprint}\n"));
+    LocalIdentity { id, fingerprint }
+}
+
+fn fingerprint_for(id: &str) -> String {
+    format!(
+        "fp-{:016x}",
+        simple_hash(&format!(
+            "{}|{}|{}|{}|{}",
+            id,
+            hostname(),
+            username(),
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
     )
-    .chars()
-    .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-    .collect()
+}
+
+fn identity_file_path(file_name: &str) -> PathBuf {
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        return PathBuf::from(appdata)
+            .join("rust-desk-light")
+            .join(file_name);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("rust-desk-light")
+            .join(file_name);
+    }
+    PathBuf::from(file_name)
+}
+
+fn simple_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn gui_available() -> bool {
