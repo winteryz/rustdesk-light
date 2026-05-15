@@ -91,6 +91,8 @@ fn screenshot(screen_index: usize, quality: &str) -> String {
     {
         return windows_capture::screenshot(screen_index, quality);
     }
+    #[cfg(not(target_os = "windows"))]
+    let _ = quality;
     #[cfg(target_os = "linux")]
     {
         return linux_capture::screenshot(screen_index);
