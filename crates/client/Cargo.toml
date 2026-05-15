@@ -18,6 +18,7 @@ rust-desk-light-protocol = { path = "../protocol" }
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "0.10.10", default-features = true, features = ["input-msmf"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

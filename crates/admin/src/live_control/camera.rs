@@ -1,0 +1,851 @@
+use base64::Engine;
+use eframe::egui;
+use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::time::{Duration, Instant};
+
+const COLOR_BG: egui::Color32 = egui::Color32::from_rgb(246, 248, 251);
+const COLOR_BORDER: egui::Color32 = egui::Color32::from_rgb(222, 228, 236);
+const COLOR_PANEL: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
+const COLOR_TEXT: egui::Color32 = egui::Color32::from_rgb(24, 33, 47);
+const COLOR_MUTED: egui::Color32 = egui::Color32::from_rgb(96, 108, 124);
+const COLOR_GOOD: egui::Color32 = egui::Color32::from_rgb(24, 135, 84);
+const COLOR_BAD: egui::Color32 = egui::Color32::from_rgb(190, 58, 58);
+const COLOR_WARN: egui::Color32 = egui::Color32::from_rgb(179, 116, 28);
+const DEFAULT_QUALITY: &str = "medium";
+
+pub(crate) struct CameraWindow {
+    pub(crate) client_id: String,
+    hostname: String,
+    username: String,
+    devices: Vec<CameraDevice>,
+    selected_device: Arc<Mutex<usize>>,
+    quality: Arc<Mutex<String>>,
+    frame: Option<CameraFrame>,
+    texture: Option<egui::TextureHandle>,
+    texture_seq: u64,
+    save_path: Arc<Mutex<String>>,
+    save_requested: Arc<AtomicBool>,
+    status: CameraStatus,
+    notice: String,
+    stats: CameraStats,
+    running: Arc<AtomicBool>,
+    outbound: Vec<String>,
+    pending_since: Option<Instant>,
+    last_request_at: Option<Instant>,
+    open: bool,
+    close_requested: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct CameraDevice {
+    index: usize,
+    name: String,
+    description: String,
+}
+
+pub(crate) struct CameraFrame {
+    seq: u64,
+    width: u32,
+    height: u32,
+    encoded_bytes: usize,
+    format: String,
+    image: egui::ColorImage,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, Default)]
+struct CameraStats {
+    fps: f32,
+    frame_count: u64,
+    encoded_bytes: usize,
+    format: String,
+    latency_ms: Option<u128>,
+    last_frame_at: Option<Instant>,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Copy)]
+enum CameraStatus {
+    Ready,
+    Pending,
+    Live,
+    Failed,
+}
+
+pub(crate) struct OutboundCommand {
+    pub(crate) client_id: String,
+    pub(crate) payload: String,
+}
+
+pub(crate) fn decode_frame_payload(detail: &str) -> Result<CameraFrame, String> {
+    let mut lines = detail.lines();
+    if lines.next().unwrap_or_default().trim() != "camera_frame" {
+        return Err("not a camera frame payload".to_string());
+    }
+    match parse_frame(lines.collect::<Vec<_>>().as_slice()) {
+        CameraResponse::Frame(frame) => Ok(frame),
+        CameraResponse::Error(message) => Err(message),
+        _ => Err("camera payload did not contain a frame".to_string()),
+    }
+}
+
+pub(crate) fn handle_decoded_frame(
+    windows: &mut Vec<CameraWindow>,
+    client_id: &str,
+    frame: CameraFrame,
+) {
+    let Some(window) = windows
+        .iter_mut()
+        .find(|window| window.client_id == client_id)
+    else {
+        return;
+    };
+    let latency_ms = window
+        .pending_since
+        .map(|pending_since| pending_since.elapsed().as_millis());
+    window.pending_since = None;
+    handle_frame(window, frame, latency_ms);
+}
+
+pub(crate) fn open_window(
+    windows: &mut Vec<CameraWindow>,
+    client_id: &str,
+    hostname: String,
+    username: String,
+) {
+    if let Some(window) = windows
+        .iter_mut()
+        .find(|window| window.client_id == client_id)
+    {
+        window.open = true;
+        window.hostname = hostname;
+        window.username = username;
+        window.close_requested.store(false, Ordering::Relaxed);
+        window.queue_devices();
+        return;
+    }
+
+    let mut window = CameraWindow {
+        client_id: client_id.to_string(),
+        hostname,
+        username,
+        devices: Vec::new(),
+        selected_device: Arc::new(Mutex::new(0)),
+        quality: Arc::new(Mutex::new(DEFAULT_QUALITY.to_string())),
+        frame: None,
+        texture: None,
+        texture_seq: 0,
+        save_path: Arc::new(Mutex::new(default_save_path(client_id))),
+        save_requested: Arc::new(AtomicBool::new(false)),
+        status: CameraStatus::Ready,
+        notice: "Select a camera and click Start".to_string(),
+        stats: CameraStats::default(),
+        running: Arc::new(AtomicBool::new(false)),
+        outbound: Vec::new(),
+        pending_since: None,
+        last_request_at: None,
+        open: true,
+        close_requested: Arc::new(AtomicBool::new(false)),
+    };
+    window.queue_devices();
+    windows.push(window);
+}
+
+pub(crate) fn handle_ack(
+    windows: &mut Vec<CameraWindow>,
+    client_id: &str,
+    hostname: String,
+    username: String,
+    accepted: bool,
+    detail: String,
+) {
+    let Some(window) = windows
+        .iter_mut()
+        .find(|window| window.client_id == client_id)
+    else {
+        return;
+    };
+    window.hostname = hostname;
+    window.username = username;
+    let latency_ms = window
+        .pending_since
+        .map(|pending_since| pending_since.elapsed().as_millis());
+    window.pending_since = None;
+    if !accepted {
+        stop_capture(window, &detail);
+        window.status = CameraStatus::Failed;
+        return;
+    }
+
+    match CameraResponse::parse(&detail) {
+        CameraResponse::Devices(devices) => {
+            window.devices = devices;
+            window.status = CameraStatus::Ready;
+            window.notice = if window.devices.is_empty() {
+                "No camera devices found".to_string()
+            } else {
+                "Select a camera and click Start".to_string()
+            };
+        }
+        CameraResponse::Frame(frame) => handle_frame(window, frame, latency_ms),
+        CameraResponse::Stopped => stop_capture(window, "Stopped"),
+        CameraResponse::Error(message) => {
+            stop_capture(window, &message);
+            window.status = CameraStatus::Failed;
+        }
+    }
+}
+
+pub(crate) fn render_windows(
+    ctx: &egui::Context,
+    windows: &mut Vec<CameraWindow>,
+) -> Vec<OutboundCommand> {
+    let mut outbound = Vec::new();
+    for window in windows.iter_mut() {
+        if window.close_requested.load(Ordering::Relaxed) {
+            if window.running.load(Ordering::Relaxed) || window.pending_since.is_some() {
+                outbound.push(OutboundCommand {
+                    client_id: window.client_id.clone(),
+                    payload: "action=stop".to_string(),
+                });
+            }
+            stop_capture(window, "Stopped");
+            window.open = false;
+        }
+        if !window.open {
+            continue;
+        }
+        if window
+            .pending_since
+            .is_some_and(|pending_since| pending_since.elapsed() > Duration::from_secs(10))
+        {
+            stop_capture(window, "Timed out waiting for camera result");
+            window.status = CameraStatus::Failed;
+        }
+        if let Some(frame) = &window.frame {
+            if window.texture_seq != frame.seq {
+                if let Some(texture) = &mut window.texture {
+                    texture.set(frame.image.clone(), egui::TextureOptions::LINEAR);
+                } else {
+                    window.texture = Some(ctx.load_texture(
+                        format!("camera:{}", window.client_id),
+                        frame.image.clone(),
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+                window.texture_seq = frame.seq;
+            }
+        }
+        maybe_queue_next_frame(window);
+
+        let title = format!(
+            "Camera - {}",
+            identity_title(&window.hostname, &window.username)
+        );
+        let viewport_id = egui::ViewportId::from_hash_of(("camera", &window.client_id));
+        let builder = egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size([860.0, 640.0])
+            .with_min_inner_size([680.0, 500.0])
+            .with_resizable(true);
+
+        let client_id = window.client_id.clone();
+        let close_requested = window.close_requested.clone();
+        let devices = window.devices.clone();
+        let selected_device = window.selected_device.clone();
+        let quality = window.quality.clone();
+        let running = window.running.clone();
+        let save_path = window.save_path.clone();
+        let save_requested = window.save_requested.clone();
+        let has_frame = window.frame.is_some();
+        let status = window.status;
+        let notice = window.notice.clone();
+        let stats = window.stats.clone();
+        let texture = window.texture.clone();
+        let frame_info = window
+            .frame
+            .as_ref()
+            .map(|frame| (frame.width, frame.height));
+        let queued = Arc::new(Mutex::new(Vec::new()));
+        let queued_for_ui = queued.clone();
+
+        ctx.show_viewport_immediate(viewport_id, builder, move |ui, _class| {
+            if ui.ctx().input(|input| input.viewport().close_requested()) {
+                close_requested.store(true, Ordering::Relaxed);
+            }
+            egui::CentralPanel::default()
+                .frame(egui::Frame::default().fill(COLOR_BG).inner_margin(12.0))
+                .show_inside(ui, |ui| {
+                    render_toolbar(
+                        ui,
+                        &devices,
+                        &selected_device,
+                        &quality,
+                        &running,
+                        &save_path,
+                        &save_requested,
+                        has_frame,
+                        &queued_for_ui,
+                    );
+                    ui.add_space(8.0);
+                    let frame_height = (ui.available_height() - 84.0).max(160.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), frame_height),
+                        egui::Layout::top_down(egui::Align::Center),
+                        |ui| render_frame(ui, texture.as_ref(), frame_info, &notice),
+                    );
+                    ui.add_space(8.0);
+                    render_status_bar(ui, status, &notice, &stats);
+                });
+            if running.load(Ordering::Relaxed) {
+                ui.ctx().request_repaint_after(frame_interval(
+                    quality
+                        .lock()
+                        .map(|value| quality_fps(&value))
+                        .unwrap_or_else(|_| quality_fps(DEFAULT_QUALITY)),
+                ));
+            }
+        });
+
+        if let Ok(mut queued) = queued.lock() {
+            for payload in queued.drain(..) {
+                if payload.trim() == "action=stop" {
+                    stop_capture(window, "Stopped");
+                }
+                window.queue_payload(payload);
+            }
+        }
+        if window.save_requested.swap(false, Ordering::Relaxed) {
+            save_current_frame(window);
+        }
+        while let Some(payload) = window.outbound.pop() {
+            if !camera_payload_is_frame_refresh(&payload)
+                || !window.running.load(Ordering::Relaxed)
+                || window.frame.is_none()
+            {
+                window.status = CameraStatus::Pending;
+                window.notice = if payload.trim() == "action=stop" {
+                    "Stopping camera".to_string()
+                } else {
+                    "Waiting for client result".to_string()
+                };
+            }
+            window.pending_since = Some(Instant::now());
+            window.last_request_at = Some(Instant::now());
+            outbound.push(OutboundCommand {
+                client_id: client_id.clone(),
+                payload,
+            });
+        }
+    }
+    windows.retain(|window| window.open);
+    outbound
+}
+
+impl CameraWindow {
+    fn queue_devices(&mut self) {
+        self.queue_payload("action=devices".to_string());
+    }
+
+    fn queue_payload(&mut self, payload: String) {
+        self.outbound.insert(0, payload);
+    }
+}
+
+fn render_toolbar(
+    ui: &mut egui::Ui,
+    devices: &[CameraDevice],
+    selected_device: &Arc<Mutex<usize>>,
+    quality: &Arc<Mutex<String>>,
+    running: &Arc<AtomicBool>,
+    save_path: &Arc<Mutex<String>>,
+    save_requested: &Arc<AtomicBool>,
+    has_frame: bool,
+    queued: &Arc<Mutex<Vec<String>>>,
+) {
+    let is_running = running.load(Ordering::Relaxed);
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            let mut selected = selected_device
+                .lock()
+                .map(|value| *value)
+                .unwrap_or_default();
+            ui.add_enabled_ui(!is_running, |ui| {
+                egui::ComboBox::from_id_salt("camera_device_select")
+                    .selected_text(device_label(devices, selected))
+                    .show_ui(ui, |ui| {
+                        for device in devices {
+                            ui.selectable_value(
+                                &mut selected,
+                                device.index,
+                                device_label_one(device),
+                            );
+                        }
+                    });
+            });
+            if let Ok(mut value) = selected_device.lock() {
+                *value = selected;
+            }
+            if ui
+                .add_enabled(!is_running, egui::Button::new("Reload Devices"))
+                .clicked()
+            {
+                queue_ui_payload(queued, "action=devices".to_string());
+            }
+            let mut selected_quality = quality
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_else(|_| DEFAULT_QUALITY.to_string());
+            ui.add_enabled_ui(!is_running, |ui| {
+                egui::ComboBox::from_id_salt("camera_quality")
+                    .selected_text(quality_label(&selected_quality))
+                    .show_ui(ui, |ui| {
+                        for option in ["low", "medium", "high"] {
+                            ui.selectable_value(
+                                &mut selected_quality,
+                                option.to_string(),
+                                quality_label(option),
+                            );
+                        }
+                    });
+            });
+            if let Ok(mut value) = quality.lock() {
+                *value = selected_quality.clone();
+            }
+            if ui
+                .add_enabled(
+                    !devices.is_empty(),
+                    egui::Button::new(if is_running {
+                        "Stop Capture"
+                    } else {
+                        "Start Capture"
+                    }),
+                )
+                .clicked()
+            {
+                if is_running {
+                    running.store(false, Ordering::Relaxed);
+                    queue_ui_payload(queued, "action=stop".to_string());
+                } else {
+                    running.store(true, Ordering::Relaxed);
+                    queue_ui_payload(
+                        queued,
+                        format!("action=capture\ndevice={selected}\nquality={selected_quality}"),
+                    );
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            let mut path = save_path
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            ui.add_sized(
+                [260.0, 22.0],
+                egui::TextEdit::singleline(&mut path).hint_text("Save path"),
+            );
+            if let Ok(mut value) = save_path.lock() {
+                *value = path;
+            }
+            if ui
+                .add_enabled(has_frame, egui::Button::new("Save Frame"))
+                .clicked()
+            {
+                save_requested.store(true, Ordering::Relaxed);
+            }
+        });
+    });
+}
+
+fn render_frame(
+    ui: &mut egui::Ui,
+    texture: Option<&egui::TextureHandle>,
+    frame_info: Option<(u32, u32)>,
+    placeholder: &str,
+) {
+    egui::Frame::default()
+        .fill(COLOR_PANEL)
+        .stroke(egui::Stroke::new(1.0, COLOR_BORDER))
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            let available = ui.available_size();
+            let Some(texture) = texture else {
+                ui.centered_and_justified(|ui| {
+                    ui.label(egui::RichText::new(placeholder).color(COLOR_MUTED));
+                });
+                return;
+            };
+            let Some((width, height)) = frame_info else {
+                return;
+            };
+            let scale = (available.x / width as f32)
+                .min(available.y / height as f32)
+                .max(0.1);
+            let size = egui::vec2(width as f32 * scale, height as f32 * scale);
+            ui.add(egui::Image::new(texture).fit_to_exact_size(size));
+        });
+}
+
+fn render_status_bar(ui: &mut egui::Ui, status: CameraStatus, notice: &str, stats: &CameraStats) {
+    let (label, color) = match status {
+        CameraStatus::Ready => ("Ready", COLOR_MUTED),
+        CameraStatus::Pending => ("Pending", COLOR_WARN),
+        CameraStatus::Live => ("Live", COLOR_GOOD),
+        CameraStatus::Failed => ("Failed", COLOR_BAD),
+    };
+    egui::Frame::default()
+        .fill(COLOR_PANEL)
+        .stroke(egui::Stroke::new(1.0, COLOR_BORDER))
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .corner_radius(egui::CornerRadius::same(6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 4.0, color);
+                ui.label(
+                    egui::RichText::new(label)
+                        .size(12.0)
+                        .color(COLOR_TEXT)
+                        .strong(),
+                );
+                ui.label(egui::RichText::new(notice).size(12.0).color(COLOR_MUTED));
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!("FPS {:.1}", stats.fps))
+                        .size(12.0)
+                        .color(COLOR_MUTED),
+                );
+                ui.label(
+                    egui::RichText::new(format!("Frames {}", stats.frame_count))
+                        .size(12.0)
+                        .color(COLOR_MUTED),
+                );
+                if stats.width > 0 && stats.height > 0 {
+                    ui.label(
+                        egui::RichText::new(format!("{}x{}", stats.width, stats.height))
+                            .size(12.0)
+                            .color(COLOR_MUTED),
+                    );
+                }
+                if stats.encoded_bytes > 0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} {}",
+                            human_bytes(stats.encoded_bytes),
+                            stats.format
+                        ))
+                        .size(12.0)
+                        .color(COLOR_MUTED),
+                    );
+                }
+                if let Some(latency_ms) = stats.latency_ms {
+                    ui.label(
+                        egui::RichText::new(format!("RTT {} ms", latency_ms))
+                            .size(12.0)
+                            .color(COLOR_MUTED),
+                    );
+                }
+            });
+        });
+}
+
+fn maybe_queue_next_frame(window: &mut CameraWindow) {
+    if !window.running.load(Ordering::Relaxed) || window.pending_since.is_some() {
+        return;
+    }
+    let quality = window
+        .quality
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|_| DEFAULT_QUALITY.to_string());
+    let interval = frame_interval(quality_fps(&quality));
+    if window
+        .last_request_at
+        .is_some_and(|last_request_at| last_request_at.elapsed() < interval)
+    {
+        return;
+    }
+    let selected = window
+        .selected_device
+        .lock()
+        .map(|value| *value)
+        .unwrap_or_default();
+    window.queue_payload(format!(
+        "action=capture\ndevice={selected}\nquality={quality}"
+    ));
+}
+
+fn handle_frame(window: &mut CameraWindow, frame: CameraFrame, latency_ms: Option<u128>) {
+    if !window.running.load(Ordering::Relaxed) {
+        return;
+    }
+    let now = Instant::now();
+    window.stats.fps = window
+        .stats
+        .last_frame_at
+        .map(|last_frame_at| {
+            let elapsed = now.duration_since(last_frame_at).as_secs_f32();
+            if elapsed > 0.0 {
+                1.0 / elapsed
+            } else {
+                window.stats.fps
+            }
+        })
+        .unwrap_or(0.0);
+    window.stats.frame_count = window.stats.frame_count.saturating_add(1);
+    window.stats.encoded_bytes = frame.encoded_bytes;
+    window.stats.format = frame.format.clone();
+    window.stats.latency_ms = latency_ms;
+    window.stats.last_frame_at = Some(now);
+    window.stats.width = frame.width;
+    window.stats.height = frame.height;
+    window.frame = Some(frame);
+    window.status = CameraStatus::Live;
+    window.notice = "Frame received".to_string();
+}
+
+fn stop_capture(window: &mut CameraWindow, notice: &str) {
+    window.running.store(false, Ordering::Relaxed);
+    window.outbound.clear();
+    window.pending_since = None;
+    window.last_request_at = None;
+    window.stats.fps = 0.0;
+    window.stats.latency_ms = None;
+    window.status = CameraStatus::Ready;
+    window.notice = notice.to_string();
+}
+
+fn save_current_frame(window: &mut CameraWindow) {
+    let Some(frame) = &window.frame else {
+        window.notice = "No camera frame to save".to_string();
+        window.status = CameraStatus::Failed;
+        return;
+    };
+    let path = window
+        .save_path
+        .lock()
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+    let path = if path.is_empty() {
+        default_save_path(&window.client_id)
+    } else {
+        path
+    };
+    let path_buf = PathBuf::from(&path);
+    if let Some(parent) = path_buf.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                window.notice = format!("Create save directory failed: {error}");
+                window.status = CameraStatus::Failed;
+                return;
+            }
+        }
+    }
+    match std::fs::write(&path_buf, &frame.bytes) {
+        Ok(()) => {
+            window.notice = format!("Saved frame to {}", path_buf.display());
+            window.status = CameraStatus::Live;
+            if let Ok(mut value) = window.save_path.lock() {
+                *value = path;
+            }
+        }
+        Err(error) => {
+            window.notice = format!("Save frame failed: {error}");
+            window.status = CameraStatus::Failed;
+        }
+    }
+}
+
+enum CameraResponse {
+    Devices(Vec<CameraDevice>),
+    Frame(CameraFrame),
+    Stopped,
+    Error(String),
+}
+
+impl CameraResponse {
+    fn parse(detail: &str) -> Self {
+        let mut lines = detail.lines();
+        match lines.next().unwrap_or_default().trim() {
+            "camera_devices" => parse_devices(lines.collect::<Vec<_>>().as_slice()),
+            "camera_frame" => parse_frame(lines.collect::<Vec<_>>().as_slice()),
+            "camera_stopped" => Self::Stopped,
+            "camera_error" => {
+                let message = detail
+                    .lines()
+                    .find_map(|line| line.strip_prefix("message="))
+                    .unwrap_or("camera error")
+                    .to_string();
+                Self::Error(message)
+            }
+            _ => Self::Error(detail.to_string()),
+        }
+    }
+}
+
+fn parse_devices(lines: &[&str]) -> CameraResponse {
+    let mut devices = Vec::new();
+    for line in lines {
+        let parts = line.split('\t').collect::<Vec<_>>();
+        if parts.len() < 3 || parts[0] != "device" {
+            continue;
+        }
+        devices.push(CameraDevice {
+            index: parts[1].parse().unwrap_or_default(),
+            name: parts.get(2).copied().unwrap_or_default().to_string(),
+            description: parts.get(3).copied().unwrap_or_default().to_string(),
+        });
+    }
+    CameraResponse::Devices(devices)
+}
+
+fn parse_frame(lines: &[&str]) -> CameraResponse {
+    let mut width = 0;
+    let mut height = 0;
+    let mut encoded_bytes = 0;
+    let mut format = "image".to_string();
+    let mut image_base64 = "";
+    for line in lines {
+        if let Some(rest) = line.strip_prefix("width=") {
+            width = rest.parse().unwrap_or_default();
+        } else if let Some(rest) = line.strip_prefix("height=") {
+            height = rest.parse().unwrap_or_default();
+        } else if let Some(rest) = line.strip_prefix("bytes=") {
+            encoded_bytes = rest.parse().unwrap_or_default();
+        } else if let Some(rest) = line.strip_prefix("format=") {
+            format = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("image_base64=") {
+            image_base64 = rest;
+        }
+    }
+    if width == 0 || height == 0 {
+        return CameraResponse::Error("invalid camera frame metadata".to_string());
+    }
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(image_base64) {
+        Ok(bytes) => bytes,
+        Err(error) => return CameraResponse::Error(format!("decode camera frame failed: {error}")),
+    };
+    let image = match image::load_from_memory(&bytes) {
+        Ok(image) => image.to_rgba8(),
+        Err(error) => return CameraResponse::Error(format!("load camera frame failed: {error}")),
+    };
+    let size = [image.width() as usize, image.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+    CameraResponse::Frame(CameraFrame {
+        seq: rdl_protocol::now_epoch_ms() as u64,
+        width: image.width(),
+        height: image.height(),
+        encoded_bytes,
+        format,
+        image: color_image,
+        bytes,
+    })
+}
+
+fn device_label(devices: &[CameraDevice], selected: usize) -> String {
+    devices
+        .iter()
+        .find(|device| device.index == selected)
+        .map(device_label_one)
+        .unwrap_or_else(|| "No camera".to_string())
+}
+
+fn device_label_one(device: &CameraDevice) -> String {
+    if device.description.trim().is_empty() {
+        format!("Camera {} - {}", device.index, device.name)
+    } else {
+        format!(
+            "Camera {} - {} ({})",
+            device.index, device.name, device.description
+        )
+    }
+}
+
+fn quality_label(value: &str) -> &'static str {
+    match value {
+        "low" => "Low",
+        "high" => "High",
+        _ => "Medium",
+    }
+}
+
+fn quality_fps(value: &str) -> u32 {
+    match value {
+        "low" => 10,
+        "high" => 2,
+        _ => 5,
+    }
+}
+
+fn frame_interval(target_fps: u32) -> Duration {
+    Duration::from_millis((1000 / target_fps.clamp(1, 12) as u64).max(1))
+}
+
+fn queue_ui_payload(queue: &Arc<Mutex<Vec<String>>>, payload: String) {
+    if let Ok(mut queue) = queue.lock() {
+        queue.push(payload);
+    }
+}
+
+fn camera_payload_is_frame_refresh(payload: &str) -> bool {
+    payload
+        .lines()
+        .find_map(|line| line.strip_prefix("action="))
+        .map(|action| action.trim() == "capture")
+        .unwrap_or(false)
+}
+
+fn human_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f32 / 1024.0 / 1024.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f32 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn identity_title(hostname: &str, username: &str) -> String {
+    match (hostname.trim(), username.trim()) {
+        ("", "") => "unknown-host".to_string(),
+        (host, "") => host.to_string(),
+        ("", user) => user.to_string(),
+        (host, user) => format!("{host} / {user}"),
+    }
+}
+
+fn default_save_path(client_id: &str) -> String {
+    let file_name = format!(
+        "camera-{}-{}.jpg",
+        sanitize_file_component(client_id),
+        rdl_protocol::now_epoch_ms()
+    );
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(file_name)
+        .to_string_lossy()
+        .to_string()
+}
+
+fn sanitize_file_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "client".to_string()
+    } else {
+        sanitized
+    }
+}

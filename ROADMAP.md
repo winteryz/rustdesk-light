@@ -168,6 +168,15 @@ Reference direction:
 
 This should only be implemented after screen view and protocol reliability are good enough.
 
+## Milestone 8.5: Camera Capture
+
+- [x] Camera command routing through live control.
+- [x] Admin camera control window with device selection, quality selection, start/stop capture, status bar, and save-current-frame action.
+- [x] Windows camera backend via native Media Foundation through nokhwa.
+- [x] Reuse the Windows camera stream during capture instead of reopening the device per frame.
+- [x] Decode camera frames off the admin UI thread and coalesce latest frames.
+- [x] Linux/macOS lightweight snapshot fallback through local camera tools.
+
 ## Milestone 9: Packaging And Runtime
 
 - [ ] Persistent config files.
@@ -186,7 +195,7 @@ These are useful in a professional product but too heavy for the current lightwe
 - Enterprise audit database.
 - Multi-tenant server.
 - NAT traversal optimization.
-- Camera and microphone streaming.
+- Microphone streaming and full A/V session streaming.
 - Auto-update system.
 - Signed plugin loading.
 - Complex task scheduler.
@@ -220,7 +229,7 @@ Remote Management
 
 Live Control
   [x] Remote Desktop: remote_desktop
-  [ ] Camera: camera
+  [x] Camera: camera
   [ ] Audio Listen: audio_listen
 
 User Interaction

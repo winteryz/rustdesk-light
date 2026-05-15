@@ -341,6 +341,7 @@ fn command_is_implemented(command: &CommandKind) -> bool {
             | CommandKind::FileManager
             | CommandKind::ProcessManager
             | CommandKind::RemoteDesktop
+            | CommandKind::Camera
             | CommandKind::RemoteTerminal
             | CommandKind::EventLog
             | CommandKind::ActiveConnections

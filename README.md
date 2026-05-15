@@ -9,7 +9,7 @@ The repository is intentionally small at the start:
 - `rdl-admin`: operator GUI with online client table and full right-click command menu.
 - `rdl_protocol`: shared protocol primitives.
 
-This project is still early. It has a stable binary transport, identity/session handshake, admin/client GUIs, command routing, and several low-risk client capability commands. It does not yet implement real remote desktop streaming, file transfer, shell execution, camera, microphone, or privileged system operations.
+This project is still early. It has a stable binary transport, identity/session handshake, admin/client GUIs, command routing, file and terminal basics, remote desktop control, and camera capture. It does not yet implement microphone streaming, privileged system operations, or a production-grade release pipeline.
 
 ## Requirements
 

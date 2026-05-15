@@ -259,7 +259,7 @@ pub(crate) fn render_windows(
     let mut outbound = Vec::new();
     for window in windows.iter_mut() {
         if window.close_requested.load(Ordering::Relaxed) {
-            if window.running.load(Ordering::Relaxed) {
+            if window.running.load(Ordering::Relaxed) || window.pending_since.is_some() {
                 outbound.push(OutboundCommand {
                     client_id: window.client_id.clone(),
                     payload: "action=stop".to_string(),

@@ -3,6 +3,7 @@ mod live_control;
 mod remote_management;
 mod user_interaction;
 
+use base64::Engine;
 use eframe::egui;
 use rdl_protocol::{
     read_envelope, write_envelope_with_token, ClientInfo, CommandKind, EnvelopeDecoder, Message,
@@ -10,6 +11,7 @@ use rdl_protocol::{
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead};
 use std::net::{Shutdown, TcpStream};
 use std::path::PathBuf;
@@ -137,6 +139,10 @@ fn run_terminal(config: Config) -> io::Result<()> {
             AdminEvent::DecodedDesktopFrame { client_id, result } => match result {
                 Ok(_) => println!("decoded_desktop_frame client={client_id}"),
                 Err(error) => println!("decoded_desktop_frame client={client_id} error={error}"),
+            },
+            AdminEvent::DecodedCameraFrame { client_id, result } => match result {
+                Ok(_) => println!("decoded_camera_frame client={client_id}"),
+                Err(error) => println!("decoded_camera_frame client={client_id} error={error}"),
             },
             AdminEvent::Log(line) => println!("{line}"),
             AdminEvent::Connected => println!("connected"),
@@ -337,6 +343,7 @@ struct AdminApp {
     command_windows: Vec<CommandResultWindow>,
     file_manager_windows: Vec<remote_management::file_manager::FileManagerWindow>,
     desktop_windows: Vec<live_control::remote_desktop::RemoteDesktopWindow>,
+    camera_windows: Vec<live_control::camera::CameraWindow>,
     terminal_windows: Vec<remote_management::remote_terminal::TerminalWindow>,
     chat_windows: Vec<user_interaction::text_chat::ChatWindow>,
     log_lines: Vec<String>,
@@ -411,6 +418,7 @@ impl AdminApp {
             command_windows: Vec::new(),
             file_manager_windows: Vec::new(),
             desktop_windows: Vec::new(),
+            camera_windows: Vec::new(),
             terminal_windows: Vec::new(),
             chat_windows: Vec::new(),
             log_lines: vec![timestamped_log("admin gui started")],
@@ -420,6 +428,7 @@ impl AdminApp {
     fn drain_events(&mut self) -> bool {
         let mut changed = false;
         let mut latest_desktop_frames = HashMap::<String, String>::new();
+        let mut latest_camera_frames = HashMap::<String, String>::new();
         while let Ok(event) = self.event_rx.try_recv() {
             changed = true;
             match event {
@@ -446,7 +455,16 @@ impl AdminApp {
                     command,
                     accepted,
                     detail,
-                } => self.handle_command_ack(client_id, command, accepted, detail),
+                } => {
+                    if accepted
+                        && command == CommandKind::Camera
+                        && detail.starts_with("camera_frame\n")
+                    {
+                        latest_camera_frames.insert(client_id, detail);
+                    } else {
+                        self.handle_command_ack(client_id, command, accepted, detail);
+                    }
+                }
                 AdminEvent::DesktopFrame { client_id, payload } => {
                     latest_desktop_frames.insert(client_id, payload);
                 }
@@ -462,6 +480,18 @@ impl AdminApp {
                         format!("remote_desktop_error\nmessage={message}"),
                     ),
                 },
+                AdminEvent::DecodedCameraFrame { client_id, result } => match result {
+                    Ok(frame) => live_control::camera::handle_decoded_frame(
+                        &mut self.camera_windows,
+                        &client_id,
+                        frame,
+                    ),
+                    Err(message) => self.handle_camera_ack(
+                        &client_id,
+                        true,
+                        format!("camera_error\nmessage={message}"),
+                    ),
+                },
                 AdminEvent::Log(line) => self.push_log(line),
             }
             if self.log_lines.len() > 300 {
@@ -475,6 +505,9 @@ impl AdminApp {
                 self.handle_desktop_ack(&client_id, true, payload);
             }
         }
+        for (client_id, payload) in latest_camera_frames {
+            self.spawn_camera_frame_decode(client_id, payload);
+        }
         changed
     }
 
@@ -483,6 +516,14 @@ impl AdminApp {
         thread::spawn(move || {
             let result = live_control::remote_desktop::decode_frame_payload(&payload);
             sink.send(AdminEvent::DecodedDesktopFrame { client_id, result });
+        });
+    }
+
+    fn spawn_camera_frame_decode(&self, client_id: String, payload: String) {
+        let sink = AdminEventSink::new(self.event_tx.clone(), Some(self.repaint_handle.clone()));
+        thread::spawn(move || {
+            let result = live_control::camera::decode_frame_payload(&payload);
+            sink.send(AdminEvent::DecodedCameraFrame { client_id, result });
         });
     }
 
@@ -553,6 +594,10 @@ impl AdminApp {
             self.open_desktop_window(client_id);
             return;
         }
+        if command == CommandKind::Camera {
+            self.open_camera_window(client_id);
+            return;
+        }
         let _ = self.input_tx.send(AdminInput::Command {
             target_id: client_id.to_string(),
             command: command.clone(),
@@ -604,6 +649,11 @@ impl AdminApp {
             hostname,
             username,
         );
+    }
+
+    fn open_camera_window(&mut self, client_id: &str) {
+        let (hostname, username) = self.client_window_identity(client_id);
+        live_control::camera::open_window(&mut self.camera_windows, client_id, hostname, username);
     }
 
     fn open_command_window(&mut self, client_id: &str, command: CommandKind) {
@@ -675,6 +725,10 @@ impl AdminApp {
         }
         if command == CommandKind::RemoteDesktop {
             self.handle_desktop_ack(&client_id, accepted, detail);
+            return;
+        }
+        if command == CommandKind::Camera {
+            self.handle_camera_ack(&client_id, accepted, detail);
             return;
         }
 
@@ -771,6 +825,18 @@ impl AdminApp {
         let (hostname, username) = self.client_window_identity(client_id);
         live_control::remote_desktop::handle_ack(
             &mut self.desktop_windows,
+            client_id,
+            hostname,
+            username,
+            accepted,
+            detail,
+        );
+    }
+
+    fn handle_camera_ack(&mut self, client_id: &str, accepted: bool, detail: String) {
+        let (hostname, username) = self.client_window_identity(client_id);
+        live_control::camera::handle_ack(
+            &mut self.camera_windows,
             client_id,
             hostname,
             username,
@@ -1168,6 +1234,16 @@ impl AdminApp {
         }
     }
 
+    fn render_camera_windows(&mut self, ctx: &egui::Context) {
+        for outbound in live_control::camera::render_windows(ctx, &mut self.camera_windows) {
+            let _ = self.input_tx.send(AdminInput::Command {
+                target_id: outbound.client_id.clone(),
+                command: CommandKind::Camera,
+                payload: outbound.payload,
+            });
+        }
+    }
+
     fn render_terminal_windows(&mut self, ctx: &egui::Context) {
         for outbound in
             remote_management::remote_terminal::render_windows(ctx, &mut self.terminal_windows)
@@ -1201,6 +1277,7 @@ impl eframe::App for AdminApp {
         self.render_command_windows(ui.ctx());
         self.render_file_manager_windows(ui.ctx());
         self.render_desktop_windows(ui.ctx());
+        self.render_camera_windows(ui.ctx());
         self.render_terminal_windows(ui.ctx());
         self.render_chat_windows(ui.ctx());
 
@@ -1490,6 +1567,10 @@ fn render_command_result(
             return;
         }
     }
+    if matches!(command, CommandKind::Camera) {
+        render_camera_result(ui, detail);
+        ui.add_space(8.0);
+    }
 
     ui.add(
         egui::TextEdit::multiline(detail)
@@ -1498,6 +1579,61 @@ fn render_command_result(
             .desired_rows(18)
             .interactive(true),
     );
+}
+
+fn render_camera_result(ui: &mut egui::Ui, detail: &str) {
+    let Some(frame) = parse_camera_frame(detail) else {
+        return;
+    };
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(frame.image_base64) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            ui.label(
+                egui::RichText::new(format!("decode camera frame failed: {error}"))
+                    .color(COLOR_BAD),
+            );
+            return;
+        }
+    };
+    let image = match image::load_from_memory(&bytes) {
+        Ok(image) => image.to_rgba8(),
+        Err(error) => {
+            ui.label(
+                egui::RichText::new(format!("load camera frame failed: {error}")).color(COLOR_BAD),
+            );
+            return;
+        }
+    };
+    let size = [image.width() as usize, image.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+    let texture = ui.ctx().load_texture(
+        format!("camera_frame:{}", stable_hash(detail)),
+        color_image,
+        egui::TextureOptions::LINEAR,
+    );
+    let available_width = ui.available_width().max(1.0);
+    let scale = (available_width / size[0] as f32).min(1.0);
+    let display_size = egui::vec2(size[0] as f32 * scale, size[1] as f32 * scale);
+    ui.add(egui::Image::new(&texture).fit_to_exact_size(display_size));
+}
+
+struct CameraFrame<'a> {
+    image_base64: &'a str,
+}
+
+fn parse_camera_frame(detail: &str) -> Option<CameraFrame<'_>> {
+    let mut lines = detail.lines();
+    if lines.next()?.trim() != "camera_frame" {
+        return None;
+    }
+    let image_base64 = lines.find_map(|line| line.strip_prefix("image_base64="))?;
+    Some(CameraFrame { image_base64 })
+}
+
+fn stable_hash(value: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn render_table_toolbar(
@@ -2110,6 +2246,10 @@ enum AdminEvent {
     DecodedDesktopFrame {
         client_id: String,
         result: Result<live_control::remote_desktop::DesktopFrame, String>,
+    },
+    DecodedCameraFrame {
+        client_id: String,
+        result: Result<live_control::camera::CameraFrame, String>,
     },
     Log(String),
 }
