@@ -24,7 +24,7 @@ use std::time::Duration;
 const INITIAL_RECONNECT_DELAY_MS: u64 = 500;
 const MAX_RECONNECT_DELAY_MS: u64 = 8_000;
 const NETWORK_POLL_INTERVAL_MS: u64 = 16;
-const GUI_FRAME_INTERVAL_MS: u64 = 16;
+const GUI_FRAME_INTERVAL_MS: u64 = 250;
 const NETWORK_IDLE_SLEEP_MS: u64 = 4;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

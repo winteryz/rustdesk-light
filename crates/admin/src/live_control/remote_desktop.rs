@@ -343,6 +343,14 @@ pub(crate) fn render_windows(
                     ui.add_space(8.0);
                     render_status_bar(ui, status, &notice, &stats);
                 });
+            if running.load(Ordering::Relaxed) {
+                ui.ctx().request_repaint_after(frame_interval(
+                    target_fps
+                        .lock()
+                        .map(|value| *value)
+                        .unwrap_or(DEFAULT_TARGET_FPS),
+                ));
+            }
         });
 
         if let Ok(mut queued) = queued.lock() {
@@ -657,6 +665,11 @@ fn human_bytes(bytes: usize) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+fn frame_interval(target_fps: u32) -> Duration {
+    let fps = target_fps.clamp(1, 12);
+    Duration::from_millis((1000 / fps as u64).max(1))
 }
 
 fn remote_desktop_payload_is_input(payload: &str) -> bool {
