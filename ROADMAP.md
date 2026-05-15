@@ -205,7 +205,6 @@ macOS note:
 - [x] Windows build artifact.
 - [x] Linux build artifact.
 - [x] macOS release artifact.
-- [ ] macOS Developer ID signing and notarization for release builds.
 - [ ] Optional service/daemon mode.
 - [x] Basic GitHub Actions release workflow.
 
@@ -229,14 +228,14 @@ They can be reconsidered only after the basic remote assistance flow works relia
 
 ```text
 Session
-  [ ] Update Client: update_client
-  [ ] Uninstall Client: uninstall_client
-  [ ] Kill Client Process: kill_client_process
-  [ ] Shutdown: shutdown
-  [ ] Reboot: reboot
+  [x] Update Client: update_client
+  [x] Uninstall Client: uninstall_client
+  [x] Kill Client Process: kill_client_process
+  [x] Shutdown: shutdown
+  [x] Reboot: reboot
   [ ] Move To Group: move_to_group
   [ ] Clone Client Settings: clone_client_settings
-  [ ] Delete Client: delete_client
+  [x] Delete Client: delete_client
 
 Remote Management
   [x] File Manager: file_manager

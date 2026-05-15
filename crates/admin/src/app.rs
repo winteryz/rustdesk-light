@@ -560,6 +560,7 @@ struct AdminApp {
     terminal_windows: Vec<remote_management::remote_terminal::TerminalWindow>,
     chat_windows: Vec<user_interaction::text_chat::ChatWindow>,
     interaction_command_windows: Vec<user_interaction::commands::InteractionCommandWindow>,
+    session_command_windows: Vec<crate::session::SessionCommandWindow>,
     file_transfer_cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     ignored_file_transfers: Arc<Mutex<HashSet<(String, u64)>>>,
     log_lines: Vec<String>,
@@ -639,6 +640,7 @@ impl AdminApp {
             terminal_windows: Vec::new(),
             chat_windows: Vec::new(),
             interaction_command_windows: Vec::new(),
+            session_command_windows: Vec::new(),
             file_transfer_cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             ignored_file_transfers,
             log_lines: vec![timestamped_log(format!(
@@ -961,6 +963,10 @@ impl AdminApp {
     }
 
     fn send_command(&mut self, client_id: &str, command: CommandKind) {
+        if session_command_requires_confirmation(&command) {
+            self.open_session_command_window(client_id, command);
+            return;
+        }
         if command == CommandKind::TextChat {
             self.open_chat_window(client_id);
             return;
@@ -1044,6 +1050,17 @@ impl AdminApp {
     fn open_camera_window(&mut self, client_id: &str) {
         let (hostname, username) = self.client_window_identity(client_id);
         live_control::camera::open_window(&mut self.camera_windows, client_id, hostname, username);
+    }
+
+    fn open_session_command_window(&mut self, client_id: &str, command: CommandKind) {
+        let (hostname, username) = self.client_window_identity(client_id);
+        crate::session::open_window(
+            &mut self.session_command_windows,
+            client_id,
+            hostname,
+            username,
+            command,
+        );
     }
 
     fn open_interaction_command_window(&mut self, client_id: &str, command: CommandKind) {
@@ -1132,6 +1149,22 @@ impl AdminApp {
             self.handle_camera_ack(&client_id, accepted, detail);
             return;
         }
+        if session_command_requires_confirmation(&command) {
+            self.push_log(format!(
+                "result client={} command={} accepted={} detail={}",
+                client_id,
+                command.as_str(),
+                accepted,
+                sanitize_log_value(&detail)
+            ));
+            if accepted
+                && command == CommandKind::DeleteClient
+                && detail_status(&detail).as_deref() == Some("scheduled")
+            {
+                self.remove_client_row(&client_id);
+            }
+            return;
+        }
         if quiet_user_interaction_command(&command) {
             self.push_log(format!(
                 "result client={} command={} accepted={} detail={}",
@@ -1194,6 +1227,13 @@ impl AdminApp {
             table_sort: Arc::new(Mutex::new(None)),
             table_selected_row: Arc::new(Mutex::new(None)),
         });
+    }
+
+    fn remove_client_row(&mut self, client_id: &str) {
+        self.clients.retain(|row| row.info.id != client_id);
+        if self.selected_client_id.as_deref() == Some(client_id) {
+            self.selected_client_id = self.clients.first().map(|row| row.info.id.clone());
+        }
     }
 
     fn handle_chat_ack(&mut self, client_id: &str, accepted: bool, detail: String) {
@@ -1661,6 +1701,21 @@ impl AdminApp {
         }
     }
 
+    fn render_session_command_windows(&mut self, ctx: &egui::Context) {
+        for outbound in crate::session::render_windows(ctx, &mut self.session_command_windows) {
+            let _ = self.input_tx.send(AdminInput::Command {
+                target_id: outbound.client_id.clone(),
+                command: outbound.command.clone(),
+                payload: outbound.payload,
+            });
+            self.push_log(format!(
+                "sent command={} to {}",
+                outbound.command.as_str(),
+                outbound.client_id
+            ));
+        }
+    }
+
     fn render_file_manager_windows(&mut self, ctx: &egui::Context) {
         for outbound in
             remote_management::file_manager::render_windows(ctx, &mut self.file_manager_windows)
@@ -1919,6 +1974,7 @@ impl eframe::App for AdminApp {
         self.render_terminal_windows(ui.ctx());
         self.render_chat_windows(ui.ctx());
         self.render_interaction_command_windows(ui.ctx());
+        self.render_session_command_windows(ui.ctx());
 
         if changed {
             ui.ctx().request_repaint();
@@ -2213,6 +2269,22 @@ fn quiet_user_interaction_command(command: &CommandKind) -> bool {
         command,
         CommandKind::MessageBox | CommandKind::BalloonTip | CommandKind::OpenTextInNotepad
     )
+}
+
+fn session_command_requires_confirmation(command: &CommandKind) -> bool {
+    matches!(
+        command,
+        CommandKind::UpdateClient
+            | CommandKind::UninstallClient
+            | CommandKind::KillClientProcess
+            | CommandKind::Shutdown
+            | CommandKind::Reboot
+            | CommandKind::DeleteClient
+    )
+}
+
+fn detail_status(detail: &str) -> Option<String> {
+    payload_field(detail, "status")
 }
 
 fn render_command_result(
@@ -2907,6 +2979,18 @@ mod tests {
 
         assert!(widths.iter().all(|width| width.is_finite()));
         assert!(widths[0] <= 64.0);
+    }
+
+    #[test]
+    fn detail_status_reads_session_result_status() {
+        assert_eq!(
+            detail_status("delete_client\nstatus=scheduled\nmessage=ok").as_deref(),
+            Some("scheduled")
+        );
+        assert_eq!(
+            detail_status("delete_client\nstatus=dry_run\nmessage=ok").as_deref(),
+            Some("dry_run")
+        );
     }
 
     fn strings<const N: usize>(values: [&str; N]) -> Vec<String> {

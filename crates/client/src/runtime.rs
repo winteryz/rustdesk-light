@@ -143,7 +143,7 @@ pub(crate) fn username() -> String {
 }
 
 pub(crate) fn load_client_identity() -> LocalIdentity {
-    let path = identity_file_path("client.identity");
+    let path = client_identity_file_path();
     if let Ok(text) = fs::read_to_string(&path) {
         let mut id = String::new();
         let mut fingerprint = String::new();
@@ -175,6 +175,10 @@ pub(crate) fn load_client_identity() -> LocalIdentity {
     }
     let _ = fs::write(&path, format!("id={id}\nfingerprint={fingerprint}\n"));
     LocalIdentity { id, fingerprint }
+}
+
+pub(crate) fn client_identity_file_path() -> PathBuf {
+    identity_file_path("client.identity")
 }
 
 fn fingerprint_for(id: &str) -> String {

@@ -2,6 +2,12 @@ use rdl_protocol::CommandKind;
 
 pub fn handle_command(command: &CommandKind, payload: &str, gui_mode: bool) -> String {
     match command {
+        CommandKind::UpdateClient
+        | CommandKind::UninstallClient
+        | CommandKind::KillClientProcess
+        | CommandKind::Shutdown
+        | CommandKind::Reboot
+        | CommandKind::DeleteClient => crate::session::handle(command, payload),
         CommandKind::ComputerInfo | CommandKind::Clipboard | CommandKind::Proxy => {
             crate::system_info::handle(command, payload)
         }

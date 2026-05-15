@@ -22,6 +22,7 @@ TODO: Screenshots will be added later.
 - Admin GUI with online client table, search/filter, activity log, and right-click command menu.
 - Client GUI with connection status, identity details, and timestamped activity log.
 - Persistent client/admin identity files.
+- Confirmed session lifecycle commands for client restart/update, uninstall, process stop, shutdown, reboot, and client deletion.
 - Command result windows with compact tables, filtering, sorting, copy actions, and row-wide context menus.
 - System information, process list, process kill, performance snapshot, active connections, and event log summary.
 - Clipboard read/write commands.

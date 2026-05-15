@@ -336,7 +336,13 @@ fn menu_command(
 fn command_is_implemented(command: &CommandKind) -> bool {
     matches!(
         command,
-        CommandKind::ComputerInfo
+        CommandKind::UpdateClient
+            | CommandKind::UninstallClient
+            | CommandKind::KillClientProcess
+            | CommandKind::Shutdown
+            | CommandKind::Reboot
+            | CommandKind::DeleteClient
+            | CommandKind::ComputerInfo
             | CommandKind::Clipboard
             | CommandKind::FileManager
             | CommandKind::ProcessManager

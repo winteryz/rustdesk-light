@@ -3,6 +3,7 @@ mod commands;
 mod live_control;
 mod remote_management;
 mod runtime;
+mod session;
 mod support;
 mod system_info;
 mod user_interaction;
