@@ -3024,6 +3024,7 @@ name = "rust-desk-light-client"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "core-foundation 0.9.4",
  "core-graphics 0.23.2",
  "eframe",
  "image",

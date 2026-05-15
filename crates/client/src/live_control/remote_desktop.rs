@@ -936,6 +936,10 @@ mod linux_input {
 
 #[cfg(target_os = "macos")]
 mod macos_input {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+    use core_foundation::string::{CFString, CFStringRef};
     use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::geometry::CGPoint;
@@ -1003,23 +1007,34 @@ mod macos_input {
     }
 
     fn ensure_accessibility_permission() -> Result<(), String> {
-        if accessibility_trusted() {
+        if accessibility_trusted(false) || accessibility_trusted(true) {
             Ok(())
         } else {
             Err(
-                "macOS input requires Accessibility permission for rdl-client / the launching terminal"
+                "macOS input requires Accessibility permission. Enable rdl-client, or the terminal/app that launched it, in System Settings > Privacy & Security > Accessibility, then reconnect the client"
                     .to_string(),
             )
         }
     }
 
-    fn accessibility_trusted() -> bool {
-        unsafe { AXIsProcessTrusted() != 0 }
+    fn accessibility_trusted(prompt: bool) -> bool {
+        if !prompt {
+            return unsafe { AXIsProcessTrusted() != 0 };
+        }
+
+        unsafe {
+            let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+            let value = CFBoolean::true_value();
+            let options = CFDictionary::from_CFType_pairs(&[(key, value)]);
+            AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) != 0
+        }
     }
 
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
+        static kAXTrustedCheckOptionPrompt: CFStringRef;
         fn AXIsProcessTrusted() -> u8;
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
     }
 }
 
