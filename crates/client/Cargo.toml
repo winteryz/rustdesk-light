@@ -22,6 +22,7 @@ nokhwa = { version = "0.10.10", default-features = true, features = ["input-msmf
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.23.2"
 nokhwa = { version = "0.10.10", default-features = true, features = ["input-avfoundation"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"] }

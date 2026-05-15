@@ -936,42 +936,90 @@ mod linux_input {
 
 #[cfg(target_os = "macos")]
 mod macos_input {
-    use std::process::Command;
+    use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::geometry::CGPoint;
+    use std::thread;
+    use std::time::Duration;
 
     pub(super) fn move_mouse(x: i32, y: i32) -> String {
-        let action = format!("m:{x},{y}");
-        match run_cliclick(&[&action]) {
+        match post_move(x, y) {
             Ok(()) => format!("remote_desktop_input\nmessage=mouse moved {x} {y}"),
             Err(error) => format!("remote_desktop_error\nmessage={error}"),
         }
     }
 
     pub(super) fn click(x: i32, y: i32, button: &str) -> String {
-        let kind = if button == "right" { "rc" } else { "c" };
-        let action = format!("{kind}:{x},{y}");
-        match run_cliclick(&[&action]) {
+        match post_click(x, y, button) {
             Ok(()) => format!("remote_desktop_input\nmessage=click {button} {x} {y}"),
             Err(error) => format!("remote_desktop_error\nmessage={error}"),
         }
     }
 
-    fn run_cliclick(args: &[&str]) -> Result<(), String> {
-        let output = Command::new("cliclick")
-            .args(args)
-            .output()
-            .map_err(|error| {
-                format!(
-                    "cliclick failed: {error}; install cliclick and grant Accessibility permission for macOS input"
-                )
-            })?;
-        if output.status.success() {
+    fn post_move(x: i32, y: i32) -> Result<(), String> {
+        ensure_accessibility_permission()?;
+        let source = event_source()?;
+        post_mouse_event(&source, CGEventType::MouseMoved, CGMouseButton::Left, x, y)
+    }
+
+    fn post_click(x: i32, y: i32, button: &str) -> Result<(), String> {
+        ensure_accessibility_permission()?;
+        let source = event_source()?;
+        let (down, up, mouse_button) = match button {
+            "right" => (
+                CGEventType::RightMouseDown,
+                CGEventType::RightMouseUp,
+                CGMouseButton::Right,
+            ),
+            _ => (
+                CGEventType::LeftMouseDown,
+                CGEventType::LeftMouseUp,
+                CGMouseButton::Left,
+            ),
+        };
+        post_mouse_event(&source, CGEventType::MouseMoved, mouse_button, x, y)?;
+        post_mouse_event(&source, down, mouse_button, x, y)?;
+        thread::sleep(Duration::from_millis(20));
+        post_mouse_event(&source, up, mouse_button, x, y)
+    }
+
+    fn event_source() -> Result<CGEventSource, String> {
+        CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| "CGEventSourceCreate failed".to_string())
+    }
+
+    fn post_mouse_event(
+        source: &CGEventSource,
+        event_type: CGEventType,
+        button: CGMouseButton,
+        x: i32,
+        y: i32,
+    ) -> Result<(), String> {
+        let point = CGPoint::new(x as f64, y as f64);
+        let event = CGEvent::new_mouse_event(source.clone(), event_type, point, button)
+            .map_err(|_| "CGEventCreateMouseEvent failed".to_string())?;
+        event.post(CGEventTapLocation::HID);
+        Ok(())
+    }
+
+    fn ensure_accessibility_permission() -> Result<(), String> {
+        if accessibility_trusted() {
             Ok(())
         } else {
-            Err(format!(
-                "cliclick failed; grant Accessibility permission: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
+            Err(
+                "macOS input requires Accessibility permission for rdl-client / the launching terminal"
+                    .to_string(),
+            )
         }
+    }
+
+    fn accessibility_trusted() -> bool {
+        unsafe { AXIsProcessTrusted() != 0 }
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> u8;
     }
 }
 

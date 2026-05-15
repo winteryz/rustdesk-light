@@ -319,15 +319,14 @@ fn client_connection_once(
                 let worker_token = session_token.clone();
                 thread::spawn(move || {
                     let should_reply = !desktop_payload_is_move(&payload);
-                    let payload =
-                        crate::live_control::handle(&CommandKind::RemoteDesktop, &payload);
-                    if should_reply {
+                    let result = crate::live_control::handle(&CommandKind::RemoteDesktop, &payload);
+                    if should_reply || result.starts_with("remote_desktop_error\n") {
                         let _ = queue_message(
                             &worker_tx,
                             &worker_token,
                             Message::DesktopFrame {
                                 client_id: target_id,
-                                payload,
+                                payload: result,
                             },
                         );
                     }
