@@ -353,6 +353,8 @@ pub(crate) fn render_windows(
                     window.status = DesktopStatus::Ready;
                     window.notice = "Stopping".to_string();
                     window.running.store(false, Ordering::Relaxed);
+                    window.mouse_follow.store(false, Ordering::Relaxed);
+                    window.mouse_click.store(false, Ordering::Relaxed);
                 }
                 window.queue_payload(payload);
             }
@@ -431,30 +433,43 @@ fn render_toolbar(
         if let Ok(mut value) = target_fps.lock() {
             *value = fps;
         }
-        let mut capture = running.load(Ordering::Relaxed);
+        let is_running = running.load(Ordering::Relaxed);
         if ui
             .add_enabled(
                 !screens.is_empty(),
-                egui::Checkbox::new(&mut capture, "Desktop Capture"),
+                egui::Button::new(if is_running {
+                    "Stop Capture"
+                } else {
+                    "Start Capture"
+                }),
             )
-            .changed()
+            .clicked()
         {
-            running.store(capture, Ordering::Relaxed);
-            if capture {
+            if is_running {
+                running.store(false, Ordering::Relaxed);
+                mouse_follow.store(false, Ordering::Relaxed);
+                mouse_click.store(false, Ordering::Relaxed);
+                queue_ui_payload(queued, "action=stop".to_string());
+            } else {
+                running.store(true, Ordering::Relaxed);
                 queue_ui_payload(
                     queued,
                     format!("action=start\nscreen={selected}\nfps={fps}"),
                 );
-            } else {
-                queue_ui_payload(queued, "action=stop".to_string());
             }
         }
         let mut follow = mouse_follow.load(Ordering::Relaxed);
-        if ui.checkbox(&mut follow, "Mouse Move").changed() {
+        if ui
+            .add_enabled(is_running, egui::Checkbox::new(&mut follow, "Mouse Move"))
+            .changed()
+        {
             mouse_follow.store(follow, Ordering::Relaxed);
         }
         let mut click = mouse_click.load(Ordering::Relaxed);
-        if ui.checkbox(&mut click, "Mouse Click").changed() {
+        if ui
+            .add_enabled(is_running, egui::Checkbox::new(&mut click, "Mouse Click"))
+            .changed()
+        {
             mouse_click.store(click, Ordering::Relaxed);
         }
     });
