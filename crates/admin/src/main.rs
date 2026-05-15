@@ -5,8 +5,8 @@ mod user_interaction;
 
 use eframe::egui;
 use rdl_protocol::{
-    read_envelope, write_envelope_with_token, ClientInfo, CommandKind, Message, Role,
-    DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT,
+    read_envelope, write_envelope_with_token, ClientInfo, CommandKind, EnvelopeDecoder, Message,
+    Role, DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT,
 };
 use std::collections::HashSet;
 use std::fs;
@@ -25,6 +25,7 @@ const INITIAL_RECONNECT_DELAY_MS: u64 = 500;
 const MAX_RECONNECT_DELAY_MS: u64 = 8_000;
 const NETWORK_POLL_INTERVAL_MS: u64 = 16;
 const GUI_FRAME_INTERVAL_MS: u64 = 16;
+const NETWORK_IDLE_SLEEP_MS: u64 = 4;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env();
@@ -199,6 +200,7 @@ fn admin_connection_once(
         Message::ListClients,
     )?;
     event_sink.send(AdminEvent::Connected);
+    let mut decoder = EnvelopeDecoder::new();
 
     loop {
         while let Ok(input) = input_rx.try_recv() {
@@ -245,20 +247,18 @@ fn admin_connection_once(
             }
         }
 
-        let message = match read_envelope(&mut stream) {
-            Ok(envelope) => envelope.message,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
+        let Some(message) = (match decoder.read_next(&mut stream) {
+            Ok(Some(envelope)) => Some(envelope.message),
+            Ok(None) => {
+                thread::sleep(Duration::from_millis(NETWORK_IDLE_SLEEP_MS));
                 continue;
             }
             Err(error) => {
                 event_sink.send(AdminEvent::Log(format!("network read failed: {error}")));
                 return Ok(AdminConnectionExit::Disconnected);
             }
+        }) else {
+            continue;
         };
 
         match message {

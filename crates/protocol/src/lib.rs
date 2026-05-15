@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::{self, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_SERVER_IP: &str = "127.0.0.1";
@@ -608,6 +608,66 @@ pub fn read_envelope(reader: &mut impl Read) -> io::Result<Envelope> {
     frame.resize(HEADER_LEN + remaining_len as usize, 0);
     reader.read_exact(&mut frame[HEADER_LEN..])?;
     decode_envelope(&frame).map_err(to_invalid_data)
+}
+
+pub struct EnvelopeDecoder {
+    buffer: Vec<u8>,
+}
+
+impl EnvelopeDecoder {
+    pub fn new() -> Self {
+        Self {
+            buffer: Vec::with_capacity(64 * 1024),
+        }
+    }
+
+    pub fn read_next(&mut self, reader: &mut impl Read) -> io::Result<Option<Envelope>> {
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => return Err(io::Error::new(ErrorKind::UnexpectedEof, "peer closed")),
+                Ok(n) => self.buffer.extend_from_slice(&chunk[..n]),
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        self.try_decode_one()
+    }
+
+    fn try_decode_one(&mut self) -> io::Result<Option<Envelope>> {
+        if self.buffer.len() < HEADER_LEN {
+            return Ok(None);
+        }
+        if self.buffer[0..4] != FRAME_MAGIC {
+            return Err(to_invalid_data(ProtocolError::InvalidMagic));
+        }
+        let remaining_len = u32::from_be_bytes([
+            self.buffer[6],
+            self.buffer[7],
+            self.buffer[8],
+            self.buffer[9],
+        ]);
+        if remaining_len > MAX_FRAME_LEN {
+            return Err(to_invalid_data(ProtocolError::FrameTooLarge));
+        }
+        let frame_len = HEADER_LEN + remaining_len as usize;
+        if self.buffer.len() < frame_len {
+            return Ok(None);
+        }
+        let frame = self.buffer[..frame_len].to_vec();
+        self.buffer.drain(..frame_len);
+        decode_envelope(&frame).map(Some).map_err(to_invalid_data)
+    }
+}
+
+impl Default for EnvelopeDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

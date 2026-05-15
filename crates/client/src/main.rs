@@ -7,7 +7,7 @@ mod user_interaction;
 
 use eframe::egui;
 use rdl_protocol::{
-    read_envelope, write_envelope_with_token, CommandKind, Message, Role, DEFAULT_SERVER_IP,
+    write_envelope_with_token, CommandKind, EnvelopeDecoder, Message, Role, DEFAULT_SERVER_IP,
     DEFAULT_SERVER_PORT,
 };
 use std::fs;
@@ -26,6 +26,7 @@ const INITIAL_RECONNECT_DELAY_MS: u64 = 500;
 const MAX_RECONNECT_DELAY_MS: u64 = 8_000;
 const NETWORK_POLL_INTERVAL_MS: u64 = 16;
 const GUI_FRAME_INTERVAL_MS: u64 = 16;
+const NETWORK_IDLE_SLEEP_MS: u64 = 4;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env();
@@ -187,6 +188,7 @@ fn client_connection_once(
     )?;
 
     let mut reader = stream;
+    let mut decoder = EnvelopeDecoder::new();
     let mut session_token = String::new();
     let desktop_stream = Arc::new(DesktopStreamState {
         running: AtomicBool::new(false),
@@ -208,20 +210,18 @@ fn client_connection_once(
             }
         }
 
-        let message = match read_envelope(&mut reader) {
-            Ok(envelope) => envelope.message,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
+        let Some(message) = (match decoder.read_next(&mut reader) {
+            Ok(Some(envelope)) => Some(envelope.message),
+            Ok(None) => {
+                thread::sleep(Duration::from_millis(NETWORK_IDLE_SLEEP_MS));
                 continue;
             }
             Err(error) => {
                 event_sink.send(ClientEvent::Log(format!("network read failed: {error}")));
                 break;
             }
+        }) else {
+            continue;
         };
 
         match message {
