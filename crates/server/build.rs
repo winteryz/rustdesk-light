@@ -5,20 +5,14 @@ fn main() {
 }
 
 fn configure_macos_build() {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
-    let plist = std::path::Path::new(&manifest_dir).join("macos/Info.plist");
-    println!(
-        "cargo:rustc-link-arg-bin=rdl-client=-Wl,-sectcreate,__TEXT,__info_plist,{}",
-        plist.display()
-    );
-    println!("cargo:rerun-if-changed={}", plist.display());
     println!("cargo:rerun-if-env-changed=RDL_SKIP_MACOS_ADHOC_SIGN");
     println!("cargo:rerun-if-env-changed=RDL_MACOS_CODESIGN_IDENTIFIER");
 
     if std::env::var_os("RDL_SKIP_MACOS_ADHOC_SIGN").is_some() {
         return;
     }
-    spawn_macos_adhoc_signer("rdl-client", "local.rust-desk-light.client", &manifest_dir);
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
+    spawn_macos_adhoc_signer("rdl-server", "local.rust-desk-light.server", &manifest_dir);
 }
 
 fn spawn_macos_adhoc_signer(binary_name: &str, default_identifier: &str, manifest_dir: &str) {
