@@ -1,3 +1,4 @@
+use crate::windowing;
 use eframe::egui;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -155,11 +156,7 @@ pub(crate) fn render_windows(
             identity_title(&window.hostname, &window.username)
         );
         let viewport_id = egui::ViewportId::from_hash_of(("admin_remote_terminal", &client_id));
-        let builder = egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_inner_size([760.0, 520.0])
-            .with_min_inner_size([420.0, 320.0])
-            .with_resizable(true);
+        let builder = windowing::child_viewport_builder(title, [760.0, 520.0], [420.0, 320.0]);
 
         let lines = window.lines.clone();
         let status = window.status.clone();
@@ -180,6 +177,7 @@ pub(crate) fn render_windows(
             egui::CentralPanel::default()
                 .frame(egui::Frame::default().fill(COLOR_BG).inner_margin(12.0))
                 .show_inside(ui, |ui| {
+                    windowing::render_child_window_controls(ui);
                     render_toolbar(ui, &lines, &copy_requested, &clear_requested);
                     ui.add_space(8.0);
                     let input_height = 42.0;

@@ -1,3 +1,4 @@
+use crate::windowing;
 use base64::Engine;
 use eframe::egui;
 use std::path::PathBuf;
@@ -272,11 +273,7 @@ pub(crate) fn render_windows(
             identity_title(&window.hostname, &window.username)
         );
         let viewport_id = egui::ViewportId::from_hash_of(("camera", &window.client_id));
-        let builder = egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_inner_size([860.0, 640.0])
-            .with_min_inner_size([680.0, 500.0])
-            .with_resizable(true);
+        let builder = windowing::child_viewport_builder(title, [860.0, 640.0], [680.0, 500.0]);
 
         let client_id = window.client_id.clone();
         let close_requested = window.close_requested.clone();
@@ -305,6 +302,7 @@ pub(crate) fn render_windows(
             egui::CentralPanel::default()
                 .frame(egui::Frame::default().fill(COLOR_BG).inner_margin(12.0))
                 .show_inside(ui, |ui| {
+                    windowing::render_child_window_controls(ui);
                     render_toolbar(
                         ui,
                         &devices,

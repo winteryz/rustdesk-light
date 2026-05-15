@@ -1,3 +1,4 @@
+use crate::windowing;
 use eframe::egui;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -107,11 +108,7 @@ pub(crate) fn render_windows(
             identity_title(&window.hostname, &window.username)
         );
         let viewport_id = egui::ViewportId::from_hash_of(("admin_text_chat", &client_id));
-        let builder = egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_inner_size([480.0, 420.0])
-            .with_min_inner_size([360.0, 300.0])
-            .with_resizable(true);
+        let builder = windowing::child_viewport_builder(title, [480.0, 420.0], [360.0, 300.0]);
 
         let messages = window.messages.clone();
         let draft = window.draft.clone();
@@ -126,6 +123,7 @@ pub(crate) fn render_windows(
             egui::CentralPanel::default()
                 .frame(egui::Frame::default().fill(COLOR_BG).inner_margin(12.0))
                 .show_inside(ui, |ui| {
+                    windowing::render_child_window_controls(ui);
                     let input_height = 42.0;
                     let history_height = (ui.available_height() - input_height - 8.0).max(80.0);
                     egui::Frame::default()

@@ -1,3 +1,4 @@
+use crate::windowing;
 use eframe::egui;
 use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 use std::fs;
@@ -197,11 +198,7 @@ pub(crate) fn render_windows(
             identity_title(&window.hostname, &window.username)
         );
         let viewport_id = egui::ViewportId::from_hash_of(("admin_file_manager", &client_id));
-        let builder = egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_inner_size([1080.0, 620.0])
-            .with_min_inner_size([820.0, 460.0])
-            .with_resizable(true);
+        let builder = windowing::child_viewport_builder(title, [1080.0, 620.0], [820.0, 460.0]);
 
         let current_path = window.current_path.clone();
         let path_input = window.path_input.clone();
@@ -233,6 +230,7 @@ pub(crate) fn render_windows(
             egui::CentralPanel::default()
                 .frame(egui::Frame::default().fill(COLOR_BG).inner_margin(12.0))
                 .show_inside(ui, |ui| {
+                    windowing::render_child_window_controls(ui);
                     let content_height = (ui.available_height() - 52.0).max(260.0);
                     ui.allocate_ui_with_layout(
                         egui::vec2(ui.available_width(), content_height),

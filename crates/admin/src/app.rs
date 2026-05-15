@@ -1,7 +1,7 @@
 use crate::{
     command_menu, live_control, remote_management,
     runtime::{hostname, load_admin_identity, os_label, terminal_mode, username, Config},
-    user_interaction,
+    user_interaction, windowing,
 };
 use base64::Engine;
 use eframe::egui;
@@ -1240,11 +1240,7 @@ impl AdminApp {
                 command_window_identity_title(&window.hostname, &window.username)
             );
             let viewport_id = egui::ViewportId::from_hash_of(("command_result", window.id));
-            let builder = egui::ViewportBuilder::default()
-                .with_title(title)
-                .with_inner_size([760.0, 460.0])
-                .with_min_inner_size([260.0, 180.0])
-                .with_resizable(true);
+            let builder = windowing::child_viewport_builder(title, [760.0, 460.0], [260.0, 180.0]);
 
             let command = window.command.clone();
             let status = window.status;
@@ -1265,6 +1261,7 @@ impl AdminApp {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::default().fill(COLOR_BG).inner_margin(12.0))
                     .show_inside(ui, |ui| {
+                        windowing::render_child_window_controls(ui);
                         let status_bar_height = 44.0;
                         let content_height =
                             (ui.available_height() - status_bar_height - 8.0).max(0.0);
