@@ -2147,7 +2147,7 @@ fn process_column_spec(header: &str) -> (f32, f32) {
     match header.to_ascii_lowercase().as_str() {
         "pid" | "ppid" => (0.8, 0.0),
         "cpu" | "pcpu" | "%cpu" | "memorymb" | "pmem" | "%mem" => (0.9, 0.0),
-        "name" | "processname" | "comm" => (2.4, 0.0),
+        "name" | "processname" | "comm" | "command" => (3.8, 0.0),
         _ => (1.2, 0.0),
     }
 }

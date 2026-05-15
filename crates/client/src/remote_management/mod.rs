@@ -43,6 +43,8 @@ fn process_list() -> String {
             r#"Write-Output "PID`tName`tCPU`tMemoryMB"; Get-Process | Sort-Object CPU -Descending | ForEach-Object { "{0}`t{1}`t{2:N1}`t{3:N1}" -f $_.Id,$_.ProcessName,$_.CPU,($_.WorkingSet64/1MB) }"#,
             10_000,
         )
+    } else if cfg!(target_os = "macos") {
+        macos_process_list()
     } else {
         let output = run_command(
             "ps",
@@ -56,6 +58,33 @@ fn process_list() -> String {
         }
     };
     join_sections("process_list", vec![output])
+}
+
+fn macos_process_list() -> String {
+    let output = run_command(
+        "ps",
+        &["-axo", "pid=,ppid=,pcpu=,pmem=,command=", "-r", "-ww"],
+        10_000,
+    );
+    if output.starts_with("ps failed:") || output.starts_with("ps timed out") {
+        return output;
+    }
+
+    let mut rows = vec!["PID\tPPID\tCPU\tMEM\tCommand".to_string()];
+    rows.extend(output.lines().filter_map(|line| {
+        let mut cells = line.split_whitespace();
+        let pid = cells.next()?.trim();
+        let ppid = cells.next()?.trim();
+        let cpu = cells.next()?.trim();
+        let mem = cells.next()?.trim();
+        let command = cells.collect::<Vec<_>>().join(" ");
+        if pid.is_empty() || command.is_empty() {
+            None
+        } else {
+            Some(format!("{pid}\t{ppid}\t{cpu}\t{mem}\t{command}"))
+        }
+    }));
+    rows.join("\n")
 }
 
 fn kill_target_process(payload: &str) -> String {
@@ -108,6 +137,8 @@ fn event_log_summary() -> String {
             r#"Write-Output "Time`tLevel`tProvider`tId`tMessage"; Get-WinEvent -LogName System -MaxEvents 20 | ForEach-Object { $message=($_.Message -replace "`r|`n|`t", " "); "{0}`t{1}`t{2}`t{3}`t{4}" -f $_.TimeCreated,$_.LevelDisplayName,$_.ProviderName,$_.Id,$message }"#,
             80,
         )
+    } else if cfg!(target_os = "macos") {
+        macos_event_log_summary()
     } else {
         run_first_available(
             &[
@@ -118,4 +149,67 @@ fn event_log_summary() -> String {
         )
     };
     join_sections("event_log_summary", vec![output])
+}
+
+fn macos_event_log_summary() -> String {
+    let output = run_command(
+        "sh",
+        &[
+            "-lc",
+            "/usr/bin/log show --style compact --last 15m --predicate 'eventType == logEvent AND (messageType == error OR messageType == fault)' 2>/dev/null | head -n 80",
+        ],
+        100,
+    );
+    if output.starts_with("sh failed:") || output.starts_with("sh timed out") {
+        return output;
+    }
+
+    let mut rows = vec!["Time\tLevel\tProvider\tId\tMessage".to_string()];
+    rows.extend(output.lines().filter_map(macos_log_row));
+    if rows.len() == 1 {
+        rows.push("none\tInfo\tmacOS\t-\tNo recent error or fault events found".to_string());
+    }
+    rows.join("\n")
+}
+
+fn macos_log_row(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with("Timestamp") {
+        return None;
+    }
+
+    let (time, rest) = split_at_checked(line, 23)?;
+    let rest = rest.trim_start();
+    let mut parts = rest.splitn(3, char::is_whitespace);
+    let level = parts.next()?.trim();
+    let process = parts.next()?.trim();
+    let message = parts.next().unwrap_or_default().trim();
+    if time.trim().is_empty() || level.is_empty() || process.is_empty() {
+        return None;
+    }
+
+    let provider = message
+        .split_once(']')
+        .and_then(|(prefix, _)| prefix.strip_prefix('['))
+        .unwrap_or(process)
+        .trim();
+    let message = sanitize_table_cell(message);
+    Some(format!(
+        "{}\t{}\t{}\t-\t{}",
+        time.trim(),
+        level,
+        sanitize_table_cell(provider),
+        message
+    ))
+}
+
+fn split_at_checked(value: &str, mid: usize) -> Option<(&str, &str)> {
+    if value.len() < mid || !value.is_char_boundary(mid) {
+        return None;
+    }
+    Some(value.split_at(mid))
+}
+
+fn sanitize_table_cell(value: &str) -> String {
+    value.replace(['\t', '\r', '\n'], " ")
 }

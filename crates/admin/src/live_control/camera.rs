@@ -399,28 +399,37 @@ fn render_toolbar(
                 .lock()
                 .map(|value| *value)
                 .unwrap_or_default();
+            ui.label(egui::RichText::new("Device").size(12.0).color(COLOR_MUTED));
+            let combo_width = (ui.available_width() - 12.0).max(180.0);
             ui.add_enabled_ui(!is_running, |ui| {
                 egui::ComboBox::from_id_salt("camera_device_select")
+                    .width(combo_width)
                     .selected_text(device_label(devices, selected))
                     .show_ui(ui, |ui| {
                         for device in devices {
-                            ui.selectable_value(
+                            let response = ui.selectable_value(
                                 &mut selected,
                                 device.index,
                                 device_label_one(device),
                             );
+                            if !device.description.trim().is_empty() {
+                                response.on_hover_text(device.description.trim());
+                            }
                         }
                     });
             });
             if let Ok(mut value) = selected_device.lock() {
                 *value = selected;
             }
+        });
+        ui.horizontal(|ui| {
             if ui
                 .add_enabled(!is_running, egui::Button::new("Reload Devices"))
                 .clicked()
             {
                 queue_ui_payload(queued, "action=devices".to_string());
             }
+            ui.separator();
             let mut selected_quality = quality
                 .lock()
                 .map(|value| value.clone())
@@ -441,6 +450,10 @@ fn render_toolbar(
             if let Ok(mut value) = quality.lock() {
                 *value = selected_quality.clone();
             }
+            let selected = selected_device
+                .lock()
+                .map(|value| *value)
+                .unwrap_or_default();
             if ui
                 .add_enabled(
                     !devices.is_empty(),
@@ -754,14 +767,21 @@ fn device_label(devices: &[CameraDevice], selected: usize) -> String {
 }
 
 fn device_label_one(device: &CameraDevice) -> String {
-    if device.description.trim().is_empty() {
-        format!("Camera {} - {}", device.index, device.name)
-    } else {
-        format!(
-            "Camera {} - {} ({})",
-            device.index, device.name, device.description
-        )
+    let name = truncate_label(device.name.trim(), 56);
+    format!("Camera {} - {}", device.index, name)
+}
+
+fn truncate_label(value: &str, max_chars: usize) -> String {
+    let value = value.trim();
+    if value.chars().count() <= max_chars {
+        return value.to_string();
     }
+    let mut shortened = value
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    shortened.push_str("...");
+    shortened
 }
 
 fn quality_label(value: &str) -> &'static str {

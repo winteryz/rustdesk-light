@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,10 +22,26 @@ pub fn run_command_timeout(
         Ok(child) => child,
         Err(error) => return format!("{program} failed: {error}"),
     };
+
+    let stdout_reader = child.stdout.take().map(|mut stdout| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stdout.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut stderr| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+
     let started = Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
             Ok(None) => {
                 let _ = child.kill();
@@ -34,17 +50,16 @@ pub fn run_command_timeout(
             }
             Err(error) => return format!("{program} wait failed: {error}"),
         }
-    }
-    match child.wait_with_output() {
-        Ok(output) => command_output_text(
-            program,
-            output.status.success(),
-            output.stdout,
-            output.stderr,
-            max_lines,
-        ),
-        Err(error) => format!("{program} failed: {error}"),
-    }
+    };
+
+    let stdout = stdout_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+
+    command_output_text(program, status.success(), stdout, stderr, max_lines)
 }
 
 pub fn run_powershell(script: &str, max_lines: usize) -> String {
@@ -159,7 +174,25 @@ pub fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 pub fn hostname() -> String {
     std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .map_err(|error| error.to_string())
+        .or_else(|_| std::env::var("COMPUTERNAME").map_err(|error| error.to_string()))
+        .or_else(|_| command_first_line("scutil", &["--get", "ComputerName"]))
+        .or_else(|_| command_first_line("scutil", &["--get", "LocalHostName"]))
+        .or_else(|_| command_first_line("hostname", &[]))
+        .or_else(|_| {
+            std::fs::read_to_string("/etc/hostname")
+                .map(|value| value.trim().to_string())
+                .map_err(|error| error.to_string())
+        })
+        .map(|value| value.trim().to_string())
+        .map_err(|error| error.to_string())
+        .and_then(|value| {
+            if value.is_empty() {
+                Err("empty hostname".to_string())
+            } else {
+                Ok(value)
+            }
+        })
         .unwrap_or_else(|_| "unknown-host".to_string())
 }
 
@@ -202,6 +235,24 @@ fn command_output_text(
         text.push_str("ok");
     }
     truncate_lines(&text, max_lines)
+}
+
+fn command_first_line(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!("{program} exited with error"));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| error.to_string())?
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "empty output".to_string())
 }
 
 fn truncate_lines(value: &str, max_lines: usize) -> String {

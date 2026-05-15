@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>local.rust-desk-light.client</string>
+    <key>CFBundleName</key>
+    <string>Rust Desk Light Client</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Rust Desk Light uses the camera when an admin starts camera live control.</string>
+</dict>
+</plist>

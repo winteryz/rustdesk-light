@@ -472,83 +472,101 @@ fn render_toolbar(
     running: &Arc<AtomicBool>,
     queued: &Arc<Mutex<Vec<String>>>,
 ) {
-    ui.horizontal(|ui| {
-        let mut selected = selected_screen
-            .lock()
-            .map(|value| *value)
-            .unwrap_or_default();
-        egui::ComboBox::from_id_salt("remote_desktop_screen_select")
-            .selected_text(screen_label(screens, selected))
-            .show_ui(ui, |ui| {
-                for screen in screens {
-                    ui.selectable_value(&mut selected, screen.index, screen_label_one(screen));
-                }
-            });
-        if let Ok(mut value) = selected_screen.lock() {
-            *value = selected;
-        }
-        if ui.button("Reload Screens").clicked() {
-            queue_ui_payload(queued, "action=screens".to_string());
-        }
+    ui.vertical(|ui| {
         let is_running = running.load(Ordering::Relaxed);
-        let mut selected_quality = quality
-            .lock()
-            .map(|value| value.clone())
-            .unwrap_or_else(|_| DEFAULT_QUALITY.to_string());
-        ui.add_enabled_ui(!is_running, |ui| {
-            egui::ComboBox::from_id_salt("remote_desktop_quality")
-                .selected_text(quality_label(&selected_quality))
-                .show_ui(ui, |ui| {
-                    for option in ["low", "medium", "high"] {
-                        ui.selectable_value(
-                            &mut selected_quality,
-                            option.to_string(),
-                            quality_label(option),
-                        );
-                    }
-                });
-        });
-        if let Ok(mut value) = quality.lock() {
-            *value = selected_quality.clone();
-        }
-        if ui
-            .add_enabled(
-                !screens.is_empty(),
-                egui::Button::new(if is_running {
-                    "Stop Capture"
-                } else {
-                    "Start Capture"
-                }),
-            )
-            .clicked()
-        {
-            if is_running {
-                running.store(false, Ordering::Relaxed);
-                mouse_follow.store(false, Ordering::Relaxed);
-                mouse_click.store(false, Ordering::Relaxed);
-                queue_ui_payload(queued, "action=stop".to_string());
-            } else {
-                running.store(true, Ordering::Relaxed);
-                queue_ui_payload(
-                    queued,
-                    format!("action=start\nscreen={selected}\nquality={selected_quality}"),
-                );
+        ui.horizontal(|ui| {
+            let mut selected = selected_screen
+                .lock()
+                .map(|value| *value)
+                .unwrap_or_default();
+            ui.label(egui::RichText::new("Screen").size(12.0).color(COLOR_MUTED));
+            let combo_width = (ui.available_width() - 12.0).max(180.0);
+            ui.add_enabled_ui(!is_running, |ui| {
+                egui::ComboBox::from_id_salt("remote_desktop_screen_select")
+                    .width(combo_width)
+                    .selected_text(screen_label(screens, selected))
+                    .show_ui(ui, |ui| {
+                        for screen in screens {
+                            ui.selectable_value(
+                                &mut selected,
+                                screen.index,
+                                screen_label_one(screen),
+                            );
+                        }
+                    });
+            });
+            if let Ok(mut value) = selected_screen.lock() {
+                *value = selected;
             }
-        }
-        let mut follow = mouse_follow.load(Ordering::Relaxed);
-        if ui
-            .add_enabled(is_running, egui::Checkbox::new(&mut follow, "Mouse Move"))
-            .changed()
-        {
-            mouse_follow.store(follow, Ordering::Relaxed);
-        }
-        let mut click = mouse_click.load(Ordering::Relaxed);
-        if ui
-            .add_enabled(is_running, egui::Checkbox::new(&mut click, "Mouse Click"))
-            .changed()
-        {
-            mouse_click.store(click, Ordering::Relaxed);
-        }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Reload Screens").clicked() {
+                queue_ui_payload(queued, "action=screens".to_string());
+            }
+            ui.separator();
+            let mut selected_quality = quality
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_else(|_| DEFAULT_QUALITY.to_string());
+            ui.add_enabled_ui(!is_running, |ui| {
+                egui::ComboBox::from_id_salt("remote_desktop_quality")
+                    .selected_text(quality_label(&selected_quality))
+                    .show_ui(ui, |ui| {
+                        for option in ["low", "medium", "high"] {
+                            ui.selectable_value(
+                                &mut selected_quality,
+                                option.to_string(),
+                                quality_label(option),
+                            );
+                        }
+                    });
+            });
+            if let Ok(mut value) = quality.lock() {
+                *value = selected_quality.clone();
+            }
+            let selected = selected_screen
+                .lock()
+                .map(|value| *value)
+                .unwrap_or_default();
+            if ui
+                .add_enabled(
+                    !screens.is_empty(),
+                    egui::Button::new(if is_running {
+                        "Stop Capture"
+                    } else {
+                        "Start Capture"
+                    }),
+                )
+                .clicked()
+            {
+                if is_running {
+                    running.store(false, Ordering::Relaxed);
+                    mouse_follow.store(false, Ordering::Relaxed);
+                    mouse_click.store(false, Ordering::Relaxed);
+                    queue_ui_payload(queued, "action=stop".to_string());
+                } else {
+                    running.store(true, Ordering::Relaxed);
+                    queue_ui_payload(
+                        queued,
+                        format!("action=start\nscreen={selected}\nquality={selected_quality}"),
+                    );
+                }
+            }
+            let mut follow = mouse_follow.load(Ordering::Relaxed);
+            if ui
+                .add_enabled(is_running, egui::Checkbox::new(&mut follow, "Mouse Move"))
+                .changed()
+            {
+                mouse_follow.store(follow, Ordering::Relaxed);
+            }
+            let mut click = mouse_click.load(Ordering::Relaxed);
+            if ui
+                .add_enabled(is_running, egui::Checkbox::new(&mut click, "Mouse Click"))
+                .changed()
+            {
+                mouse_click.store(click, Ordering::Relaxed);
+            }
+        });
     });
 }
 

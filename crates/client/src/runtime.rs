@@ -1,6 +1,7 @@
 use rdl_protocol::{DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT};
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(Clone)]
 pub(crate) struct Config {
@@ -62,11 +63,23 @@ pub(crate) fn gui_available() -> bool {
 
 pub(crate) fn hostname() -> String {
     std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .map_err(|error| error.to_string())
+        .or_else(|_| std::env::var("COMPUTERNAME").map_err(|error| error.to_string()))
+        .or_else(|_| command_first_line("scutil", &["--get", "ComputerName"]))
+        .or_else(|_| command_first_line("scutil", &["--get", "LocalHostName"]))
+        .or_else(|_| command_first_line("hostname", &[]))
         .or_else(|_| {
             std::fs::read_to_string("/etc/hostname")
                 .map(|value| value.trim().to_string())
                 .map_err(|error| error.to_string())
+        })
+        .and_then(|value| {
+            let value = value.trim().to_string();
+            if value.is_empty() {
+                Err("empty hostname".to_string())
+            } else {
+                Ok(value)
+            }
         })
         .unwrap_or_else(|_| "unknown-host".to_string())
 }
@@ -154,6 +167,24 @@ fn identity_file_path(file_name: &str) -> PathBuf {
             .join(file_name);
     }
     PathBuf::from(file_name)
+}
+
+fn command_first_line(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!("{program} exited with error"));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| error.to_string())?
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "empty output".to_string())
 }
 
 fn simple_hash(value: &str) -> u64 {
