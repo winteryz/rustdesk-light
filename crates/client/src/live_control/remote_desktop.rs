@@ -26,17 +26,21 @@ fn stop() -> String {
 }
 
 fn screens() -> String {
-    if !cfg!(target_os = "windows") {
-        return "remote_desktop_error\nmessage=screen listing is currently implemented for windows only"
-            .to_string();
-    }
     #[cfg(target_os = "windows")]
     {
         return windows_capture::screens();
     }
+    #[cfg(target_os = "linux")]
+    {
+        return linux_capture::screens();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos_capture::screens();
+    }
     #[allow(unreachable_code)]
     {
-        "remote_desktop_error\nmessage=screen listing is currently implemented for windows only"
+        "remote_desktop_error\nmessage=screen listing is not implemented for this platform"
             .to_string()
     }
 }
@@ -77,18 +81,21 @@ impl RemoteDesktopRequest {
 }
 
 fn screenshot(screen_index: usize) -> String {
-    if !cfg!(target_os = "windows") {
-        return "remote_desktop_error\nmessage=screenshot is currently implemented for windows only"
-            .to_string();
-    }
     #[cfg(target_os = "windows")]
     {
         return windows_capture::screenshot(screen_index);
     }
+    #[cfg(target_os = "linux")]
+    {
+        return linux_capture::screenshot(screen_index);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos_capture::screenshot(screen_index);
+    }
     #[allow(unreachable_code)]
     {
-        "remote_desktop_error\nmessage=screenshot is currently implemented for windows only"
-            .to_string()
+        "remote_desktop_error\nmessage=screenshot is not implemented for this platform".to_string()
     }
 }
 
@@ -330,11 +337,331 @@ mod windows_capture {
     }
 }
 
-fn click(x: Option<i32>, y: Option<i32>, button: &str) -> String {
-    if !cfg!(target_os = "windows") {
-        return "remote_desktop_error\nmessage=click is currently implemented for windows only"
-            .to_string();
+#[cfg(target_os = "linux")]
+mod linux_capture {
+    use base64::Engine;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    #[derive(Clone)]
+    struct Screen {
+        index: usize,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        primary: bool,
+        name: String,
     }
+
+    pub(super) fn screens() -> String {
+        match enum_screens() {
+            Ok(screens) => format_screens(&screens),
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    pub(super) fn screenshot(screen_index: usize) -> String {
+        match enum_screens()
+            .and_then(|screens| {
+                screens
+                    .into_iter()
+                    .find(|screen| screen.index == screen_index)
+                    .ok_or_else(|| format!("screen index {screen_index} is not available"))
+            })
+            .and_then(capture_screen)
+        {
+            Ok(frame) => frame,
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    fn enum_screens() -> Result<Vec<Screen>, String> {
+        if let Ok(output) = Command::new("xrandr").arg("--query").output() {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let screens = parse_xrandr(&text);
+                if !screens.is_empty() {
+                    return Ok(screens);
+                }
+            }
+        }
+        if std::env::var("WAYLAND_DISPLAY").is_ok() {
+            return Err(
+                "Wayland screen capture is not available in the lightweight backend; run under X11 or install a portal/scrap backend"
+                    .to_string(),
+            );
+        }
+        Err("xrandr was not found or no connected displays were reported".to_string())
+    }
+
+    fn parse_xrandr(text: &str) -> Vec<Screen> {
+        let mut screens = Vec::new();
+        for line in text.lines() {
+            if !line.contains(" connected") {
+                continue;
+            }
+            let parts = line.split_whitespace().collect::<Vec<_>>();
+            let Some(name) = parts.first() else {
+                continue;
+            };
+            let primary = parts.contains(&"primary");
+            let Some(mode) = parts
+                .iter()
+                .find(|part| parse_geometry(part).is_some())
+                .copied()
+            else {
+                continue;
+            };
+            let Some((width, height, x, y)) = parse_geometry(mode) else {
+                continue;
+            };
+            screens.push(Screen {
+                index: screens.len(),
+                x,
+                y,
+                width,
+                height,
+                primary,
+                name: (*name).to_string(),
+            });
+        }
+        screens
+    }
+
+    fn parse_geometry(value: &str) -> Option<(u32, u32, i32, i32)> {
+        let (size, rest) = value.split_once('+')?;
+        let (width, height) = size.split_once('x')?;
+        let (x, y) = rest.split_once('+')?;
+        Some((
+            width.parse().ok()?,
+            height.parse().ok()?,
+            x.parse().ok()?,
+            y.parse().ok()?,
+        ))
+    }
+
+    fn capture_screen(screen: Screen) -> Result<String, String> {
+        let path = temp_path("rdl-linux-screen", "jpg");
+        let geometry = format!(
+            "{}x{}+{}+{}",
+            screen.width, screen.height, screen.x, screen.y
+        );
+        let path_text = path.to_string_lossy().to_string();
+        let captured = run_capture_command("maim", &["-g", &geometry, &path_text]).or_else(|_| {
+            run_capture_command(
+                "import",
+                &["-window", "root", "-crop", &geometry, &path_text],
+            )
+        });
+        if captured.is_err() {
+            let _ = fs::remove_file(&path);
+            return Err(
+                "Linux capture requires maim or ImageMagick import on X11; Wayland needs a portal backend"
+                    .to_string(),
+            );
+        }
+        let bytes = fs::read(&path).map_err(|error| format!("read screenshot failed: {error}"))?;
+        let _ = fs::remove_file(&path);
+        encode_frame(screen, bytes, "jpeg")
+    }
+
+    fn run_capture_command(program: &str, args: &[&str]) -> Result<(), String> {
+        let output = Command::new(program)
+            .args(args)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).to_string())
+        }
+    }
+
+    fn encode_frame(screen: Screen, bytes: Vec<u8>, format: &str) -> Result<String, String> {
+        let image = image::load_from_memory(&bytes)
+            .map_err(|error| format!("load captured image failed: {error}"))?;
+        Ok(format!(
+            "remote_desktop_frame\nscreen_index={}\nscreen_width={}\nscreen_height={}\nimage_width={}\nimage_height={}\nformat={}\nbytes={}\npng_base64={}",
+            screen.index,
+            screen.width,
+            screen.height,
+            image.width(),
+            image.height(),
+            format,
+            bytes.len(),
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ))
+    }
+
+    fn format_screens(screens: &[Screen]) -> String {
+        let mut output = String::from("remote_desktop_screens");
+        for screen in screens {
+            output.push_str(&format!(
+                "\nscreen\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                screen.index,
+                screen.x,
+                screen.y,
+                screen.width,
+                screen.height,
+                if screen.primary { "true" } else { "false" },
+                sanitize(&screen.name)
+            ));
+        }
+        output
+    }
+
+    fn temp_path(prefix: &str, ext: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}.{}",
+            std::process::id(),
+            rdl_protocol::now_epoch_ms(),
+            ext
+        ))
+    }
+
+    fn sanitize(value: &str) -> String {
+        value.replace(['\t', '\r', '\n'], " ")
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_capture {
+    use base64::Engine;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    #[derive(Clone)]
+    struct Screen {
+        index: usize,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        primary: bool,
+        name: String,
+    }
+
+    pub(super) fn screens() -> String {
+        match enum_screens() {
+            Ok(screens) => format_screens(&screens),
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    pub(super) fn screenshot(screen_index: usize) -> String {
+        match enum_screens()
+            .and_then(|screens| {
+                screens
+                    .into_iter()
+                    .find(|screen| screen.index == screen_index)
+                    .ok_or_else(|| format!("screen index {screen_index} is not available"))
+            })
+            .and_then(capture_screen)
+        {
+            Ok(frame) => frame,
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    fn enum_screens() -> Result<Vec<Screen>, String> {
+        let script = r#"tell application "Finder" to get bounds of window of desktop"#;
+        let output = Command::new("osascript")
+            .args(["-e", script])
+            .output()
+            .map_err(|error| format!("osascript failed: {error}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let values = text
+            .split(',')
+            .filter_map(|item| item.trim().parse::<i32>().ok())
+            .collect::<Vec<_>>();
+        if values.len() != 4 {
+            return Err("could not read macOS desktop bounds".to_string());
+        }
+        let width = values[2].saturating_sub(values[0]).max(1) as u32;
+        let height = values[3].saturating_sub(values[1]).max(1) as u32;
+        Ok(vec![Screen {
+            index: 0,
+            x: values[0],
+            y: values[1],
+            width,
+            height,
+            primary: true,
+            name: "Main Display".to_string(),
+        }])
+    }
+
+    fn capture_screen(screen: Screen) -> Result<String, String> {
+        let path = temp_path("rdl-macos-screen", "jpg");
+        let rect = format!(
+            "{},{},{},{}",
+            screen.x, screen.y, screen.width, screen.height
+        );
+        let path_text = path.to_string_lossy().to_string();
+        let output = Command::new("screencapture")
+            .args(["-x", "-t", "jpg", "-R", &rect, &path_text])
+            .output()
+            .map_err(|error| format!("screencapture failed: {error}"))?;
+        if !output.status.success() {
+            let _ = fs::remove_file(&path);
+            return Err(format!(
+                "screencapture failed; grant Screen Recording permission: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let bytes = fs::read(&path).map_err(|error| format!("read screenshot failed: {error}"))?;
+        let _ = fs::remove_file(&path);
+        let image = image::load_from_memory(&bytes)
+            .map_err(|error| format!("load captured image failed: {error}"))?;
+        Ok(format!(
+            "remote_desktop_frame\nscreen_index={}\nscreen_width={}\nscreen_height={}\nimage_width={}\nimage_height={}\nformat=jpeg\nbytes={}\npng_base64={}",
+            screen.index,
+            screen.width,
+            screen.height,
+            image.width(),
+            image.height(),
+            bytes.len(),
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ))
+    }
+
+    fn format_screens(screens: &[Screen]) -> String {
+        let mut output = String::from("remote_desktop_screens");
+        for screen in screens {
+            output.push_str(&format!(
+                "\nscreen\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                screen.index,
+                screen.x,
+                screen.y,
+                screen.width,
+                screen.height,
+                if screen.primary { "true" } else { "false" },
+                sanitize(&screen.name)
+            ));
+        }
+        output
+    }
+
+    fn temp_path(prefix: &str, ext: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}.{}",
+            std::process::id(),
+            rdl_protocol::now_epoch_ms(),
+            ext
+        ))
+    }
+
+    fn sanitize(value: &str) -> String {
+        value.replace(['\t', '\r', '\n'], " ")
+    }
+}
+
+fn click(x: Option<i32>, y: Option<i32>, button: &str) -> String {
     let Some(x) = x else {
         return "remote_desktop_error\nmessage=missing x".to_string();
     };
@@ -345,9 +672,17 @@ fn click(x: Option<i32>, y: Option<i32>, button: &str) -> String {
     {
         return windows_input::click(x, y, button);
     }
+    #[cfg(target_os = "linux")]
+    {
+        return linux_input::click(x, y, button);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos_input::click(x, y, button);
+    }
     #[allow(unreachable_code)]
     {
-        "remote_desktop_error\nmessage=click is currently implemented for windows only".to_string()
+        "remote_desktop_error\nmessage=click is not implemented for this platform".to_string()
     }
 }
 
@@ -378,10 +713,6 @@ Write-Output "message=click {button} {x} {y}"
 }
 
 fn move_mouse(x: Option<i32>, y: Option<i32>) -> String {
-    if !cfg!(target_os = "windows") {
-        return "remote_desktop_error\nmessage=mouse move is currently implemented for windows only"
-            .to_string();
-    }
     let Some(x) = x else {
         return "remote_desktop_error\nmessage=missing x".to_string();
     };
@@ -392,10 +723,17 @@ fn move_mouse(x: Option<i32>, y: Option<i32>) -> String {
     {
         return windows_input::move_mouse(x, y);
     }
+    #[cfg(target_os = "linux")]
+    {
+        return linux_input::move_mouse(x, y);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos_input::move_mouse(x, y);
+    }
     #[allow(unreachable_code)]
     {
-        "remote_desktop_error\nmessage=mouse move is currently implemented for windows only"
-            .to_string()
+        "remote_desktop_error\nmessage=mouse move is not implemented for this platform".to_string()
     }
 }
 
@@ -448,6 +786,92 @@ mod windows_input {
             mouse_event(up, 0, 0, 0, 0);
         }
         format!("remote_desktop_input\nmessage=click {button} {x} {y}")
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_input {
+    use std::process::Command;
+
+    pub(super) fn move_mouse(x: i32, y: i32) -> String {
+        let x = x.to_string();
+        let y = y.to_string();
+        match run_xdotool(&["mousemove", &x, &y]) {
+            Ok(()) => format!("remote_desktop_input\nmessage=mouse moved {x} {y}"),
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    pub(super) fn click(x: i32, y: i32, button: &str) -> String {
+        let button_id = if button == "right" { "3" } else { "1" };
+        let x = x.to_string();
+        let y = y.to_string();
+        match run_xdotool(&["mousemove", &x, &y, "click", button_id]) {
+            Ok(()) => format!("remote_desktop_input\nmessage=click {button} {x} {y}"),
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    fn run_xdotool(args: &[&str]) -> Result<(), String> {
+        if std::env::var("WAYLAND_DISPLAY").is_ok() && std::env::var("DISPLAY").is_err() {
+            return Err(
+                "Linux input currently requires X11 xdotool; Wayland needs ydotool/portal backend"
+                    .to_string(),
+            );
+        }
+        let output = Command::new("xdotool")
+            .args(args)
+            .output()
+            .map_err(|error| format!("xdotool failed: {error}; install xdotool for X11 input"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "xdotool failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_input {
+    use std::process::Command;
+
+    pub(super) fn move_mouse(x: i32, y: i32) -> String {
+        let action = format!("m:{x},{y}");
+        match run_cliclick(&[&action]) {
+            Ok(()) => format!("remote_desktop_input\nmessage=mouse moved {x} {y}"),
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    pub(super) fn click(x: i32, y: i32, button: &str) -> String {
+        let kind = if button == "right" { "rc" } else { "c" };
+        let action = format!("{kind}:{x},{y}");
+        match run_cliclick(&[&action]) {
+            Ok(()) => format!("remote_desktop_input\nmessage=click {button} {x} {y}"),
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    fn run_cliclick(args: &[&str]) -> Result<(), String> {
+        let output = Command::new("cliclick")
+            .args(args)
+            .output()
+            .map_err(|error| {
+                format!(
+                    "cliclick failed: {error}; install cliclick and grant Accessibility permission for macOS input"
+                )
+            })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "cliclick failed; grant Accessibility permission: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
     }
 }
 
