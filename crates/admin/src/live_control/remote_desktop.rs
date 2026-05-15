@@ -16,6 +16,7 @@ const COLOR_GOOD: egui::Color32 = egui::Color32::from_rgb(24, 135, 84);
 const COLOR_BAD: egui::Color32 = egui::Color32::from_rgb(190, 58, 58);
 const COLOR_WARN: egui::Color32 = egui::Color32::from_rgb(179, 116, 28);
 const DEFAULT_QUALITY: &str = "medium";
+const TOOLBAR_CONTROL_HEIGHT: f32 = 24.0;
 const MOUSE_MOVE_INTERVAL: Duration = Duration::from_millis(33);
 
 pub(crate) struct RemoteDesktopWindow {
@@ -472,7 +473,8 @@ fn render_toolbar(
 ) {
     ui.vertical(|ui| {
         let is_running = running.load(Ordering::Relaxed);
-        ui.horizontal(|ui| {
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
             let mut selected = selected_screen
                 .lock()
                 .map(|value| *value)
@@ -497,7 +499,8 @@ fn render_toolbar(
                 *value = selected;
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
             if ui.button("Reload Screens").clicked() {
                 queue_ui_payload(queued, "action=screens".to_string());
             }

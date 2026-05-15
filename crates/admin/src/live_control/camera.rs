@@ -17,6 +17,7 @@ const COLOR_GOOD: egui::Color32 = egui::Color32::from_rgb(24, 135, 84);
 const COLOR_BAD: egui::Color32 = egui::Color32::from_rgb(190, 58, 58);
 const COLOR_WARN: egui::Color32 = egui::Color32::from_rgb(179, 116, 28);
 const DEFAULT_QUALITY: &str = "medium";
+const TOOLBAR_CONTROL_HEIGHT: f32 = 24.0;
 
 pub(crate) struct CameraWindow {
     pub(crate) client_id: String,
@@ -392,7 +393,8 @@ fn render_toolbar(
 ) {
     let is_running = running.load(Ordering::Relaxed);
     ui.vertical(|ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
             let mut selected = selected_device
                 .lock()
                 .map(|value| *value)
@@ -420,7 +422,8 @@ fn render_toolbar(
                 *value = selected;
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
             if ui
                 .add_enabled(!is_running, egui::Button::new("Reload Devices"))
                 .clicked()
@@ -475,13 +478,14 @@ fn render_toolbar(
                 }
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
             let mut path = save_path
                 .lock()
                 .map(|value| value.clone())
                 .unwrap_or_default();
             ui.add_sized(
-                [260.0, 22.0],
+                [260.0, TOOLBAR_CONTROL_HEIGHT],
                 egui::TextEdit::singleline(&mut path).hint_text("Save path"),
             );
             if let Ok(mut value) = save_path.lock() {
