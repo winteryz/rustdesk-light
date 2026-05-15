@@ -24,6 +24,8 @@ pub fn handle(command: &CommandKind, payload: &str) -> String {
 fn active_connections() -> String {
     let output = if cfg!(target_os = "windows") {
         run_command("netstat", &["-ano"], 40)
+    } else if cfg!(target_os = "macos") {
+        macos_active_connections()
     } else {
         run_first_available(
             &[
@@ -35,6 +37,23 @@ fn active_connections() -> String {
         )
     };
     join_sections("active_connections", vec![output])
+}
+
+fn macos_active_connections() -> String {
+    let output = run_command("lsof", &["-nP", "-iTCP", "-iUDP"], 200);
+    if output.starts_with("lsof failed:")
+        || output.starts_with("lsof timed out")
+        || output.starts_with("lsof exited with error")
+    {
+        return output;
+    }
+
+    let mut rows = vec!["Proto\tLocal\tForeign\tState\tPID\tProgram".to_string()];
+    rows.extend(output.lines().filter_map(macos_lsof_connection_row));
+    if rows.len() == 1 {
+        rows.push("none\t-\t-\tInfo\t-\tNo active TCP/UDP connections found".to_string());
+    }
+    rows.join("\n")
 }
 
 fn process_list() -> String {
@@ -233,9 +252,61 @@ fn sanitize_table_cell(value: &str) -> String {
     value.replace(['\t', '\r', '\n'], " ")
 }
 
+fn macos_lsof_connection_row(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with("COMMAND") {
+        return None;
+    }
+
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    if fields.len() < 9 {
+        return None;
+    }
+
+    let program = fields[0];
+    let pid = fields[1];
+    if !pid.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+
+    let proto = fields[7];
+    if !matches!(proto, "TCP" | "UDP") {
+        return None;
+    }
+
+    let mut endpoint_fields = &fields[8..];
+    let mut state = if proto == "UDP" { "UDP" } else { "-" };
+    if let Some(last) = endpoint_fields
+        .last()
+        .filter(|value| value.starts_with('(') && value.ends_with(')'))
+    {
+        state = last.trim_start_matches('(').trim_end_matches(')');
+        endpoint_fields = &endpoint_fields[..endpoint_fields.len().saturating_sub(1)];
+    }
+
+    let endpoint = endpoint_fields.join(" ");
+    if endpoint.trim().is_empty() {
+        return None;
+    }
+    let (local, foreign) = endpoint
+        .split_once("->")
+        .map(|(local, foreign)| (local, foreign))
+        .unwrap_or((endpoint.as_str(), "*"));
+
+    Some(format!(
+        "{}\t{}\t{}\t{}\t{}\t{}",
+        proto,
+        sanitize_table_cell(local),
+        sanitize_table_cell(foreign),
+        sanitize_table_cell(state),
+        pid,
+        sanitize_table_cell(program)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::macos_log_row;
+    use super::{macos_log_row, macos_lsof_connection_row};
 
     #[test]
     fn macos_log_row_parses_compact_error_lines_with_extra_spacing() {
@@ -254,5 +325,33 @@ mod tests {
     fn macos_log_row_ignores_log_show_status_lines() {
         assert!(macos_log_row("Filtering the log data using \"type == 1024\"").is_none());
         assert!(macos_log_row("Skipping info and debug messages").is_none());
+    }
+
+    #[test]
+    fn macos_lsof_connection_row_parses_tcp_listen_and_established() {
+        let listen = macos_lsof_connection_row(
+            "rapportd    972 voidm    9u  IPv4 0x28097430b3206655      0t0  TCP *:57828 (LISTEN)",
+        )
+        .expect("listen row should parse");
+        assert_eq!(listen, "TCP\t*:57828\t*\tLISTEN\t972\trapportd");
+
+        let established = macos_lsof_connection_row(
+            "Telegram   1399 voidm   47u  IPv4 0x342b2389781194e5      0t0  TCP 198.18.0.1:57823->91.108.56.142:443 (ESTABLISHED)",
+        )
+        .expect("established row should parse");
+        assert_eq!(
+            established,
+            "TCP\t198.18.0.1:57823\t91.108.56.142:443\tESTABLISHED\t1399\tTelegram"
+        );
+    }
+
+    #[test]
+    fn macos_lsof_connection_row_parses_udp() {
+        let row = macos_lsof_connection_row(
+            "rapportd    972 voidm   29u  IPv6 0x4663fa592f34f80f      0t0  UDP *:3722",
+        )
+        .expect("udp row should parse");
+
+        assert_eq!(row, "UDP\t*:3722\t*\tUDP\t972\trapportd");
     }
 }
