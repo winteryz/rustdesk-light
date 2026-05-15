@@ -152,6 +152,7 @@ Build view-only remote desktop before input control.
 - [x] Add screen selection before starting the remote desktop session.
 - [x] Add Ubuntu X11 testing documentation for Linux remote desktop.
 - [x] Improve admin remote desktop frame handling by coalescing frames and decoding off the UI thread.
+- [x] Move live video frames to binary `VideoFrame` transport instead of command/ack base64 payloads.
 
 Reference direction:
 
@@ -176,6 +177,7 @@ This should only be implemented after screen view and protocol reliability are g
 - [x] Reuse the Windows camera stream during capture instead of reopening the device per frame.
 - [x] Decode camera frames off the admin UI thread and coalesce latest frames.
 - [x] Linux/macOS lightweight snapshot fallback through local camera tools.
+- [x] Use shared binary `VideoFrame` transport for camera capture frames.
 
 ## Milestone 9: Packaging And Runtime
 

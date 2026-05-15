@@ -94,6 +94,36 @@ pub enum CommandKind {
     PluginManager,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VideoSource {
+    RemoteDesktop,
+    Camera,
+}
+
+impl VideoSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RemoteDesktop => "remote_desktop",
+            Self::Camera => "camera",
+        }
+    }
+
+    fn to_code(&self) -> u8 {
+        match self {
+            Self::RemoteDesktop => 1,
+            Self::Camera => 2,
+        }
+    }
+
+    fn from_code(value: u8) -> Result<Self, ProtocolError> {
+        match value {
+            1 => Ok(Self::RemoteDesktop),
+            2 => Ok(Self::Camera),
+            _ => Err(ProtocolError::InvalidVideoSource),
+        }
+    }
+}
+
 impl CommandKind {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -311,6 +341,22 @@ pub enum Message {
         client_id: String,
         payload: String,
     },
+    VideoControl {
+        target_id: String,
+        source: VideoSource,
+        payload: String,
+    },
+    VideoFrame {
+        client_id: String,
+        source: VideoSource,
+        seq: u64,
+        source_width: u32,
+        source_height: u32,
+        image_width: u32,
+        image_height: u32,
+        format: String,
+        bytes: Vec<u8>,
+    },
     Error {
         detail: String,
     },
@@ -336,6 +382,8 @@ impl Message {
             Self::DesktopControl { .. } => 10,
             Self::DesktopInput { .. } => 11,
             Self::DesktopFrame { .. } => 12,
+            Self::VideoControl { .. } => 13,
+            Self::VideoFrame { .. } => 14,
         }
     }
 
@@ -401,6 +449,36 @@ impl Message {
             Self::DesktopFrame { client_id, payload } => {
                 writer.string(client_id);
                 writer.string(payload);
+            }
+            Self::VideoControl {
+                target_id,
+                source,
+                payload,
+            } => {
+                writer.string(target_id);
+                writer.u8(source.to_code());
+                writer.string(payload);
+            }
+            Self::VideoFrame {
+                client_id,
+                source,
+                seq,
+                source_width,
+                source_height,
+                image_width,
+                image_height,
+                format,
+                bytes,
+            } => {
+                writer.string(client_id);
+                writer.u8(source.to_code());
+                writer.u64(*seq);
+                writer.u32(*source_width);
+                writer.u32(*source_height);
+                writer.u32(*image_width);
+                writer.u32(*image_height);
+                writer.string(format);
+                writer.byte_vec(bytes);
             }
             Self::Error { detail } => writer.string(detail),
             Self::Session { token } => writer.string(token),
@@ -468,6 +546,22 @@ impl Message {
             12 => Self::DesktopFrame {
                 client_id: reader.string()?,
                 payload: reader.string()?,
+            },
+            13 => Self::VideoControl {
+                target_id: reader.string()?,
+                source: VideoSource::from_code(reader.u8()?)?,
+                payload: reader.string()?,
+            },
+            14 => Self::VideoFrame {
+                client_id: reader.string()?,
+                source: VideoSource::from_code(reader.u8()?)?,
+                seq: reader.u64()?,
+                source_width: reader.u32()?,
+                source_height: reader.u32()?,
+                image_width: reader.u32()?,
+                image_height: reader.u32()?,
+                format: reader.string()?,
+                bytes: reader.byte_vec()?,
             },
             _ => return Err(ProtocolError::InvalidMessageKind(kind)),
         };
@@ -682,6 +776,7 @@ pub enum ProtocolError {
     FrameTooLarge,
     InvalidRole,
     InvalidCommand,
+    InvalidVideoSource,
     InvalidMessageKind(u16),
     InvalidBool(u8),
     InvalidUtf8,
@@ -701,6 +796,7 @@ impl fmt::Display for ProtocolError {
             Self::FrameTooLarge => write!(f, "frame too large"),
             Self::InvalidRole => write!(f, "invalid role"),
             Self::InvalidCommand => write!(f, "invalid command"),
+            Self::InvalidVideoSource => write!(f, "invalid video source"),
             Self::InvalidMessageKind(kind) => write!(f, "invalid message kind: {kind}"),
             Self::InvalidBool(value) => write!(f, "invalid bool byte: {value}"),
             Self::InvalidUtf8 => write!(f, "invalid utf-8 string"),
@@ -749,6 +845,10 @@ impl BinaryWriter {
         self.buffer.extend_from_slice(&value.to_be_bytes());
     }
 
+    fn u64(&mut self, value: u64) {
+        self.buffer.extend_from_slice(&value.to_be_bytes());
+    }
+
     fn u128(&mut self, value: u128) {
         self.buffer.extend_from_slice(&value.to_be_bytes());
     }
@@ -756,6 +856,11 @@ impl BinaryWriter {
     fn string(&mut self, value: &str) {
         self.u32(value.len() as u32);
         self.buffer.extend_from_slice(value.as_bytes());
+    }
+
+    fn byte_vec(&mut self, value: &[u8]) {
+        self.u32(value.len() as u32);
+        self.buffer.extend_from_slice(value);
     }
 }
 
@@ -832,5 +937,10 @@ impl<'a> BinaryReader<'a> {
         let len = self.u32()? as usize;
         let bytes = self.bytes(len)?;
         String::from_utf8(bytes.to_vec()).map_err(|_| ProtocolError::InvalidUtf8)
+    }
+
+    fn byte_vec(&mut self) -> Result<Vec<u8>, ProtocolError> {
+        let len = self.u32()? as usize;
+        Ok(self.bytes(len)?.to_vec())
     }
 }

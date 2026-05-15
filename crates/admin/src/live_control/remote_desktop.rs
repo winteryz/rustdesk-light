@@ -63,6 +63,35 @@ pub(crate) fn decode_frame_payload(detail: &str) -> Result<DesktopFrame, String>
     }
 }
 
+pub(crate) fn decode_video_frame(
+    seq: u64,
+    source_width: u32,
+    source_height: u32,
+    image_width: u32,
+    image_height: u32,
+    format: String,
+    bytes: Vec<u8>,
+) -> Result<DesktopFrame, String> {
+    if source_width == 0 || source_height == 0 || image_width == 0 || image_height == 0 {
+        return Err("invalid remote frame metadata".to_string());
+    }
+    let image = image::load_from_memory(&bytes)
+        .map_err(|error| format!("load frame failed: {error}"))?
+        .to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+    Ok(DesktopFrame {
+        seq,
+        screen_width: source_width,
+        screen_height: source_height,
+        image_width: size[0],
+        image_height: size[1],
+        encoded_bytes: bytes.len(),
+        format,
+        image: color_image,
+    })
+}
+
 pub(crate) fn handle_decoded_frame(
     windows: &mut Vec<RemoteDesktopWindow>,
     client_id: &str,

@@ -94,6 +94,32 @@ pub(crate) fn decode_frame_payload(detail: &str) -> Result<CameraFrame, String> 
     }
 }
 
+pub(crate) fn decode_video_frame(
+    seq: u64,
+    image_width: u32,
+    image_height: u32,
+    format: String,
+    bytes: Vec<u8>,
+) -> Result<CameraFrame, String> {
+    if image_width == 0 || image_height == 0 {
+        return Err("invalid camera frame metadata".to_string());
+    }
+    let image = image::load_from_memory(&bytes)
+        .map_err(|error| format!("load camera frame failed: {error}"))?
+        .to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+    Ok(CameraFrame {
+        seq,
+        width: image.width(),
+        height: image.height(),
+        encoded_bytes: bytes.len(),
+        format,
+        image: color_image,
+        bytes,
+    })
+}
+
 pub(crate) fn handle_decoded_frame(
     windows: &mut Vec<CameraWindow>,
     client_id: &str,
@@ -241,8 +267,6 @@ pub(crate) fn render_windows(
                 window.texture_seq = frame.seq;
             }
         }
-        maybe_queue_next_frame(window);
-
         let title = format!(
             "Camera - {}",
             identity_title(&window.hostname, &window.username)
@@ -435,7 +459,7 @@ fn render_toolbar(
                     running.store(true, Ordering::Relaxed);
                     queue_ui_payload(
                         queued,
-                        format!("action=capture\ndevice={selected}\nquality={selected_quality}"),
+                        format!("action=start\ndevice={selected}\nquality={selected_quality}"),
                     );
                 }
             }
@@ -552,32 +576,6 @@ fn render_status_bar(ui: &mut egui::Ui, status: CameraStatus, notice: &str, stat
                 }
             });
         });
-}
-
-fn maybe_queue_next_frame(window: &mut CameraWindow) {
-    if !window.running.load(Ordering::Relaxed) || window.pending_since.is_some() {
-        return;
-    }
-    let quality = window
-        .quality
-        .lock()
-        .map(|value| value.clone())
-        .unwrap_or_else(|_| DEFAULT_QUALITY.to_string());
-    let interval = frame_interval(quality_fps(&quality));
-    if window
-        .last_request_at
-        .is_some_and(|last_request_at| last_request_at.elapsed() < interval)
-    {
-        return;
-    }
-    let selected = window
-        .selected_device
-        .lock()
-        .map(|value| *value)
-        .unwrap_or_default();
-    window.queue_payload(format!(
-        "action=capture\ndevice={selected}\nquality={quality}"
-    ));
 }
 
 fn handle_frame(window: &mut CameraWindow, frame: CameraFrame, latency_ms: Option<u128>) {

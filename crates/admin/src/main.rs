@@ -7,7 +7,7 @@ use base64::Engine;
 use eframe::egui;
 use rdl_protocol::{
     read_envelope, write_envelope_with_token, ClientInfo, CommandKind, EnvelopeDecoder, Message,
-    Role, DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT,
+    Role, VideoSource, DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -144,6 +144,19 @@ fn run_terminal(config: Config) -> io::Result<()> {
                 Ok(_) => println!("decoded_camera_frame client={client_id}"),
                 Err(error) => println!("decoded_camera_frame client={client_id} error={error}"),
             },
+            AdminEvent::VideoFrame {
+                client_id,
+                source,
+                bytes,
+                ..
+            } => {
+                println!(
+                    "video_frame client={} source={} bytes={}",
+                    client_id,
+                    source.as_str(),
+                    bytes.len()
+                );
+            }
             AdminEvent::Log(line) => println!("{line}"),
             AdminEvent::Connected => println!("connected"),
             AdminEvent::Disconnected => println!("disconnected"),
@@ -249,6 +262,20 @@ fn admin_connection_once(
                     &session_token,
                     Message::DesktopInput { target_id, payload },
                 ),
+                AdminInput::VideoControl {
+                    target_id,
+                    source,
+                    payload,
+                } => send(
+                    &mut stream,
+                    &mut next_message_id,
+                    &session_token,
+                    Message::VideoControl {
+                        target_id,
+                        source,
+                        payload,
+                    },
+                ),
                 AdminInput::Quit => {
                     let _ = stream.shutdown(Shutdown::Both);
                     return Ok(AdminConnectionExit::Quit);
@@ -292,6 +319,29 @@ fn admin_connection_once(
             }
             Message::DesktopFrame { client_id, payload } => {
                 event_sink.send(AdminEvent::DesktopFrame { client_id, payload });
+            }
+            Message::VideoFrame {
+                client_id,
+                source,
+                seq,
+                source_width,
+                source_height,
+                image_width,
+                image_height,
+                format,
+                bytes,
+            } => {
+                event_sink.send(AdminEvent::VideoFrame {
+                    client_id,
+                    source,
+                    seq,
+                    source_width,
+                    source_height,
+                    image_width,
+                    image_height,
+                    format,
+                    bytes,
+                });
             }
             Message::Ping => send(
                 &mut stream,
@@ -492,6 +542,27 @@ impl AdminApp {
                         format!("camera_error\nmessage={message}"),
                     ),
                 },
+                AdminEvent::VideoFrame {
+                    client_id,
+                    source,
+                    seq,
+                    source_width,
+                    source_height,
+                    image_width,
+                    image_height,
+                    format,
+                    bytes,
+                } => self.spawn_video_frame_decode(
+                    client_id,
+                    source,
+                    seq,
+                    source_width,
+                    source_height,
+                    image_width,
+                    image_height,
+                    format,
+                    bytes,
+                ),
                 AdminEvent::Log(line) => self.push_log(line),
             }
             if self.log_lines.len() > 300 {
@@ -524,6 +595,45 @@ impl AdminApp {
         thread::spawn(move || {
             let result = live_control::camera::decode_frame_payload(&payload);
             sink.send(AdminEvent::DecodedCameraFrame { client_id, result });
+        });
+    }
+
+    fn spawn_video_frame_decode(
+        &self,
+        client_id: String,
+        source: VideoSource,
+        seq: u64,
+        source_width: u32,
+        source_height: u32,
+        image_width: u32,
+        image_height: u32,
+        format: String,
+        bytes: Vec<u8>,
+    ) {
+        let sink = AdminEventSink::new(self.event_tx.clone(), Some(self.repaint_handle.clone()));
+        thread::spawn(move || match source {
+            VideoSource::RemoteDesktop => {
+                let result = live_control::remote_desktop::decode_video_frame(
+                    seq,
+                    source_width,
+                    source_height,
+                    image_width,
+                    image_height,
+                    format,
+                    bytes,
+                );
+                sink.send(AdminEvent::DecodedDesktopFrame { client_id, result });
+            }
+            VideoSource::Camera => {
+                let result = live_control::camera::decode_video_frame(
+                    seq,
+                    image_width,
+                    image_height,
+                    format,
+                    bytes,
+                );
+                sink.send(AdminEvent::DecodedCameraFrame { client_id, result });
+            }
         });
     }
 
@@ -1224,6 +1334,12 @@ impl AdminApp {
                     target_id: outbound.client_id.clone(),
                     payload: outbound.payload,
                 }
+            } else if video_stream_payload(&outbound.payload) {
+                AdminInput::VideoControl {
+                    target_id: outbound.client_id.clone(),
+                    source: VideoSource::RemoteDesktop,
+                    payload: outbound.payload,
+                }
             } else {
                 AdminInput::DesktopControl {
                     target_id: outbound.client_id.clone(),
@@ -1236,11 +1352,20 @@ impl AdminApp {
 
     fn render_camera_windows(&mut self, ctx: &egui::Context) {
         for outbound in live_control::camera::render_windows(ctx, &mut self.camera_windows) {
-            let _ = self.input_tx.send(AdminInput::Command {
-                target_id: outbound.client_id.clone(),
-                command: CommandKind::Camera,
-                payload: outbound.payload,
-            });
+            let message = if video_stream_payload(&outbound.payload) {
+                AdminInput::VideoControl {
+                    target_id: outbound.client_id.clone(),
+                    source: VideoSource::Camera,
+                    payload: outbound.payload,
+                }
+            } else {
+                AdminInput::Command {
+                    target_id: outbound.client_id.clone(),
+                    command: CommandKind::Camera,
+                    payload: outbound.payload,
+                }
+            };
+            let _ = self.input_tx.send(message);
         }
     }
 
@@ -2193,6 +2318,14 @@ fn terminal_input_loop(input_tx: Sender<AdminInput>) {
     }
 }
 
+fn video_stream_payload(payload: &str) -> bool {
+    payload
+        .lines()
+        .find_map(|line| line.strip_prefix("action="))
+        .map(|action| matches!(action.trim(), "start" | "stop"))
+        .unwrap_or(false)
+}
+
 fn send(
     writer: &mut TcpStream,
     next_message_id: &mut u64,
@@ -2226,6 +2359,11 @@ enum AdminInput {
         target_id: String,
         payload: String,
     },
+    VideoControl {
+        target_id: String,
+        source: VideoSource,
+        payload: String,
+    },
     Quit,
 }
 
@@ -2250,6 +2388,17 @@ enum AdminEvent {
     DecodedCameraFrame {
         client_id: String,
         result: Result<live_control::camera::CameraFrame, String>,
+    },
+    VideoFrame {
+        client_id: String,
+        source: VideoSource,
+        seq: u64,
+        source_width: u32,
+        source_height: u32,
+        image_width: u32,
+        image_height: u32,
+        format: String,
+        bytes: Vec<u8>,
     },
     Log(String),
 }

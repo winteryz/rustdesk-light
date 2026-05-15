@@ -7,8 +7,8 @@ mod user_interaction;
 
 use eframe::egui;
 use rdl_protocol::{
-    write_envelope_with_token, CommandKind, EnvelopeDecoder, Message, Role, DEFAULT_SERVER_IP,
-    DEFAULT_SERVER_PORT,
+    write_envelope_with_token, CommandKind, EnvelopeDecoder, Message, Role, VideoSource,
+    DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT,
 };
 use std::fs;
 use std::io;
@@ -194,6 +194,10 @@ fn client_connection_once(
         running: AtomicBool::new(false),
         generation: std::sync::atomic::AtomicU64::new(0),
     });
+    let camera_stream = Arc::new(DesktopStreamState {
+        running: AtomicBool::new(false),
+        generation: std::sync::atomic::AtomicU64::new(0),
+    });
     loop {
         while let Ok(input) = input_rx.try_recv() {
             match input {
@@ -332,6 +336,51 @@ fn client_connection_once(
                     }
                 });
             }
+            Message::VideoControl {
+                target_id,
+                source,
+                payload,
+            } => match video_control_action(&payload).as_deref() {
+                Some("start") => {
+                    let stream_state = match &source {
+                        VideoSource::RemoteDesktop => desktop_stream.clone(),
+                        VideoSource::Camera => camera_stream.clone(),
+                    };
+                    stream_state.running.store(false, Ordering::Relaxed);
+                    let generation = stream_state
+                        .generation
+                        .fetch_add(1, Ordering::Relaxed)
+                        .saturating_add(1);
+                    thread::sleep(Duration::from_millis(5));
+                    stream_state.running.store(true, Ordering::Relaxed);
+                    let worker_tx = out_tx.clone();
+                    let worker_token = session_token.clone();
+                    thread::spawn(move || {
+                        video_stream_loop(
+                            target_id,
+                            source,
+                            payload,
+                            worker_tx,
+                            worker_token,
+                            stream_state,
+                            generation,
+                        );
+                    });
+                }
+                Some("stop") => {
+                    let stream_state = match &source {
+                        VideoSource::RemoteDesktop => desktop_stream.clone(),
+                        VideoSource::Camera => camera_stream.clone(),
+                    };
+                    stream_state.running.store(false, Ordering::Relaxed);
+                    stream_state.generation.fetch_add(1, Ordering::Relaxed);
+                    if source == VideoSource::Camera {
+                        let _ = crate::live_control::handle(&CommandKind::Camera, "action=stop");
+                    }
+                    let _ = target_id;
+                }
+                _ => {}
+            },
             Message::Ping => queue_message(&out_tx, &session_token, Message::Pong)?,
             other => {
                 event_sink.send(ClientEvent::Log(format!("server: {other:?}")));
@@ -742,12 +791,181 @@ fn remote_desktop_stream_loop(
     }
 }
 
+fn video_stream_loop(
+    client_id: String,
+    source: VideoSource,
+    start_payload: String,
+    out_tx: Sender<ClientOutbound>,
+    session_token: String,
+    stream_state: Arc<DesktopStreamState>,
+    generation: u64,
+) {
+    let quality = remote_desktop_value(&start_payload, "quality")
+        .or_else(|| video_control_value(&start_payload, "quality"))
+        .unwrap_or_else(|| "medium".to_string());
+    let fps = quality_fps(&quality);
+    let interval = Duration::from_millis((1000 / fps).max(1));
+    let mut seq = 1u64;
+    while stream_state.running.load(Ordering::Relaxed)
+        && stream_state.generation.load(Ordering::Relaxed) == generation
+    {
+        let started = std::time::Instant::now();
+        let frame = match &source {
+            VideoSource::RemoteDesktop => {
+                let screen = video_control_value(&start_payload, "screen")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or_default();
+                let payload = crate::live_control::handle(
+                    &CommandKind::RemoteDesktop,
+                    &format!("action=screenshot\nscreen={screen}\nquality={quality}"),
+                );
+                parse_remote_desktop_video_frame(&payload, &client_id, seq)
+            }
+            VideoSource::Camera => {
+                let device = video_control_value(&start_payload, "device")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or_default();
+                let payload = crate::live_control::handle(
+                    &CommandKind::Camera,
+                    &format!("action=capture\ndevice={device}\nquality={quality}"),
+                );
+                parse_camera_video_frame(&payload, &client_id, seq)
+            }
+        };
+        match frame {
+            Ok(message) => {
+                if queue_message(&out_tx, &session_token, message).is_err() {
+                    stream_state.running.store(false, Ordering::Relaxed);
+                    break;
+                }
+                seq = seq.saturating_add(1);
+            }
+            Err(error) => {
+                let _ = queue_message(
+                    &out_tx,
+                    &session_token,
+                    Message::CommandAck {
+                        client_id: client_id.clone(),
+                        command: video_source_command(&source),
+                        accepted: false,
+                        detail: error,
+                    },
+                );
+                stream_state.running.store(false, Ordering::Relaxed);
+                break;
+            }
+        }
+        let elapsed = started.elapsed();
+        if elapsed < interval {
+            thread::sleep(interval - elapsed);
+        }
+    }
+}
+
 fn quality_fps(value: &str) -> u64 {
     match value {
         "low" => 10,
         "high" => 2,
         _ => 5,
     }
+}
+
+fn video_control_action(payload: &str) -> Option<String> {
+    payload
+        .lines()
+        .find_map(|line| line.strip_prefix("action="))
+        .map(|action| action.trim().to_ascii_lowercase())
+}
+
+fn video_control_value(payload: &str, key: &str) -> Option<String> {
+    remote_desktop_value(payload, key)
+}
+
+fn video_source_command(source: &VideoSource) -> CommandKind {
+    match source {
+        VideoSource::RemoteDesktop => CommandKind::RemoteDesktop,
+        VideoSource::Camera => CommandKind::Camera,
+    }
+}
+
+fn parse_remote_desktop_video_frame(
+    payload: &str,
+    client_id: &str,
+    seq: u64,
+) -> Result<Message, String> {
+    let mut lines = payload.lines();
+    if lines.next().unwrap_or_default().trim() != "remote_desktop_frame" {
+        return Err(payload.to_string());
+    }
+    let mut source_width = 0;
+    let mut source_height = 0;
+    let mut image_width = 0;
+    let mut image_height = 0;
+    let mut format = "jpeg".to_string();
+    let mut encoded = "";
+    for line in lines {
+        if let Some(rest) = line.strip_prefix("screen_width=") {
+            source_width = rest.parse().unwrap_or_default();
+        } else if let Some(rest) = line.strip_prefix("screen_height=") {
+            source_height = rest.parse().unwrap_or_default();
+        } else if let Some(rest) = line.strip_prefix("image_width=") {
+            image_width = rest.parse().unwrap_or_default();
+        } else if let Some(rest) = line.strip_prefix("image_height=") {
+            image_height = rest.parse().unwrap_or_default();
+        } else if let Some(rest) = line.strip_prefix("format=") {
+            format = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("png_base64=") {
+            encoded = rest;
+        }
+    }
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        .map_err(|error| format!("decode remote desktop frame failed: {error}"))?;
+    Ok(Message::VideoFrame {
+        client_id: client_id.to_string(),
+        source: VideoSource::RemoteDesktop,
+        seq,
+        source_width,
+        source_height,
+        image_width,
+        image_height,
+        format,
+        bytes,
+    })
+}
+
+fn parse_camera_video_frame(payload: &str, client_id: &str, seq: u64) -> Result<Message, String> {
+    let mut lines = payload.lines();
+    if lines.next().unwrap_or_default().trim() != "camera_frame" {
+        return Err(payload.to_string());
+    }
+    let mut width = 0;
+    let mut height = 0;
+    let mut format = "jpeg".to_string();
+    let mut encoded = "";
+    for line in lines {
+        if let Some(rest) = line.strip_prefix("width=") {
+            width = rest.parse().unwrap_or_default();
+        } else if let Some(rest) = line.strip_prefix("height=") {
+            height = rest.parse().unwrap_or_default();
+        } else if let Some(rest) = line.strip_prefix("format=") {
+            format = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("image_base64=") {
+            encoded = rest;
+        }
+    }
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        .map_err(|error| format!("decode camera frame failed: {error}"))?;
+    Ok(Message::VideoFrame {
+        client_id: client_id.to_string(),
+        source: VideoSource::Camera,
+        seq,
+        source_width: width,
+        source_height: height,
+        image_width: width,
+        image_height: height,
+        format,
+        bytes,
+    })
 }
 
 fn queue_message(
