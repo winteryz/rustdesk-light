@@ -1010,11 +1010,17 @@ mod macos_input {
         if accessibility_trusted(false) || accessibility_trusted(true) {
             Ok(())
         } else {
-            Err(
-                "macOS input requires Accessibility permission. Enable rdl-client, or the terminal/app that launched it, in System Settings > Privacy & Security > Accessibility, then reconnect the client"
-                    .to_string(),
-            )
+            Err(format!(
+                "macOS input requires Accessibility permission for the running client process. Enable this exact executable in System Settings > Privacy & Security > Accessibility, then restart/reconnect the client. executable={}",
+                current_executable_label()
+            ))
         }
+    }
+
+    fn current_executable_label() -> String {
+        std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|error| format!("unknown ({error})"))
     }
 
     fn accessibility_trusted(prompt: bool) -> bool {
