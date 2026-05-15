@@ -266,6 +266,7 @@ impl CommandKind {
 pub struct ClientInfo {
     pub id: String,
     pub fingerprint: String,
+    pub peer_addr: String,
     pub hostname: String,
     pub os: String,
     pub username: String,
@@ -363,6 +364,7 @@ impl Message {
                 for client in clients {
                     writer.string(&client.id);
                     writer.string(&client.fingerprint);
+                    writer.string(&client.peer_addr);
                     writer.string(&client.hostname);
                     writer.string(&client.os);
                     writer.string(&client.username);
@@ -425,6 +427,7 @@ impl Message {
                     clients.push(ClientInfo {
                         id: reader.string()?,
                         fingerprint: reader.string()?,
+                        peer_addr: reader.string()?,
                         hostname: reader.string()?,
                         os: reader.string()?,
                         username: reader.string()?,

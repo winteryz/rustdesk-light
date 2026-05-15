@@ -15,6 +15,7 @@ enum ServerEvent {
     Connected {
         peer_id: usize,
         sender: Sender<Message>,
+        peer_addr: String,
     },
     Registered {
         peer_id: usize,
@@ -41,6 +42,7 @@ struct Peer {
     session_token: Option<String>,
     sender: Sender<Message>,
     client_info: Option<ClientInfo>,
+    peer_addr: String,
     last_seen_epoch_ms: u128,
     last_heartbeat_epoch_ms: u128,
     last_ping_epoch_ms: u128,
@@ -74,6 +76,10 @@ fn accept_loop(listener: TcpListener, events_tx: Sender<ServerEvent>) {
 }
 
 fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>) {
+    let peer_addr = stream
+        .peer_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
     if let Err(error) = stream.set_nodelay(true) {
         eprintln!("peer {peer_id} set TCP_NODELAY failed: {error}");
     }
@@ -82,6 +88,7 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
         .send(ServerEvent::Connected {
             peer_id,
             sender: out_tx,
+            peer_addr,
         })
         .is_err()
     {
@@ -122,6 +129,7 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
                     Some(ClientInfo {
                         id: id.clone(),
                         fingerprint: fingerprint.clone(),
+                        peer_addr: String::new(),
                         hostname,
                         os,
                         username,
@@ -179,7 +187,11 @@ fn event_loop(events_rx: Receiver<ServerEvent>) {
         };
 
         match event {
-            ServerEvent::Connected { peer_id, sender } => {
+            ServerEvent::Connected {
+                peer_id,
+                sender,
+                peer_addr,
+            } => {
                 peers.insert(
                     peer_id,
                     Peer {
@@ -189,6 +201,7 @@ fn event_loop(events_rx: Receiver<ServerEvent>) {
                         session_token: None,
                         sender,
                         client_info: None,
+                        peer_addr,
                         last_seen_epoch_ms: now_epoch_ms(),
                         last_heartbeat_epoch_ms: 0,
                         last_ping_epoch_ms: 0,
@@ -209,7 +222,10 @@ fn event_loop(events_rx: Receiver<ServerEvent>) {
                     peer.identity = Some(identity.clone());
                     peer.fingerprint = Some(fingerprint.clone());
                     peer.session_token = Some(token.clone());
-                    peer.client_info = info.clone();
+                    peer.client_info = info.map(|mut info| {
+                        info.peer_addr = peer.peer_addr.clone();
+                        info
+                    });
                     peer.last_seen_epoch_ms = now_epoch_ms();
                     peer.last_heartbeat_epoch_ms = now_epoch_ms();
                     let _ = peer.sender.send(Message::Session { token });

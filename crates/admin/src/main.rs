@@ -193,7 +193,7 @@ fn admin_connection_once(
             id: identity.id,
             fingerprint: identity.fingerprint,
             hostname: hostname(),
-            os: std::env::consts::OS.to_string(),
+            os: os_label(),
             username: username(),
             gui_available: true,
         },
@@ -892,31 +892,76 @@ impl AdminApp {
                 return;
             }
 
-            egui::ScrollArea::vertical()
-                .id_salt("admin_clients_scroll_area")
+            egui::ScrollArea::horizontal()
+                .id_salt("admin_clients_horizontal_scroll")
                 .show(ui, |ui| {
-                    egui::Grid::new("client_table")
+                    egui_extras::TableBuilder::new(ui)
+                        .id_salt("admin_clients_table")
                         .striped(true)
-                        .num_columns(7)
-                        .spacing([14.0, 10.0])
-                        .min_col_width(82.0)
-                        .show(ui, |ui| {
-                            table_header(ui, "Status");
-                            table_header(ui, "Client ID");
-                            table_header(ui, "Fingerprint");
-                            table_header(ui, "Host");
-                            table_header(ui, "User");
-                            table_header(ui, "OS");
-                            table_header(ui, "Last Heartbeat");
-                            ui.end_row();
-
-                            for row in clients {
-                                let client = row.info;
+                        .sense(egui::Sense::click())
+                        .column(egui_extras::Column::exact(82.0))
+                        .column(egui_extras::Column::exact(180.0))
+                        .column(egui_extras::Column::exact(150.0))
+                        .column(egui_extras::Column::exact(170.0))
+                        .column(egui_extras::Column::exact(150.0))
+                        .column(egui_extras::Column::exact(120.0))
+                        .column(egui_extras::Column::exact(220.0))
+                        .column(egui_extras::Column::exact(70.0))
+                        .column(egui_extras::Column::exact(130.0))
+                        .header(24.0, |mut header| {
+                            header.col(|ui| table_header(ui, "Status"));
+                            header.col(|ui| table_header(ui, "Client ID"));
+                            header.col(|ui| table_header(ui, "IP"));
+                            header.col(|ui| table_header(ui, "Fingerprint"));
+                            header.col(|ui| table_header(ui, "Host"));
+                            header.col(|ui| table_header(ui, "User"));
+                            header.col(|ui| table_header(ui, "OS Version"));
+                            header.col(|ui| table_header(ui, "GUI"));
+                            header.col(|ui| table_header(ui, "Last Heartbeat"));
+                        })
+                        .body(|body| {
+                            body.rows(30.0, clients.len(), |mut row| {
+                                let row_data = &clients[row.index()];
+                                let client = &row_data.info;
                                 let selected =
                                     self.selected_client_id.as_deref() == Some(client.id.as_str());
-                                client_status_badge(ui, row.status);
-                                let response =
-                                    ui.selectable_label(selected, compact_id(&client.id));
+                                row.set_selected(selected);
+                                row.col(|ui| client_status_badge(ui, row_data.status));
+                                row.col(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(compact_id(&client.id)).size(12.0),
+                                    );
+                                });
+                                row.col(|ui| {
+                                    ui.label(egui::RichText::new(&client.peer_addr).size(12.0));
+                                });
+                                row.col(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(compact_id(&client.fingerprint))
+                                            .size(12.0),
+                                    );
+                                });
+                                row.col(|ui| {
+                                    ui.label(egui::RichText::new(&client.hostname).size(12.0));
+                                });
+                                row.col(|ui| {
+                                    ui.label(egui::RichText::new(&client.username).size(12.0));
+                                });
+                                row.col(|ui| {
+                                    ui.label(egui::RichText::new(&client.os).size(12.0));
+                                });
+                                row.col(|ui| {
+                                    ui.label(if client.gui_available { "Yes" } else { "No" });
+                                });
+                                row.col(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(last_seen_label(
+                                            client.last_seen_epoch_ms,
+                                        ))
+                                        .size(12.0),
+                                    );
+                                });
+                                let response = row.response();
                                 if response.clicked() {
                                     self.selected_client_id = Some(client.id.clone());
                                 }
@@ -929,14 +974,7 @@ impl AdminApp {
                                         },
                                     );
                                 });
-
-                                ui.label(egui::RichText::new(&client.fingerprint).size(12.0));
-                                ui.label(&client.hostname);
-                                ui.label(&client.username);
-                                ui.label(&client.os);
-                                ui.label(last_seen_label(client.last_seen_epoch_ms));
-                                ui.end_row();
-                            }
+                            });
                         });
                 });
         });
@@ -2075,7 +2113,27 @@ fn terminal_mode() -> bool {
 fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
+        .or_else(|_| {
+            std::fs::read_to_string("/etc/hostname")
+                .map(|value| value.trim().to_string())
+                .map_err(|error| error.to_string())
+        })
         .unwrap_or_else(|_| "unknown-host".to_string())
+}
+
+fn os_label() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(text) = std::fs::read_to_string("/etc/os-release") {
+            if let Some(value) = text
+                .lines()
+                .find_map(|line| line.strip_prefix("PRETTY_NAME="))
+            {
+                return value.trim_matches('"').to_string();
+            }
+        }
+    }
+    format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 fn username() -> String {

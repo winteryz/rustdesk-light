@@ -181,7 +181,7 @@ fn client_connection_once(
             id: identity.id.clone(),
             fingerprint: identity.fingerprint.clone(),
             hostname: hostname(),
-            os: std::env::consts::OS.to_string(),
+            os: os_label(),
             username: username(),
             gui_available: gui_mode,
         },
@@ -870,7 +870,27 @@ fn gui_available() -> bool {
 fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
+        .or_else(|_| {
+            std::fs::read_to_string("/etc/hostname")
+                .map(|value| value.trim().to_string())
+                .map_err(|error| error.to_string())
+        })
         .unwrap_or_else(|_| "unknown-host".to_string())
+}
+
+fn os_label() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(text) = std::fs::read_to_string("/etc/os-release") {
+            if let Some(value) = text
+                .lines()
+                .find_map(|line| line.strip_prefix("PRETTY_NAME="))
+            {
+                return value.trim_matches('"').to_string();
+            }
+        }
+    }
+    format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 fn username() -> String {
