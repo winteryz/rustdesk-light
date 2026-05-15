@@ -22,6 +22,13 @@ use std::sync::{mpsc, Mutex, OnceLock};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::time::Duration;
 
+pub(crate) struct CameraVideoFrame {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) format: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
 pub fn handle(payload: &str) -> String {
     let request = CameraRequest::parse(payload);
     match request.action.as_str() {
@@ -97,24 +104,58 @@ fn list_devices() -> String {
 }
 
 fn capture_default_camera(request: &CameraRequest) -> String {
+    match capture_video_frame(request.device, &request.quality) {
+        Ok(frame) => format_camera_frame_payload(request.device, frame),
+        Err(error) => format!("camera_error\nmessage={error}"),
+    }
+}
+
+pub(crate) fn capture_video_frame(
+    device: usize,
+    quality: &str,
+) -> Result<CameraVideoFrame, String> {
+    let request = CameraRequest {
+        action: "capture".to_string(),
+        device,
+        quality: match quality {
+            "low" => "low".to_string(),
+            "high" => "high".to_string(),
+            _ => "medium".to_string(),
+        },
+    };
     #[cfg(target_os = "linux")]
     {
-        return linux_capture(request);
+        return linux_capture_frame(&request);
     }
     #[cfg(target_os = "macos")]
     {
-        return macos_capture(request);
+        return macos_capture_frame(&request);
     }
     #[cfg(target_os = "windows")]
     {
-        return windows_capture(request);
+        return windows_capture_frame(&request);
     }
     #[allow(unreachable_code)]
-    "camera_error\nmessage=camera capture is not implemented for this platform".to_string()
+    {
+        let _ = request;
+        Err("camera capture is not implemented for this platform".to_string())
+    }
+}
+
+fn format_camera_frame_payload(device: usize, frame: CameraVideoFrame) -> String {
+    format!(
+        "camera_frame\ndevice={}\nformat={}\nwidth={}\nheight={}\nbytes={}\nimage_base64={}",
+        device,
+        frame.format,
+        frame.width,
+        frame.height,
+        frame.bytes.len(),
+        base64::engine::general_purpose::STANDARD.encode(frame.bytes)
+    )
 }
 
 #[cfg(target_os = "linux")]
-fn linux_capture(request: &CameraRequest) -> String {
+fn linux_capture_frame(request: &CameraRequest) -> Result<CameraVideoFrame, String> {
     let path = temp_path("rdl-camera", "jpg");
     let path_text = path.to_string_lossy().to_string();
     let result = run_capture(
@@ -136,7 +177,7 @@ fn linux_capture(request: &CameraRequest) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_capture(request: &CameraRequest) -> String {
+fn macos_capture_frame(request: &CameraRequest) -> Result<CameraVideoFrame, String> {
     let (reply_tx, reply_rx) = mpsc::channel();
     let request_message = MacosCameraRequest::Capture {
         device: request.device,
@@ -144,40 +185,35 @@ fn macos_capture(request: &CameraRequest) -> String {
         reply: reply_tx,
     };
     match send_macos_camera_request(request_message) {
-        Ok(()) => reply_rx.recv().unwrap_or_else(|error| {
-            format!("camera_error\nmessage=camera worker stopped: {error}")
-        }),
-        Err(error) => format!("camera_error\nmessage={error}"),
+        Ok(()) => reply_rx
+            .recv()
+            .unwrap_or_else(|error| Err(format!("camera worker stopped: {error}"))),
+        Err(error) => Err(error),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn finish_capture(path: PathBuf, result: Result<(), String>, request: &CameraRequest) -> String {
+fn finish_capture(
+    path: PathBuf,
+    result: Result<(), String>,
+    request: &CameraRequest,
+) -> Result<CameraVideoFrame, String> {
     if let Err(error) = result {
         let _ = fs::remove_file(&path);
-        return format!("camera_error\nmessage={error}");
+        return Err(error);
     }
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) => return format!("camera_error\nmessage=read camera frame failed: {error}"),
-    };
+    let bytes = fs::read(&path).map_err(|error| format!("read camera frame failed: {error}"))?;
     let _ = fs::remove_file(&path);
-    let image = match image::load_from_memory(&bytes) {
-        Ok(image) => image,
-        Err(error) => return format!("camera_error\nmessage=load camera frame failed: {error}"),
-    };
-    let (bytes, width, height) = match encode_camera_image(image, &request.quality) {
-        Ok(encoded) => encoded,
-        Err(error) => return format!("camera_error\nmessage=encode camera frame failed: {error}"),
-    };
-    format!(
-        "camera_frame\ndevice={}\nformat=jpeg\nwidth={}\nheight={}\nbytes={}\nimage_base64={}",
-        request.device,
+    let image = image::load_from_memory(&bytes)
+        .map_err(|error| format!("load camera frame failed: {error}"))?;
+    let (bytes, width, height) = encode_camera_image(image, &request.quality)
+        .map_err(|error| format!("encode camera frame failed: {error}"))?;
+    Ok(CameraVideoFrame {
         width,
         height,
-        bytes.len(),
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )
+        format: "jpeg".to_string(),
+        bytes,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -265,7 +301,7 @@ enum MacosCameraRequest {
     Capture {
         device: usize,
         quality: String,
-        reply: mpsc::Sender<String>,
+        reply: mpsc::Sender<Result<CameraVideoFrame, String>>,
     },
     Stop {
         reply: mpsc::Sender<String>,
@@ -326,7 +362,11 @@ fn macos_camera_worker_loop(rx: mpsc::Receiver<MacosCameraRequest>) {
                 quality,
                 reply,
             } => {
-                let _ = reply.send(macos_capture_on_worker(&mut session, device, &quality));
+                let _ = reply.send(macos_capture_on_worker_frame(
+                    &mut session,
+                    device,
+                    &quality,
+                ));
             }
             MacosCameraRequest::Stop { reply } => {
                 session = None;
@@ -337,44 +377,42 @@ fn macos_camera_worker_loop(rx: mpsc::Receiver<MacosCameraRequest>) {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_capture_on_worker(
+fn macos_capture_on_worker_frame(
     session: &mut Option<MacosCameraSession>,
     device: usize,
     quality: &str,
-) -> String {
+) -> Result<CameraVideoFrame, String> {
     if session
         .as_ref()
         .is_none_or(|session| session.device != device)
     {
         match open_macos_camera_session(device) {
             Ok(new_session) => *session = Some(new_session),
-            Err(error) => return format!("camera_error\nmessage={error}"),
+            Err(error) => return Err(error),
         }
     }
     let Some(session) = session.as_mut() else {
-        return "camera_error\nmessage=camera session is not available".to_string();
+        return Err("camera session is not available".to_string());
     };
     let frame = match session.camera.frame() {
         Ok(frame) => frame,
-        Err(error) => return format!("camera_error\nmessage=capture camera frame failed: {error}"),
+        Err(error) => return Err(format!("capture camera frame failed: {error}")),
     };
     let decoded = match frame.decode_image::<RgbFormat>() {
         Ok(decoded) => decoded,
-        Err(error) => return format!("camera_error\nmessage=decode camera frame failed: {error}"),
+        Err(error) => return Err(format!("decode camera frame failed: {error}")),
     };
     let image = DynamicImage::ImageRgb8(decoded);
     let (bytes, width, height) = match encode_camera_image(image, quality) {
         Ok(encoded) => encoded,
-        Err(error) => return format!("camera_error\nmessage=encode camera frame failed: {error}"),
+        Err(error) => return Err(format!("encode camera frame failed: {error}")),
     };
-    format!(
-        "camera_frame\ndevice={}\nformat=jpeg\nwidth={}\nheight={}\nbytes={}\nimage_base64={}",
-        device,
+    Ok(CameraVideoFrame {
         width,
         height,
-        bytes.len(),
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )
+        format: "jpeg".to_string(),
+        bytes,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -409,7 +447,7 @@ fn macos_camera_index(device_index: usize) -> Result<CameraIndex, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_capture(request: &CameraRequest) -> String {
+fn windows_capture_frame(request: &CameraRequest) -> Result<CameraVideoFrame, String> {
     let (reply_tx, reply_rx) = mpsc::channel();
     let request_message = WindowsCameraRequest::Capture {
         device: request.device,
@@ -417,10 +455,10 @@ fn windows_capture(request: &CameraRequest) -> String {
         reply: reply_tx,
     };
     match send_windows_camera_request(request_message) {
-        Ok(()) => reply_rx.recv().unwrap_or_else(|error| {
-            format!("camera_error\nmessage=camera worker stopped: {error}")
-        }),
-        Err(error) => format!("camera_error\nmessage={error}"),
+        Ok(()) => reply_rx
+            .recv()
+            .unwrap_or_else(|error| Err(format!("camera worker stopped: {error}"))),
+        Err(error) => Err(error),
     }
 }
 
@@ -446,7 +484,7 @@ enum WindowsCameraRequest {
     Capture {
         device: usize,
         quality: String,
-        reply: mpsc::Sender<String>,
+        reply: mpsc::Sender<Result<CameraVideoFrame, String>>,
     },
     Stop {
         reply: mpsc::Sender<String>,
@@ -514,7 +552,7 @@ fn windows_camera_worker_loop(rx: mpsc::Receiver<WindowsCameraRequest>) {
                 quality,
                 reply,
             } => {
-                let result = windows_capture_on_worker(&mut session, device, &quality);
+                let result = windows_capture_on_worker_frame(&mut session, device, &quality);
                 let _ = reply.send(result);
             }
             WindowsCameraRequest::Stop { reply } => {
@@ -526,44 +564,42 @@ fn windows_camera_worker_loop(rx: mpsc::Receiver<WindowsCameraRequest>) {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_capture_on_worker(
+fn windows_capture_on_worker_frame(
     session: &mut Option<WindowsCameraSession>,
     device: usize,
     quality: &str,
-) -> String {
+) -> Result<CameraVideoFrame, String> {
     if session
         .as_ref()
         .is_none_or(|session| session.device != device)
     {
         match open_windows_camera_session(device) {
             Ok(new_session) => *session = Some(new_session),
-            Err(error) => return format!("camera_error\nmessage={error}"),
+            Err(error) => return Err(error),
         }
     }
     let Some(session) = session.as_mut() else {
-        return "camera_error\nmessage=camera session is not available".to_string();
+        return Err("camera session is not available".to_string());
     };
     let frame = match session.camera.frame() {
         Ok(frame) => frame,
-        Err(error) => return format!("camera_error\nmessage=capture camera frame failed: {error}"),
+        Err(error) => return Err(format!("capture camera frame failed: {error}")),
     };
     let decoded = match frame.decode_image::<RgbFormat>() {
         Ok(decoded) => decoded,
-        Err(error) => return format!("camera_error\nmessage=decode camera frame failed: {error}"),
+        Err(error) => return Err(format!("decode camera frame failed: {error}")),
     };
     let image = DynamicImage::ImageRgb8(decoded);
     let (bytes, width, height) = match encode_camera_image(image, quality) {
         Ok(encoded) => encoded,
-        Err(error) => return format!("camera_error\nmessage=encode camera frame failed: {error}"),
+        Err(error) => return Err(format!("encode camera frame failed: {error}")),
     };
-    format!(
-        "camera_frame\ndevice={}\nformat=jpeg\nwidth={}\nheight={}\nbytes={}\nimage_base64={}",
-        device,
+    Ok(CameraVideoFrame {
         width,
         height,
-        bytes.len(),
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )
+        format: "jpeg".to_string(),
+        bytes,
+    })
 }
 
 #[cfg(target_os = "windows")]

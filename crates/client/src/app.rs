@@ -830,11 +830,19 @@ fn video_stream_loop(
                 let device = video_control_value(&start_payload, "device")
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or_default();
-                let payload = crate::live_control::handle(
-                    &CommandKind::Camera,
-                    &format!("action=capture\ndevice={device}\nquality={quality}"),
-                );
-                parse_camera_video_frame(&payload, &client_id, seq)
+                crate::live_control::capture_camera_video_frame(device, &quality).map(|frame| {
+                    Message::VideoFrame {
+                        client_id: client_id.clone(),
+                        source: VideoSource::Camera,
+                        seq,
+                        source_width: frame.width,
+                        source_height: frame.height,
+                        image_width: frame.width,
+                        image_height: frame.height,
+                        format: frame.format,
+                        bytes: frame.bytes,
+                    }
+                })
             }
         };
         match frame {
@@ -891,41 +899,6 @@ fn video_source_command(source: &VideoSource) -> CommandKind {
         VideoSource::RemoteDesktop => CommandKind::RemoteDesktop,
         VideoSource::Camera => CommandKind::Camera,
     }
-}
-
-fn parse_camera_video_frame(payload: &str, client_id: &str, seq: u64) -> Result<Message, String> {
-    let mut lines = payload.lines();
-    if lines.next().unwrap_or_default().trim() != "camera_frame" {
-        return Err(payload.to_string());
-    }
-    let mut width = 0;
-    let mut height = 0;
-    let mut format = "jpeg".to_string();
-    let mut encoded = "";
-    for line in lines {
-        if let Some(rest) = line.strip_prefix("width=") {
-            width = rest.parse().unwrap_or_default();
-        } else if let Some(rest) = line.strip_prefix("height=") {
-            height = rest.parse().unwrap_or_default();
-        } else if let Some(rest) = line.strip_prefix("format=") {
-            format = rest.to_string();
-        } else if let Some(rest) = line.strip_prefix("image_base64=") {
-            encoded = rest;
-        }
-    }
-    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
-        .map_err(|error| format!("decode camera frame failed: {error}"))?;
-    Ok(Message::VideoFrame {
-        client_id: client_id.to_string(),
-        source: VideoSource::Camera,
-        seq,
-        source_width: width,
-        source_height: height,
-        image_width: width,
-        image_height: height,
-        format,
-        bytes,
-    })
 }
 
 fn queue_message(

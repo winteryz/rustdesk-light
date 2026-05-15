@@ -3,6 +3,7 @@ use rdl_protocol::CommandKind;
 mod camera;
 mod remote_desktop;
 
+pub(crate) use camera::CameraVideoFrame;
 pub(crate) use remote_desktop::RemoteDesktopVideoFrame;
 
 pub fn handle(command: &CommandKind, payload: &str) -> String {
@@ -22,4 +23,11 @@ pub(crate) fn capture_remote_desktop_video_frame(
     quality: &str,
 ) -> Result<RemoteDesktopVideoFrame, String> {
     remote_desktop::capture_video_frame(screen_index, quality)
+}
+
+pub(crate) fn capture_camera_video_frame(
+    device: usize,
+    quality: &str,
+) -> Result<CameraVideoFrame, String> {
+    camera::capture_video_frame(device, quality)
 }
