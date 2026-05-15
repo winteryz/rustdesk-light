@@ -3053,6 +3053,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "rust-desk-light-protocol",
+ "rust-desk-light-version",
 ]
 
 [[package]]
@@ -3068,6 +3069,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "rust-desk-light-protocol",
+ "rust-desk-light-version",
  "windows-sys 0.61.2",
 ]
 
@@ -3080,7 +3082,12 @@ name = "rust-desk-light-server"
 version = "0.1.0"
 dependencies = [
  "rust-desk-light-protocol",
+ "rust-desk-light-version",
 ]
+
+[[package]]
+name = "rust-desk-light-version"
+version = "0.1.0"
 
 [[package]]
 name = "rustc-hash"

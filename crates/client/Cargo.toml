@@ -13,6 +13,7 @@ path = "src/main.rs"
 base64 = "0.22.1"
 eframe = "0.34.2"
 rust-desk-light-protocol = { path = "../protocol" }
+rust-desk-light-version = { path = "../version" }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }

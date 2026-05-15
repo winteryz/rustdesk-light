@@ -65,9 +65,10 @@ fn run_gui(config: Config) -> eframe::Result {
             .with_min_inner_size([680.0, 440.0]),
         ..Default::default()
     };
+    let window_title = rdl_version::app_version("rust-desk-light client");
 
     eframe::run_native(
-        "rust-desk-light client",
+        &window_title,
         native_options,
         Box::new(move |cc| {
             Ok(Box::new(ClientApp::new(
@@ -97,8 +98,10 @@ fn run_terminal(config: Config) -> io::Result<()> {
     let (event_tx, event_rx) = mpsc::channel();
     let (_input_tx, input_rx) = mpsc::channel();
     println!(
-        "rust-desk-light client terminal fallback, server={}:{}",
-        config.ip, config.port
+        "rust-desk-light client {} terminal fallback, server={}:{}",
+        rdl_version::display_version(),
+        config.ip,
+        config.port
     );
     println!("client id: {}", identity.id);
     println!("fingerprint: {}", identity.fingerprint);
@@ -418,7 +421,10 @@ impl ClientApp {
             input_tx,
             event_rx,
             connected: false,
-            log_lines: vec![timestamped_log("client gui started")],
+            log_lines: vec![timestamped_log(format!(
+                "client gui started version={}",
+                rdl_version::display_version()
+            ))],
             chat_window: None,
         }
     }
@@ -466,9 +472,12 @@ impl ClientApp {
                         .strong(),
                 );
                 ui.label(
-                    egui::RichText::new("Client Agent")
-                        .size(13.0)
-                        .color(COLOR_MUTED),
+                    egui::RichText::new(format!(
+                        "Client Agent | {}",
+                        rdl_version::display_version()
+                    ))
+                    .size(13.0)
+                    .color(COLOR_MUTED),
                 );
             });
 
@@ -502,6 +511,7 @@ impl ClientApp {
                         "Server",
                         &format!("{}:{}", self.config.ip, self.config.port),
                     );
+                    detail_row(ui, "Version", &rdl_version::display_version());
                     detail_row(ui, "Host", &hostname());
                     detail_row(
                         ui,

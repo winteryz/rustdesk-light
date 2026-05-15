@@ -59,9 +59,10 @@ fn run_gui(config: Config) -> eframe::Result {
             .with_min_inner_size([980.0, 620.0]),
         ..Default::default()
     };
+    let window_title = rdl_version::app_version("rust-desk-light admin");
 
     eframe::run_native(
-        "rust-desk-light admin",
+        &window_title,
         native_options,
         Box::new(move |cc| {
             Ok(Box::new(AdminApp::new(
@@ -88,8 +89,10 @@ fn disable_macos_automatic_window_tabbing() {}
 
 fn run_terminal(config: Config) -> io::Result<()> {
     println!(
-        "rust-desk-light admin terminal mode, server={}:{}",
-        config.ip, config.port
+        "rust-desk-light admin {} terminal mode, server={}:{}",
+        rdl_version::display_version(),
+        config.ip,
+        config.port
     );
 
     let (input_tx, input_rx) = mpsc::channel();
@@ -465,7 +468,10 @@ impl AdminApp {
             camera_windows: Vec::new(),
             terminal_windows: Vec::new(),
             chat_windows: Vec::new(),
-            log_lines: vec![timestamped_log("admin gui started")],
+            log_lines: vec![timestamped_log(format!(
+                "admin gui started version={}",
+                rdl_version::display_version()
+            ))],
         }
     }
 
@@ -1020,16 +1026,7 @@ impl AdminApp {
                         .unwrap_or("None")
                         .to_string(),
                 );
-                metric(
-                    &mut columns[3],
-                    "Connection",
-                    if self.connected {
-                        "Online"
-                    } else {
-                        "Reconnecting"
-                    }
-                    .to_string(),
-                );
+                metric(&mut columns[3], "Version", rdl_version::display_version());
             });
         });
     }

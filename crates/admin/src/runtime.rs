@@ -29,8 +29,12 @@ impl Config {
                         }
                     }
                 }
+                "--version" | "-V" => {
+                    println!("{}", rdl_version::app_version("rdl-admin"));
+                    std::process::exit(0);
+                }
                 "--help" | "-h" => {
-                    println!("Usage: rdl-admin [--ip 127.0.0.1] [--port 5169]");
+                    println!("Usage: rdl-admin [--ip 127.0.0.1] [--port 5169] [--version]");
                     std::process::exit(0);
                 }
                 _ => {}

@@ -54,7 +54,10 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind(&bind_addr)?;
     let (events_tx, events_rx) = mpsc::channel();
 
-    println!("rust-desk-light server listening on {bind_addr}");
+    println!(
+        "rust-desk-light server listening on {bind_addr} version={}",
+        rdl_version::display_version()
+    );
     thread::spawn(move || accept_loop(listener, events_tx));
     event_loop(events_rx);
     Ok(())
@@ -671,8 +674,12 @@ impl Config {
                         }
                     }
                 }
+                "--version" | "-V" => {
+                    println!("{}", rdl_version::app_version("rdl-server"));
+                    std::process::exit(0);
+                }
                 "--help" | "-h" => {
-                    println!("Usage: rdl-server [--ip 0.0.0.0] [--port 5169]");
+                    println!("Usage: rdl-server [--ip 0.0.0.0] [--port 5169] [--version]");
                     std::process::exit(0);
                 }
                 _ => {}

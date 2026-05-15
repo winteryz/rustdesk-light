@@ -99,6 +99,18 @@ cargo build --workspace --release
 
 Debug binaries are written to `target/debug`; release binaries are written to `target/release`. Windows builds use the `.exe` suffix.
 
+## Version Info
+
+All three binaries expose the build version:
+
+```sh
+rdl-server --version
+rdl-client --version
+rdl-admin --version
+```
+
+Tagged builds use the exact current git tag, for example `v0.1.0`. Untagged local builds fall back to the workspace package version from `Cargo.toml`. `RDL_BUILD_VERSION` can be set by CI to override the displayed version explicitly.
+
 ## Quick Start
 
 Launch the local dev stack. This starts the server, client, and admin GUI for manual testing:

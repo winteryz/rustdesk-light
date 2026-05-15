@@ -11,4 +11,4 @@ path = "src/main.rs"
 
 [dependencies]
 rust-desk-light-protocol = { path = "../protocol" }
-
+rust-desk-light-version = { path = "../version" }

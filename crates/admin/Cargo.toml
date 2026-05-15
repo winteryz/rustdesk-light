@@ -16,6 +16,7 @@ eframe = "0.34.2"
 egui_extras = "0.34.2"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 rust-desk-light-protocol = { path = "../protocol" }
+rust-desk-light-version = { path = "../version" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow"] }

@@ -1,0 +1,10 @@
+[package]
+name = "rust-desk-light-version"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "rdl_version"
+path = "src/lib.rs"
