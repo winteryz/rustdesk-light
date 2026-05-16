@@ -12,6 +12,14 @@ const TOOLBAR_CONTROL_HEIGHT: f32 = 28.0;
 const CHAT_FRAME_VERTICAL_MARGIN: f32 = 20.0;
 const BOTTOM_SAFE_SPACE: f32 = 6.0;
 
+pub(crate) fn handle(gui_mode: bool) -> String {
+    if gui_mode {
+        "chat_delivered".to_string()
+    } else {
+        "text_chat requires client GUI".to_string()
+    }
+}
+
 pub(crate) struct ChatWindow {
     messages: Arc<Mutex<Vec<ChatLine>>>,
     draft: Arc<Mutex<String>>,

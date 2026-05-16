@@ -7,11 +7,6 @@ This project is a lightweight Rust remote assistance tool with three small parts
 - `rdl-admin`: operator GUI for listing clients and sending commands.
 - `rdl_protocol`: shared wire protocol and command model.
 
-The project can reference `D:\workspace\code\rust\rustdesk` and
-`D:\workspace\code\rust\rustdesk-server` for architecture, naming, transport
-ideas, and platform backends, but it should not copy their full production
-complexity. The goal is a practical small tool first.
-
 ## Principles
 
 - Keep the protocol consistent before adding features.

@@ -1,5 +1,5 @@
+use super::{balloon_tip, message_box, open_text_in_notepad};
 use crate::windowing;
-use base64::{engine::general_purpose::STANDARD, Engine};
 use eframe::egui;
 use rdl_protocol::CommandKind;
 use std::sync::{
@@ -221,55 +221,43 @@ fn render_actions(ui: &mut egui::Ui, body: &Arc<Mutex<String>>, send_requested: 
 }
 
 fn payload_for(command: &CommandKind, title: &str, body: &str) -> String {
-    let body_key = match command {
-        CommandKind::OpenTextInNotepad => "text_b64",
-        _ => "message_b64",
-    };
-    let title_key = match command {
-        CommandKind::OpenTextInNotepad => "file_name",
-        _ => "title",
-    };
-    let mut lines = vec![
-        format!("{title_key}={}", sanitize_single_line(title)),
-        format!("{body_key}={}", STANDARD.encode(body)),
-    ];
-    if matches!(command, CommandKind::MessageBox) {
-        lines.push("kind=info".to_string());
+    match command {
+        CommandKind::MessageBox => message_box::payload_for(title, body),
+        CommandKind::BalloonTip => balloon_tip::payload_for(title, body),
+        CommandKind::OpenTextInNotepad => open_text_in_notepad::payload_for(title, body),
+        _ => String::new(),
     }
-    lines.join("\n")
 }
 
 fn default_fields(command: &CommandKind) -> (String, String) {
     match command {
-        CommandKind::OpenTextInNotepad => ("rdl-note.txt".to_string(), String::new()),
+        CommandKind::MessageBox => message_box::default_fields(),
+        CommandKind::BalloonTip => balloon_tip::default_fields(),
+        CommandKind::OpenTextInNotepad => open_text_in_notepad::default_fields(),
         _ => ("Rust Desk Light".to_string(), String::new()),
     }
 }
 
 fn title_label(command: &CommandKind) -> &'static str {
     match command {
-        CommandKind::OpenTextInNotepad => "File Name",
-        _ => "Title",
+        CommandKind::OpenTextInNotepad => open_text_in_notepad::title_label(),
+        _ => message_box::title_label(),
     }
 }
 
 fn title_hint(command: &CommandKind) -> &'static str {
     match command {
-        CommandKind::OpenTextInNotepad => "rdl-note.txt",
-        _ => "Rust Desk Light",
+        CommandKind::OpenTextInNotepad => open_text_in_notepad::title_hint(),
+        _ => message_box::title_hint(),
     }
 }
 
 fn body_label(command: &CommandKind) -> &'static str {
     match command {
-        CommandKind::BalloonTip => "Notification",
-        CommandKind::OpenTextInNotepad => "Text",
-        _ => "Message",
+        CommandKind::BalloonTip => balloon_tip::body_label(),
+        CommandKind::OpenTextInNotepad => open_text_in_notepad::body_label(),
+        _ => message_box::body_label(),
     }
-}
-
-fn sanitize_single_line(value: &str) -> String {
-    value.replace(['\t', '\r', '\n'], " ").trim().to_string()
 }
 
 fn identity_title(hostname: &str, username: &str) -> String {
@@ -294,28 +282,4 @@ fn command_title(command: &CommandKind) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::payload_for;
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    use rdl_protocol::CommandKind;
-
-    #[test]
-    fn encodes_message_box_payload() {
-        let payload = payload_for(&CommandKind::MessageBox, "Title", "hello\nworld");
-
-        assert!(payload.contains("title=Title"));
-        assert!(payload.contains("kind=info"));
-        assert!(payload.contains(&format!("message_b64={}", STANDARD.encode("hello\nworld"))));
-    }
-
-    #[test]
-    fn encodes_open_text_payload_with_file_name() {
-        let payload = payload_for(&CommandKind::OpenTextInNotepad, "note.txt", "body");
-
-        assert!(payload.contains("file_name=note.txt"));
-        assert!(payload.contains(&format!("text_b64={}", STANDARD.encode("body"))));
-    }
 }
