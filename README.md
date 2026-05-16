@@ -1,48 +1,123 @@
 # rust-desk-light
 
-Lightweight Rust remote administration toolkit with GUI-based device management, remote desktop, file transfer, terminal access, camera viewing, and local-first control features.
+![Rust 2021](https://img.shields.io/badge/Rust-2021-orange)
+![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
+![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
-`rust-desk-light` is organized as three small binaries plus shared protocol/assets crates:
+Lightweight Rust remote assistance toolkit with an operator console, relay server, endpoint client, and a shared binary protocol. It supports device discovery, command execution, remote terminal, file transfer, remote desktop, camera preview, audio listen, and duplex voice chat across Windows, Linux, and macOS.
 
-- `rdl-server`: presence, session registration, routing, and relay.
-- `rdl-client`: endpoint agent with GUI status, terminal fallback, and local capability handlers.
-- `rdl-admin`: operator GUI for client discovery, commands, live control, and result viewing.
-- `rdl_protocol`: shared binary transport and command model.
-- `rust-desk-light-assets`: shared embedded GUI resources such as the app icon.
+> Intended for authorized remote assistance, lab administration, and development/testing environments. Current transport is not end-to-end encrypted; use trusted networks, VPNs, or other network-level protection for sensitive deployments.
 
-The project is intentionally compact. It focuses on practical remote assistance workflows, simple deployment, and a readable Rust codebase rather than a large enterprise remote management stack.
+## Overview
 
-## Screenshots
+`rust-desk-light` is organized around three runtime components:
 
-TODO: Screenshots will be added later.
+| Component | Role | Notes |
+| --- | --- | --- |
+| `rdl-admin` | Operator GUI | Lists online clients, sends commands, opens live control/file/terminal windows, and receives results. |
+| `rdl-server` | Relay and presence hub | Registers peers, issues session tokens, tracks online clients, and routes traffic between admins and clients. |
+| `rdl-client` | Endpoint agent | Runs on managed machines, reports host metadata, executes approved command handlers, captures media, and serves file/terminal requests. |
 
-## Features
+## Architecture
 
-- Lightweight Rust admin/client/server workspace with a shared binary protocol and embedded GUI assets.
-- TCP control channel with session tokens, typed messages, reconnect, heartbeat, and server-side client routing.
-- UDP audio relay for low-latency audio listen and duplex voice chat.
-- Admin console with online clients, search/filter, activity log, command menu, and rich result windows.
-- Session actions: update, uninstall, kill client process, shutdown, reboot, and delete offline clients.
-- Remote management tools: file manager, streaming terminal, process/window/startup/driver managers, registry snapshot, event log, active connections, and performance monitor.
-- System tools: computer information, clipboard read/write, execute file, execute code, and reusable static commands.
-- Live control: remote desktop, mouse/keyboard input, camera view, audio listen, and voice chat.
-- User interaction: message boxes, system notifications, text chat, and opening text in the platform editor.
-- Cross-platform GUI/terminal fallback builds for Windows, Linux, and macOS, with GitHub Actions release artifacts.
+```mermaid
+flowchart LR
+    Admin["rdl-admin\nOperator console"]
+    Server["rdl-server\nPresence + routing + relay"]
+
+    subgraph Clients["Managed endpoints"]
+        Win["rdl-client\nWindows"]
+        Linux["rdl-client\nLinux / X11"]
+        Mac["rdl-client\nmacOS"]
+        More["rdl-client\n...more clients"]
+    end
+
+    Admin <-->|"operator sessions"| Server
+    Server <-->|"managed connection"| Win
+    Server <-->|"managed connection"| Linux
+    Server <-->|"managed connection"| Mac
+    Server <-->|"managed connection"| More
+```
+
+The server is intentionally thin. It does not execute endpoint actions itself; it authenticates registered peers with server-issued session tokens, keeps a presence table, and routes typed messages between admins and clients.
+
+## Control Flow
+
+```mermaid
+sequenceDiagram
+    participant A as rdl-admin
+    participant S as rdl-server
+    participant C as rdl-client
+
+    C->>S: Hello(role=client, id, fingerprint, host info)
+    S-->>C: Session(token)
+    A->>S: Hello(role=admin, id, fingerprint)
+    S-->>A: Session(token)
+    A->>S: ListClients
+    S-->>A: Clients([online clients])
+    A->>S: Command(target_id, command, payload)
+    S->>C: Command(command, payload)
+    C-->>S: CommandAck(accepted/detail)
+    S-->>A: CommandAck(accepted/detail)
+    C-->>S: CommandOutput / FileTransfer / VideoFrame
+    S-->>A: Routed result stream
+```
+
+## Feature Paths
+
+The configured server address uses the same numeric port for TCP and UDP. If you run across machines, allow both protocols on that port.
+
+| Capability | Direction | Transport | Message format |
+| --- | --- | --- | --- |
+| Registration, session token, heartbeat, client list | Admin/Client <-> Server | TCP | `RDL1` framed binary messages |
+| Commands, acknowledgements, command output, remote terminal | Admin -> Server -> Client, then results back | TCP | `Command`, `CommandAck`, `CommandOutput` |
+| File manager and file transfer | Admin <-> Server <-> Client | TCP | `FileTransfer` start/directory/chunk/progress/complete/error |
+| Remote desktop and input | Admin <-> Server <-> Client | TCP | `VideoControl`, `VideoFrame`, `DesktopInput` |
+| Camera preview | Client -> Server -> Admin | TCP | `VideoControl`, `VideoFrame` |
+| Audio listen | Client -> Server -> Admin | UDP | `RDU1` `pcm_s16le` packets |
+| Duplex voice chat | Admin <-> Server <-> Client | UDP | Two `RDU1` audio streams, one per direction |
+
+Reliable work stays on framed messages; interactive audio uses small low-latency packets so voice does not queue behind bulk traffic.
+
+## Feature Set
+
+| Area | Capabilities |
+| --- | --- |
+| Device operations | Online client list, search/filter, host metadata, session token validation, heartbeat/reconnect, offline cleanup. |
+| Remote management | File manager, upload/download, directory transfer, delete/rename/new folder, remote terminal, process/window/startup/driver managers, registry snapshot, event log, active connections, performance monitor. |
+| Live control | Remote desktop viewing, mouse movement/clicks, text keyboard input, camera preview, audio listen, duplex voice chat. |
+| User interaction | Message box, system notification, text chat, open text in the platform editor. |
+| System tools | Computer information, clipboard read/write, execute file, execute code, reusable static commands, task creation, command presets. |
+| Operator UI | GUI console, activity log, rich result windows, terminal-mode smoke testing fallback. |
 
 ## Supported Platforms
 
 | Binary | Windows | Linux | macOS | Notes |
 | --- | --- | --- | --- | --- |
-| `rdl-server` | ✅ | ✅ | ✅ | Terminal server. |
-| `rdl-client` | ✅ | ✅ | ✅ | GUI client; terminal fallback with `RDL_FORCE_TERMINAL=1`. |
-| `rdl-admin` | ✅ | ✅ | ✅ | GUI admin console; terminal mode for smoke tests. |
+| `rdl-server` | Yes | Yes | Yes | Terminal relay server. |
+| `rdl-client` | Yes | Yes | Yes | GUI client with terminal fallback via `RDL_FORCE_TERMINAL=1`. |
+| `rdl-admin` | Yes | Yes | Yes | GUI admin console with terminal mode for smoke tests. |
 
 Platform-specific capability notes:
 
 - Windows: desktop capture uses native GDI; camera uses Media Foundation through `nokhwa`; audio capture/playback uses `cpal`; input uses Windows APIs and PowerShell text input.
-- Linux: desktop capture currently targets X11 through `maim` or ImageMagick `import`; audio capture/playback uses `cpal` with the system audio backend; mouse input uses `xdotool`; Wayland needs a portal/ydotool backend later.
-- macOS: desktop capture uses `screencapture`; audio capture/playback uses `cpal` and may require Microphone permission; mouse input uses Core Graphics and requires Accessibility permission for the process that launches `rdl-client`; screen capture may require Screen Recording permission.
-- macOS debug/release binaries can be ad-hoc signed. Production Developer ID signing and notarization are still future work.
+- Linux: desktop capture currently targets X11 through `maim` or ImageMagick `import`; audio capture/playback uses `cpal`; mouse input uses `xdotool`; Wayland needs a portal/ydotool backend later.
+- macOS: desktop capture uses `screencapture`; audio capture/playback uses `cpal`; mouse input uses Core Graphics and requires Accessibility permission for the process that launches `rdl-client`; screen capture may require Screen Recording permission.
+- macOS debug/release binaries can be ad-hoc signed. Production Developer ID signing and notarization are future work.
+
+## Repository Layout
+
+```text
+crates/
+  admin/      Operator console and command windows
+  server/     Presence hub, traffic router, and audio relay
+  client/     Endpoint GUI, command handlers, live capture, file/terminal services
+  protocol/   Shared wire protocol and command model
+  assets/     Embedded icons and shared UI assets
+  version/    Build/version metadata
+scripts/      Local dev, smoke test, and release helper scripts
+docs/         Platform-specific testing notes
+```
 
 ## Requirements
 
@@ -94,21 +169,37 @@ cargo build --workspace --release
 
 Debug binaries are written to `target/debug`; release binaries are written to `target/release`. Windows builds use the `.exe` suffix.
 
-## Version Info
+## Run Built Binaries
 
-All three binaries expose the build version:
+After `cargo build --workspace`, start the debug binaries directly:
 
 ```sh
-rdl-server --version
-rdl-client --version
-rdl-admin --version
+./target/debug/rdl-server --ip 0.0.0.0 --port 5169
+./target/debug/rdl-client --ip 127.0.0.1 --port 5169
+./target/debug/rdl-admin --ip 127.0.0.1 --port 5169
 ```
 
-Tagged builds use the exact current git tag, for example `v0.1.0`. Untagged local builds fall back to the workspace package version from `Cargo.toml`. `RDL_BUILD_VERSION` can be set by CI to override the displayed version explicitly.
+After `cargo build --workspace --release`, start the optimized release binaries directly:
+
+```sh
+./target/release/rdl-server --ip 0.0.0.0 --port 5169
+./target/release/rdl-client --ip 127.0.0.1 --port 5169
+./target/release/rdl-admin --ip 127.0.0.1 --port 5169
+```
+
+On Windows PowerShell, use the `.exe` files:
+
+```powershell
+.\target\release\rdl-server.exe --ip 0.0.0.0 --port 5169
+.\target\release\rdl-client.exe --ip 127.0.0.1 --port 5169
+.\target\release\rdl-admin.exe --ip 127.0.0.1 --port 5169
+```
+
+Start order is normally server first, then one or more clients, then the admin console. For cross-machine deployments, open the configured server port as described in [Feature Paths](#feature-paths).
 
 ## Quick Start
 
-Launch the local dev stack. This starts the server, client, and admin GUI for manual testing:
+Launch the local development stack. This starts the server, client, and admin GUI for manual testing:
 
 ```sh
 ./scripts/start-dev.sh
@@ -125,8 +216,6 @@ Run the server manually:
 ```sh
 cargo run -p rust-desk-light-server -- --ip 0.0.0.0 --port 5169
 ```
-
-The server uses the configured port for both TCP control/video/file traffic and UDP audio relay traffic. If you run across machines, allow both TCP and UDP on that port.
 
 Run a client:
 
@@ -170,6 +259,18 @@ On Windows PowerShell:
 .\scripts\smoke-test.bat
 ```
 
+## Version Info
+
+All three binaries expose the build version:
+
+```sh
+rdl-server --version
+rdl-client --version
+rdl-admin --version
+```
+
+Tagged builds use the exact current git tag, for example `v0.1.0`. Untagged local builds fall back to the workspace package version from `Cargo.toml`. `RDL_BUILD_VERSION` can be set by CI to override the displayed version explicitly.
+
 ## Release Builds
 
 Tagged releases are built by GitHub Actions from `.github/workflows/release.yml`.
@@ -193,13 +294,10 @@ xattr -cr ./rdl-server
 
 ## Design Notes
 
-The transport is a custom versioned binary protocol over TCP. Frames use `RDL1` magic bytes, protocol version, length, role, message kind, session token, and typed payloads. Client and admin peers register first, then the server issues a session token required by follow-up messages.
-
-Live desktop and camera frames use binary `VideoFrame` messages over TCP. This keeps large JPEG frames reliable; the current UDP relay is intentionally not used for remote desktop or camera because high-quality desktop frames can split into hundreds of UDP packets, where one lost packet drops the whole frame without a proper video codec, retransmission, FEC, or QUIC/WebRTC-style transport.
-
-Audio listen and voice chat use a separate lightweight UDP packet format with `RDU1` magic bytes. The receiver registers a stream id with the server's UDP relay, and the sender emits small PCM `pcm_s16le` packets with sequence numbers, capture timestamps, sample rate, and channel count. Audio listen uses one client-to-admin stream. Voice chat uses two streams, one admin-to-client and one client-to-admin. The audio path is UDP-only by design so it does not build up seconds of TCP head-of-line delay under interactive use.
-
-Command result compatibility paths remain text-based where appropriate.
+- The main transport is a custom versioned binary protocol. Frames use `RDL1` magic bytes, protocol version, length, role, message kind, session token, and typed payloads.
+- Client and admin peers register first, then the server issues a session token required by follow-up messages.
+- Audio listen and voice chat use a separate `RDU1` packet format with stream ids, sequence numbers, capture timestamps, sample rate, channel count, and PCM payloads.
+- Command result compatibility paths remain text-based where appropriate.
 
 ## Roadmap
 
