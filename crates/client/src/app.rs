@@ -349,6 +349,9 @@ fn client_connection_once(
                     let worker_stop = udp_stop.clone();
                     let worker_event_sink = event_sink.clone();
                     let worker_server_addr = endpoint.addr();
+                    event_sink.send(ClientEvent::Log(format!(
+                        "voice udp receiver ready stream={receive_stream_id} relay={worker_server_addr}"
+                    )));
                     thread::spawn(move || {
                         audio_udp_receive_loop(
                             socket,
@@ -485,6 +488,8 @@ fn client_connection_once(
                 if command == CommandKind::VoiceChat {
                     voice_chat_stream.running.store(false, Ordering::Relaxed);
                     voice_chat_stream.generation.fetch_add(1, Ordering::Relaxed);
+                    voice_chat_mic_muted.store(false, Ordering::Relaxed);
+                    voice_chat_speaker_muted.store(false, Ordering::Relaxed);
                     if let Some(stop) = voice_chat_udp_stop.take() {
                         stop.store(true, Ordering::Relaxed);
                     }
@@ -1442,6 +1447,12 @@ fn audio_udp_receive_loop(
     let mut last_register = Instant::now() - Duration::from_millis(AUDIO_UDP_REGISTER_INTERVAL_MS);
     let mut buf = [0_u8; audio_udp::MAX_PACKET_BYTES];
     let mut last_seq = 0_u64;
+    let mut received_packets = 0_u64;
+    let mut received_bytes = 0_u64;
+    let mut duplicate_drops = 0_u64;
+    let mut muted_drops = 0_u64;
+    let mut playback_errors = 0_u64;
+    let mut last_report = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
         if last_register.elapsed() >= Duration::from_millis(AUDIO_UDP_REGISTER_INTERVAL_MS) {
@@ -1466,13 +1477,18 @@ fn audio_udp_receive_loop(
                     ..
                 }) if packet_stream_id == stream_id => {
                     if seq <= last_seq {
+                        duplicate_drops = duplicate_drops.saturating_add(1);
                         continue;
                     }
                     last_seq = seq;
+                    received_packets = received_packets.saturating_add(1);
+                    received_bytes = received_bytes.saturating_add(bytes.len() as u64);
                     if speaker_muted.load(Ordering::Relaxed) {
+                        muted_drops = muted_drops.saturating_add(1);
                         continue;
                     }
                     if let Err(error) = sink.push_frame(sample_rate, channels, format, bytes) {
+                        playback_errors = playback_errors.saturating_add(1);
                         event_sink.send(ClientEvent::Log(format!(
                             "voice udp playback failed: {error}"
                         )));
@@ -1494,6 +1510,20 @@ fn audio_udp_receive_loop(
                 )));
                 break;
             }
+        }
+
+        if last_report.elapsed() >= Duration::from_millis(AUDIO_STREAM_REPORT_INTERVAL_MS) {
+            eprintln!(
+                "debug event=voice_chat_rx transport=udp stream={} packets={} bytes={} muted_drops={} duplicate_drops={} playback_errors={} last_seq={}",
+                stream_id,
+                received_packets,
+                received_bytes,
+                muted_drops,
+                duplicate_drops,
+                playback_errors,
+                last_seq
+            );
+            last_report = Instant::now();
         }
     }
 

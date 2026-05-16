@@ -65,6 +65,13 @@ pub(crate) fn receive_invite(window: &mut Option<VoiceChatWindow>) {
             window.status = VoiceChatStatus::Incoming;
             window.notice = "Incoming voice chat".to_string();
             window.started_at = None;
+            window.mic_muted.store(false, Ordering::Relaxed);
+            window.speaker_muted.store(false, Ordering::Relaxed);
+            window.mic_changed.store(false, Ordering::Relaxed);
+            window.speaker_changed.store(false, Ordering::Relaxed);
+            window.accept_requested.store(false, Ordering::Relaxed);
+            window.decline_requested.store(false, Ordering::Relaxed);
+            window.end_requested.store(false, Ordering::Relaxed);
             window.open = true;
             window.close_requested.store(false, Ordering::Relaxed);
         }
