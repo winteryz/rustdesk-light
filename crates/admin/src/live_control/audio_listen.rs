@@ -758,7 +758,7 @@ impl AudioPlaybackRegistry {
                 },
             );
         }
-        eprintln!(
+        debug_log!(
             "debug event=audio_listen_playback client={} generation={} output_rate={} output_channels={} prebuffer_ms={} max_buffer_ms={}",
             client_id,
             generation.map(|value| value.to_string()).unwrap_or_else(|| "none".to_string()),

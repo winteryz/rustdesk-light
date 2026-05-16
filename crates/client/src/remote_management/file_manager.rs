@@ -379,7 +379,7 @@ where
     if let Ok(mut transfers) = download_transfers().lock() {
         transfers.insert(transfer_id, cancel.clone());
     }
-    eprintln!(
+    debug_log!(
         "debug event=client_file_download_start client={} id={} path={} root={}",
         client_id,
         transfer_id,
@@ -393,13 +393,16 @@ where
         transfers.remove(&transfer_id);
     }
     match &result {
-        Ok(()) => eprintln!(
+        Ok(()) => debug_log!(
             "debug event=client_file_download_end client={} id={} result=ok",
-            client_id, transfer_id
+            client_id,
+            transfer_id
         ),
-        Err(error) => eprintln!(
+        Err(error) => debug_log!(
             "debug event=client_file_download_end client={} id={} result=error error={}",
-            client_id, transfer_id, error
+            client_id,
+            transfer_id,
+            error
         ),
     }
     result
@@ -422,7 +425,7 @@ where
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "download".to_string());
-    eprintln!(
+    debug_log!(
         "debug event=client_file_download_scan_start client={} id={} root={}",
         client_id,
         transfer_id,
@@ -446,9 +449,10 @@ where
     match collect_download_entries(root, Path::new(&base), &mut dirs, &mut files, &cancel) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-            eprintln!(
+            debug_log!(
                 "debug event=client_file_download_scan_cancelled client={} id={}",
-                client_id, transfer_id
+                client_id,
+                transfer_id
             );
             return send_cancelled(
                 client_id,
@@ -464,7 +468,7 @@ where
     }
     let total_bytes = files.iter().map(|file| file.size).sum::<u64>();
     let mut transferred_bytes = 0u64;
-    eprintln!(
+    debug_log!(
         "debug event=client_file_download_scan_done client={} id={} dirs={} files={} total_bytes={}",
         client_id,
         transfer_id,
@@ -474,9 +478,11 @@ where
     );
 
     if cancel.load(Ordering::Relaxed) {
-        eprintln!(
+        debug_log!(
             "debug event=client_file_download_cancel_before_stream client={} id={} total_bytes={}",
-            client_id, transfer_id, total_bytes
+            client_id,
+            transfer_id,
+            total_bytes
         );
         return send_cancelled(
             client_id,
@@ -506,7 +512,7 @@ where
 
     for dir in dirs {
         if cancel.load(Ordering::Relaxed) {
-            eprintln!(
+            debug_log!(
                 "debug event=client_file_download_cancel_during_dirs client={} id={} transferred_bytes={} total_bytes={}",
                 client_id, transfer_id, transferred_bytes, total_bytes
             );
@@ -539,7 +545,7 @@ where
     let mut buffer = vec![0u8; FILE_TRANSFER_CHUNK_SIZE];
     for file in files {
         if cancel.load(Ordering::Relaxed) {
-            eprintln!(
+            debug_log!(
                 "debug event=client_file_download_cancel_before_file client={} id={} transferred_bytes={} total_bytes={}",
                 client_id, transfer_id, transferred_bytes, total_bytes
             );
@@ -557,7 +563,7 @@ where
         let mut offset = 0u64;
         loop {
             if cancel.load(Ordering::Relaxed) {
-                eprintln!(
+                debug_log!(
                     "debug event=client_file_download_cancel_during_file client={} id={} transferred_bytes={} total_bytes={} file={}",
                     client_id,
                     transfer_id,
@@ -629,7 +635,7 @@ where
         .and_then(|transfers| transfers.get(&transfer_id).cloned());
     if let Some(cancelled) = cancelled {
         cancelled.store(true, Ordering::Relaxed);
-        eprintln!(
+        debug_log!(
             "debug event=client_file_download_cancel_request client={} id={} result=active path={}",
             client_id,
             transfer_id,
@@ -650,7 +656,7 @@ where
             "cancel requested".to_string(),
         ))
     } else {
-        eprintln!(
+        debug_log!(
             "debug event=client_file_download_cancel_request client={} id={} result=no_active path={}",
             client_id,
             transfer_id,

@@ -683,7 +683,7 @@ fn voice_capture_loop(
             }
         }
         if last_report.elapsed() >= Duration::from_millis(VOICE_CHAT_CAPTURE_REPORT_MS) {
-            eprintln!(
+            debug_log!(
                 "debug event=voice_chat_capture client={} packets={} bytes={} muted_frames={} queue_drops={} pending_frames={}",
                 client_id,
                 queued_packets,

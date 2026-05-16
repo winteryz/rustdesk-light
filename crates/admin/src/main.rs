@@ -1,3 +1,21 @@
+#[cfg(debug_assertions)]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
+#[cfg(not(debug_assertions))]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        {
+            let _ = format_args!($($arg)*);
+        }
+    };
+}
+
 mod app;
 mod command_menu;
 mod execute;

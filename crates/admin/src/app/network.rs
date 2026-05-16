@@ -150,7 +150,7 @@ fn admin_connection_once(
                     send(&mut stream, &mut next_message_id, &session_token, message)
                 }
                 AdminInput::Reconnect { reason } => {
-                    eprintln!("debug event=admin_reconnect_request reason={reason}");
+                    debug_log!("debug event=admin_reconnect_request reason={reason}");
                     let _ = stream.shutdown(Shutdown::Both);
                     return Ok(AdminConnectionExit::Disconnected);
                 }
@@ -318,7 +318,7 @@ fn admin_network_should_ignore_file_transfer(
         action,
         FileTransferAction::Directory | FileTransferAction::Chunk
     ) {
-        eprintln!(
+        debug_log!(
             "debug event=admin_file_transfer_ignore client={} id={} action={}",
             client_id,
             transfer_id,
