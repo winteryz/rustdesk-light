@@ -36,6 +36,8 @@ const AUDIO_STREAM_REPORT_INTERVAL_MS: u64 = 1_000;
 const AUDIO_UDP_REGISTER_INTERVAL_MS: u64 = 250;
 const AUDIO_UDP_RECV_TIMEOUT_MS: u64 = 20;
 const AUDIO_UDP_MAX_PAYLOAD_BYTES: usize = 1_200;
+const VIDEO_UDP_PACE_CHUNKS: usize = 16;
+const VIDEO_UDP_PACE_MICROS: u64 = 1_000;
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env();
@@ -1520,6 +1522,10 @@ impl VideoUdpSender {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
             self.socket.send(&self.packet)?;
             self.sent_packets = self.sent_packets.saturating_add(1);
+            if chunk_count > VIDEO_UDP_PACE_CHUNKS && (chunk_index + 1) % VIDEO_UDP_PACE_CHUNKS == 0
+            {
+                thread::sleep(Duration::from_micros(VIDEO_UDP_PACE_MICROS));
+            }
         }
         self.sent_frames = self.sent_frames.saturating_add(1);
         self.sent_bytes = self.sent_bytes.saturating_add(bytes.len() as u64);
@@ -1900,6 +1906,19 @@ fn video_stream_loop(
         },
         VideoSource::Camera => None,
     };
+    if source == VideoSource::RemoteDesktop && udp_sender.is_some() {
+        let _ = queue_message(
+            &out_tx,
+            &session_token,
+            Message::CommandAck {
+                client_id: client_id.clone(),
+                command: CommandKind::RemoteDesktop,
+                accepted: true,
+                detail: "remote_desktop_started\nmessage=UDP stream started\ntransport=udp"
+                    .to_string(),
+            },
+        );
+    }
     while stream_state.running.load(Ordering::Relaxed)
         && stream_state.generation.load(Ordering::Relaxed) == generation
     {
