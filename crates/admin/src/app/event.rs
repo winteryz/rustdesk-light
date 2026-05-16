@@ -107,17 +107,38 @@ pub(super) enum AdminEvent {
 pub(super) struct AdminEventSink {
     tx: Sender<AdminEvent>,
     repaint_handle: Option<Arc<Mutex<Option<egui::Context>>>>,
+    audio_playback_registry: Option<live_control::audio_listen::AudioPlaybackRegistry>,
 }
 
 impl AdminEventSink {
     pub(super) fn new(
         tx: Sender<AdminEvent>,
         repaint_handle: Option<Arc<Mutex<Option<egui::Context>>>>,
+        audio_playback_registry: Option<live_control::audio_listen::AudioPlaybackRegistry>,
     ) -> Self {
-        Self { tx, repaint_handle }
+        Self {
+            tx,
+            repaint_handle,
+            audio_playback_registry,
+        }
     }
 
     pub(super) fn send(&self, event: AdminEvent) {
+        if let (
+            Some(registry),
+            AdminEvent::AudioFrame {
+                client_id,
+                source: AudioSource::AudioListen,
+                seq,
+                sample_rate,
+                channels,
+                format,
+                bytes,
+            },
+        ) = (&self.audio_playback_registry, &event)
+        {
+            registry.push_frame(client_id, *seq, *sample_rate, *channels, format, bytes);
+        }
         let _ = self.tx.send(event);
         if let Some(ctx) = self
             .repaint_handle

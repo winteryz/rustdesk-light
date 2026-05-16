@@ -1,7 +1,7 @@
 use crate::windowing;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -35,9 +35,24 @@ pub(crate) struct AudioListenWindow {
     pending_since: Option<Instant>,
     open: bool,
     close_requested: Arc<AtomicBool>,
+    playback_registry: AudioPlaybackRegistry,
     player: Option<AudioPlayer>,
     inbound_generation: Option<u64>,
     last_incoming_seq: u64,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct AudioPlaybackRegistry {
+    sinks: Arc<Mutex<HashMap<String, AudioPlaybackSink>>>,
+}
+
+#[derive(Clone)]
+struct AudioPlaybackSink {
+    generation: Option<u64>,
+    last_seq: u64,
+    buffer: Arc<Mutex<AudioPlaybackState>>,
+    output_sample_rate: u32,
+    output_channels: u16,
 }
 
 #[derive(Clone)]
@@ -136,12 +151,7 @@ pub(crate) fn handle_audio_frame(
             .saturating_add(frame.seq - window.last_incoming_seq - 1);
     }
     window.last_incoming_seq = frame.seq;
-    let playback = if let Some(player) = &window.player {
-        player.push_frame(&frame);
-        player.snapshot()
-    } else {
-        None
-    };
+    let playback = window.player.as_ref().and_then(AudioPlayer::snapshot);
     if let Some(playback) = playback {
         window.stats.buffered_ms = playback.buffered_ms;
         window.stats.underflows = playback.underflows;
@@ -160,6 +170,7 @@ pub(crate) fn open_window(
     client_id: &str,
     hostname: String,
     username: String,
+    playback_registry: AudioPlaybackRegistry,
 ) {
     if let Some(window) = windows
         .iter_mut()
@@ -168,6 +179,7 @@ pub(crate) fn open_window(
         window.open = true;
         window.hostname = hostname;
         window.username = username;
+        window.playback_registry = playback_registry;
         window.close_requested.store(false, Ordering::Relaxed);
         window.queue_devices();
         return;
@@ -187,6 +199,7 @@ pub(crate) fn open_window(
         pending_since: None,
         open: true,
         close_requested: Arc::new(AtomicBool::new(false)),
+        playback_registry,
         player: None,
         inbound_generation: None,
         last_incoming_seq: 0,
@@ -249,6 +262,7 @@ pub(crate) fn handle_ack(
             window.notice = message;
             window.inbound_generation = generation;
             window.last_incoming_seq = 0;
+            window.register_playback();
         }
         AudioResponse::Stopped => stop_listen(window, "Stopped"),
         AudioResponse::Error(message) => {
@@ -337,7 +351,10 @@ pub(crate) fn render_windows(
             let action = payload_action(&payload);
             if action.as_deref() == Some("start") {
                 match AudioPlayer::start() {
-                    Ok(player) => window.player = Some(player),
+                    Ok(player) => {
+                        window.player = Some(player);
+                        window.register_playback();
+                    }
                     Err(error) => {
                         window.running.store(false, Ordering::Relaxed);
                         window.status = AudioStatus::Failed;
@@ -374,6 +391,16 @@ impl AudioListenWindow {
 
     fn queue_payload(&mut self, payload: String) {
         self.outbound.insert(0, payload);
+    }
+
+    fn register_playback(&self) {
+        if let Some(player) = &self.player {
+            self.playback_registry.register_player(
+                &self.client_id,
+                self.inbound_generation,
+                player,
+            );
+        }
     }
 }
 
@@ -582,6 +609,7 @@ fn handle_frame(window: &mut AudioListenWindow, frame: AudioFrame) {
 
 fn stop_listen(window: &mut AudioListenWindow, notice: &str) {
     window.running.store(false, Ordering::Relaxed);
+    window.playback_registry.stop(&window.client_id);
     window.outbound.clear();
     window.pending_since = None;
     window.player = None;
@@ -613,6 +641,73 @@ struct AudioPlaybackState {
 struct AudioPlaybackSnapshot {
     buffered_ms: u64,
     underflows: u64,
+}
+
+impl AudioPlaybackRegistry {
+    pub(crate) fn push_frame(
+        &self,
+        client_id: &str,
+        seq: u64,
+        sample_rate: u32,
+        channels: u16,
+        format: &str,
+        bytes: &[u8],
+    ) {
+        if format != "pcm_s16le" {
+            return;
+        }
+        let Some(sink) = self.active_sink(client_id, seq) else {
+            return;
+        };
+        let samples = pcm_s16le_to_f32(bytes);
+        let converted = resample_and_map_channels(
+            &samples,
+            sample_rate,
+            channels,
+            sink.output_sample_rate,
+            sink.output_channels,
+        );
+        let buffer_arc = sink.buffer.clone();
+        if let Ok(mut buffer) = buffer_arc.lock() {
+            buffer.push_samples(converted);
+        };
+    }
+
+    fn register_player(&self, client_id: &str, generation: Option<u64>, player: &AudioPlayer) {
+        if let Ok(mut sinks) = self.sinks.lock() {
+            sinks.insert(
+                client_id.to_string(),
+                AudioPlaybackSink {
+                    generation,
+                    last_seq: 0,
+                    buffer: player.buffer.clone(),
+                    output_sample_rate: player.output_sample_rate,
+                    output_channels: player.output_channels,
+                },
+            );
+        }
+    }
+
+    fn stop(&self, client_id: &str) {
+        if let Ok(mut sinks) = self.sinks.lock() {
+            sinks.remove(client_id);
+        }
+    }
+
+    fn active_sink(&self, client_id: &str, seq: u64) -> Option<AudioPlaybackSink> {
+        let mut sinks = self.sinks.lock().ok()?;
+        let sink = sinks.get_mut(client_id)?;
+        if let Some(generation) = sink.generation {
+            if sequence_generation(seq) != generation {
+                return None;
+            }
+        }
+        if seq <= sink.last_seq {
+            return None;
+        }
+        sink.last_seq = seq;
+        Some(sink.clone())
+    }
 }
 
 impl AudioPlayer {
@@ -647,20 +742,6 @@ impl AudioPlayer {
             output_channels,
             _stream: stream,
         })
-    }
-
-    fn push_frame(&self, frame: &AudioFrame) {
-        let samples = pcm_s16le_to_f32(&frame.bytes);
-        let converted = resample_and_map_channels(
-            &samples,
-            frame.sample_rate,
-            frame.channels,
-            self.output_sample_rate,
-            self.output_channels,
-        );
-        if let Ok(mut buffer) = self.buffer.lock() {
-            buffer.push_samples(converted);
-        }
     }
 
     fn snapshot(&self) -> Option<AudioPlaybackSnapshot> {

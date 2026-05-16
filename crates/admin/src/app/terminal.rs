@@ -25,7 +25,7 @@ pub(super) fn run_terminal(config: Config) -> io::Result<()> {
     let (event_tx, event_rx) = mpsc::channel();
     let ignored_file_transfers = Arc::new(Mutex::new(HashSet::new()));
     thread::spawn(move || {
-        let event_sink = AdminEventSink::new(event_tx, None);
+        let event_sink = AdminEventSink::new(event_tx, None, None);
         if let Err(error) =
             admin_network_loop(config, input_rx, event_sink.clone(), ignored_file_transfers)
         {

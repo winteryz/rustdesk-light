@@ -80,12 +80,18 @@ fn run_gui(config: Config) -> eframe::Result {
     let network_repaint_handle = repaint_handle.clone();
     let ignored_file_transfers = Arc::new(Mutex::new(HashSet::new()));
     let network_ignored_file_transfers = ignored_file_transfers.clone();
+    let audio_playback_registry = live_control::audio_listen::AudioPlaybackRegistry::default();
+    let network_audio_playback_registry = audio_playback_registry.clone();
     let voice_audio_input_tx = input_tx.clone();
 
     thread::spawn(move || voice_audio_forward_loop(voice_audio_rx, voice_audio_input_tx));
 
     thread::spawn(move || {
-        let event_sink = AdminEventSink::new(event_tx, Some(network_repaint_handle));
+        let event_sink = AdminEventSink::new(
+            event_tx,
+            Some(network_repaint_handle),
+            Some(network_audio_playback_registry),
+        );
         if let Err(error) = admin_network_loop(
             network_config,
             input_rx,
@@ -116,6 +122,7 @@ fn run_gui(config: Config) -> eframe::Result {
                 ui_event_tx,
                 repaint_handle,
                 ignored_file_transfers,
+                audio_playback_registry,
                 voice_audio_tx,
             )))
         }),
@@ -171,6 +178,7 @@ struct AdminApp {
     event_tx: Sender<AdminEvent>,
     repaint_handle: Arc<Mutex<Option<egui::Context>>>,
     voice_audio_tx: SyncSender<user_interaction::voice_chat::OutboundCommand>,
+    audio_playback_registry: live_control::audio_listen::AudioPlaybackRegistry,
     connected: bool,
     clients: Vec<ClientRow>,
     client_filter: String,
@@ -281,6 +289,7 @@ impl AdminApp {
         event_tx: Sender<AdminEvent>,
         repaint_handle: Arc<Mutex<Option<egui::Context>>>,
         ignored_file_transfers: Arc<Mutex<HashSet<(String, u64)>>>,
+        audio_playback_registry: live_control::audio_listen::AudioPlaybackRegistry,
         voice_audio_tx: SyncSender<user_interaction::voice_chat::OutboundCommand>,
     ) -> Self {
         apply_admin_theme(&cc.egui_ctx);
@@ -293,6 +302,7 @@ impl AdminApp {
             event_rx,
             event_tx,
             repaint_handle,
+            audio_playback_registry,
             connected: false,
             clients: Vec::new(),
             client_filter: String::new(),
@@ -615,7 +625,11 @@ impl AdminApp {
     }
 
     fn spawn_desktop_frame_decode(&self, client_id: String, payload: String) {
-        let sink = AdminEventSink::new(self.event_tx.clone(), Some(self.repaint_handle.clone()));
+        let sink = AdminEventSink::new(
+            self.event_tx.clone(),
+            Some(self.repaint_handle.clone()),
+            None,
+        );
         thread::spawn(move || {
             let result = live_control::remote_desktop::decode_frame_payload(&payload);
             sink.send(AdminEvent::DecodedDesktopFrame { client_id, result });
@@ -623,7 +637,11 @@ impl AdminApp {
     }
 
     fn spawn_camera_frame_decode(&self, client_id: String, payload: String) {
-        let sink = AdminEventSink::new(self.event_tx.clone(), Some(self.repaint_handle.clone()));
+        let sink = AdminEventSink::new(
+            self.event_tx.clone(),
+            Some(self.repaint_handle.clone()),
+            None,
+        );
         thread::spawn(move || {
             let result = live_control::camera::decode_frame_payload(&payload);
             sink.send(AdminEvent::DecodedCameraFrame { client_id, result });
@@ -636,7 +654,11 @@ impl AdminApp {
         source: VideoSource,
         frame: PendingVideoFrame,
     ) {
-        let sink = AdminEventSink::new(self.event_tx.clone(), Some(self.repaint_handle.clone()));
+        let sink = AdminEventSink::new(
+            self.event_tx.clone(),
+            Some(self.repaint_handle.clone()),
+            None,
+        );
         thread::spawn(move || match source {
             VideoSource::RemoteDesktop => {
                 let result = live_control::remote_desktop::decode_video_frame(
@@ -848,6 +870,7 @@ impl AdminApp {
             client_id,
             hostname,
             username,
+            self.audio_playback_registry.clone(),
         );
     }
 
@@ -1774,8 +1797,11 @@ impl AdminApp {
                 }
                 let input_tx = self.input_tx.clone();
                 let flags = self.file_transfer_cancel_flags.clone();
-                let sink =
-                    AdminEventSink::new(self.event_tx.clone(), Some(self.repaint_handle.clone()));
+                let sink = AdminEventSink::new(
+                    self.event_tx.clone(),
+                    Some(self.repaint_handle.clone()),
+                    None,
+                );
                 let worker_client_id = client_id.clone();
                 thread::spawn(move || {
                     let result = run_file_upload_transfer(
