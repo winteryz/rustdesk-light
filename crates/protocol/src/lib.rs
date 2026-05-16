@@ -12,6 +12,151 @@ pub const REMOTE_TERMINAL_CANCEL: &str = "__rdl_terminal_cancel";
 const HEADER_LEN: usize = 10;
 const ENVELOPE_FIXED_LEN: usize = 27;
 
+pub mod audio_udp {
+    pub const MAGIC: [u8; 4] = *b"RDU1";
+    pub const FORMAT_PCM_S16LE: u8 = 1;
+    pub const MAX_PACKET_BYTES: usize = 1400;
+
+    const TYPE_REGISTER: u8 = 1;
+    const TYPE_UNREGISTER: u8 = 2;
+    const TYPE_AUDIO: u8 = 3;
+    const CONTROL_LEN: usize = 4 + 1 + 8;
+    const AUDIO_HEADER_LEN: usize = 4 + 1 + 8 + 8 + 8 + 4 + 2 + 1;
+
+    #[derive(Debug)]
+    pub enum Packet<'a> {
+        Register {
+            stream_id: u64,
+        },
+        Unregister {
+            stream_id: u64,
+        },
+        Audio {
+            stream_id: u64,
+            seq: u64,
+            capture_epoch_ms: u64,
+            sample_rate: u32,
+            channels: u16,
+            format: &'static str,
+            bytes: &'a [u8],
+        },
+    }
+
+    pub fn encode_register(stream_id: u64, out: &mut Vec<u8>) {
+        encode_control(TYPE_REGISTER, stream_id, out);
+    }
+
+    pub fn encode_unregister(stream_id: u64, out: &mut Vec<u8>) {
+        encode_control(TYPE_UNREGISTER, stream_id, out);
+    }
+
+    pub fn encode_audio(
+        stream_id: u64,
+        seq: u64,
+        capture_epoch_ms: u64,
+        sample_rate: u32,
+        channels: u16,
+        format: &str,
+        bytes: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<(), &'static str> {
+        if format_code(format).is_none() {
+            return Err("unsupported audio udp format");
+        }
+        if AUDIO_HEADER_LEN + bytes.len() > MAX_PACKET_BYTES {
+            return Err("audio udp packet too large");
+        }
+        out.clear();
+        out.extend_from_slice(&MAGIC);
+        out.push(TYPE_AUDIO);
+        out.extend_from_slice(&stream_id.to_be_bytes());
+        out.extend_from_slice(&seq.to_be_bytes());
+        out.extend_from_slice(&capture_epoch_ms.to_be_bytes());
+        out.extend_from_slice(&sample_rate.to_be_bytes());
+        out.extend_from_slice(&channels.to_be_bytes());
+        out.push(format_code(format).unwrap_or(FORMAT_PCM_S16LE));
+        out.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Packet<'_>, &'static str> {
+        if bytes.len() < CONTROL_LEN || bytes[..4] != MAGIC {
+            return Err("invalid audio udp packet");
+        }
+        let packet_type = bytes[4];
+        let stream_id = read_u64(bytes, 5)?;
+        match packet_type {
+            TYPE_REGISTER => Ok(Packet::Register { stream_id }),
+            TYPE_UNREGISTER => Ok(Packet::Unregister { stream_id }),
+            TYPE_AUDIO => {
+                if bytes.len() < AUDIO_HEADER_LEN {
+                    return Err("truncated audio udp packet");
+                }
+                let seq = read_u64(bytes, 13)?;
+                let capture_epoch_ms = read_u64(bytes, 21)?;
+                let sample_rate = read_u32(bytes, 29)?;
+                let channels = read_u16(bytes, 33)?;
+                let format = format_name(bytes.get(35).copied().ok_or("missing audio udp format")?)
+                    .ok_or("unsupported audio udp format")?;
+                Ok(Packet::Audio {
+                    stream_id,
+                    seq,
+                    capture_epoch_ms,
+                    sample_rate,
+                    channels,
+                    format,
+                    bytes: &bytes[AUDIO_HEADER_LEN..],
+                })
+            }
+            _ => Err("unknown audio udp packet type"),
+        }
+    }
+
+    fn encode_control(packet_type: u8, stream_id: u64, out: &mut Vec<u8>) {
+        out.clear();
+        out.extend_from_slice(&MAGIC);
+        out.push(packet_type);
+        out.extend_from_slice(&stream_id.to_be_bytes());
+    }
+
+    fn format_code(format: &str) -> Option<u8> {
+        match format {
+            "pcm_s16le" => Some(FORMAT_PCM_S16LE),
+            _ => None,
+        }
+    }
+
+    fn format_name(code: u8) -> Option<&'static str> {
+        match code {
+            FORMAT_PCM_S16LE => Some("pcm_s16le"),
+            _ => None,
+        }
+    }
+
+    fn read_u16(bytes: &[u8], start: usize) -> Result<u16, &'static str> {
+        let raw = bytes
+            .get(start..start + 2)
+            .ok_or("truncated audio udp u16")?;
+        Ok(u16::from_be_bytes([raw[0], raw[1]]))
+    }
+
+    fn read_u32(bytes: &[u8], start: usize) -> Result<u32, &'static str> {
+        let raw = bytes
+            .get(start..start + 4)
+            .ok_or("truncated audio udp u32")?;
+        Ok(u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]))
+    }
+
+    fn read_u64(bytes: &[u8], start: usize) -> Result<u64, &'static str> {
+        let raw = bytes
+            .get(start..start + 8)
+            .ok_or("truncated audio udp u64")?;
+        Ok(u64::from_be_bytes([
+            raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+        ]))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StaticCommandPreset {
     pub id: &'static str,
@@ -90,7 +235,8 @@ pub fn static_command_script_for_os(id: &str, os_label: &str) -> Option<&'static
 #[cfg(test)]
 mod tests {
     use super::{
-        default_static_command_preset_id, static_command_presets, static_command_script_for_os,
+        audio_udp, default_static_command_preset_id, static_command_presets,
+        static_command_script_for_os,
     };
 
     #[test]
@@ -116,6 +262,39 @@ mod tests {
             static_command_script_for_os("disk_usage", "macos aarch64"),
             Some("df -h")
         );
+    }
+
+    #[test]
+    fn audio_udp_roundtrips_register_and_audio() {
+        let mut packet = Vec::new();
+        audio_udp::encode_register(42, &mut packet);
+        assert!(matches!(
+            audio_udp::decode(&packet),
+            Ok(audio_udp::Packet::Register { stream_id: 42 })
+        ));
+
+        audio_udp::encode_audio(42, 7, 1234, 48_000, 1, "pcm_s16le", &[1, 2, 3, 4], &mut packet)
+            .unwrap();
+        match audio_udp::decode(&packet).unwrap() {
+            audio_udp::Packet::Audio {
+                stream_id,
+                seq,
+                capture_epoch_ms,
+                sample_rate,
+                channels,
+                format,
+                bytes,
+            } => {
+                assert_eq!(stream_id, 42);
+                assert_eq!(seq, 7);
+                assert_eq!(capture_epoch_ms, 1234);
+                assert_eq!(sample_rate, 48_000);
+                assert_eq!(channels, 1);
+                assert_eq!(format, "pcm_s16le");
+                assert_eq!(bytes, &[1, 2, 3, 4]);
+            }
+            other => panic!("unexpected packet: {other:?}"),
+        }
     }
 }
 

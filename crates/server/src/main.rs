@@ -1,13 +1,13 @@
 use rdl_protocol::{
-    now_epoch_ms, read_envelope, write_envelope, AudioSource, ClientInfo, FileTransferAction,
-    FileTransferDirection, Message, Role,
+    audio_udp, now_epoch_ms, read_envelope, write_envelope, AudioSource, ClientInfo,
+    FileTransferAction, FileTransferDirection, Message, Role,
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const HEARTBEAT_INTERVAL_MS: u128 = 10_000;
 const STALE_PEER_MS: u128 = 45_000;
@@ -15,6 +15,9 @@ const MAINTENANCE_TICK_MS: u64 = 100;
 const WRITER_BULK_POLL_MS: u64 = 2;
 const WRITER_AUDIO_QUEUE_CAPACITY: usize = 24;
 const WRITER_VIDEO_QUEUE_CAPACITY: usize = 4;
+const UDP_RELAY_IDLE_TIMEOUT_MS: u64 = 30_000;
+const UDP_RELAY_RECV_TIMEOUT_MS: u64 = 100;
+const UDP_RELAY_MAINTENANCE_MS: u64 = 1_000;
 
 #[derive(Debug)]
 enum ServerEvent {
@@ -98,9 +101,81 @@ fn main() -> io::Result<()> {
         "rust-desk-light server listening on {bind_addr} version={}",
         rdl_version::display_version()
     );
+    start_audio_udp_relay(bind_addr.clone());
     thread::spawn(move || accept_loop(listener, events_tx));
     event_loop(events_rx);
     Ok(())
+}
+
+fn start_audio_udp_relay(bind_addr: String) {
+    thread::spawn(move || match UdpSocket::bind(&bind_addr) {
+        Ok(socket) => {
+            println!("audio udp relay listening on {bind_addr}");
+            if let Err(error) = audio_udp_relay_loop(socket) {
+                eprintln!("audio udp relay stopped: {error}");
+            }
+        }
+        Err(error) => eprintln!("audio udp relay bind failed on {bind_addr}: {error}"),
+    });
+}
+
+#[derive(Clone, Copy)]
+struct AudioUdpRoute {
+    admin_addr: SocketAddr,
+    last_seen: Instant,
+}
+
+fn audio_udp_relay_loop(socket: UdpSocket) -> io::Result<()> {
+    socket.set_read_timeout(Some(Duration::from_millis(UDP_RELAY_RECV_TIMEOUT_MS)))?;
+    let mut routes = HashMap::<u64, AudioUdpRoute>::new();
+    let mut buf = [0_u8; audio_udp::MAX_PACKET_BYTES];
+    let mut last_maintenance = Instant::now();
+    loop {
+        match socket.recv_from(&mut buf) {
+            Ok((len, addr)) => match audio_udp::decode(&buf[..len]) {
+                Ok(audio_udp::Packet::Register { stream_id }) => {
+                    routes.insert(
+                        stream_id,
+                        AudioUdpRoute {
+                            admin_addr: addr,
+                            last_seen: Instant::now(),
+                        },
+                    );
+                }
+                Ok(audio_udp::Packet::Unregister { stream_id }) => {
+                    if routes
+                        .get(&stream_id)
+                        .map(|route| route.admin_addr == addr)
+                        .unwrap_or(false)
+                    {
+                        routes.remove(&stream_id);
+                    }
+                }
+                Ok(audio_udp::Packet::Audio { stream_id, .. }) => {
+                    if let Some(route) = routes.get_mut(&stream_id) {
+                        route.last_seen = Instant::now();
+                        let _ = socket.send_to(&buf[..len], route.admin_addr);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("audio udp relay ignored packet from {addr}: {error}");
+                }
+            },
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::TimedOut => {}
+            Err(error) => return Err(error),
+        }
+
+        if last_maintenance.elapsed() >= Duration::from_millis(UDP_RELAY_MAINTENANCE_MS) {
+            let now = Instant::now();
+            routes.retain(|_, route| {
+                now.duration_since(route.last_seen)
+                    < Duration::from_millis(UDP_RELAY_IDLE_TIMEOUT_MS)
+            });
+            last_maintenance = now;
+        }
+    }
 }
 
 fn accept_loop(listener: TcpListener, events_tx: Sender<ServerEvent>) {

@@ -8,11 +8,11 @@ use crate::{
 };
 use eframe::egui;
 use rdl_protocol::{
-    write_envelope_with_token, AudioSource, CommandKind, EnvelopeDecoder, FileTransferAction,
-    FileTransferDirection, Message, Role, VideoSource,
+    audio_udp, now_epoch_ms, write_envelope_with_token, AudioSource, CommandKind, EnvelopeDecoder,
+    FileTransferAction, FileTransferDirection, Message, Role, VideoSource,
 };
 use std::io;
-use std::net::TcpStream;
+use std::net::{TcpStream, UdpSocket};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, Sender, SyncSender},
@@ -1247,6 +1247,57 @@ fn audio_capture_frame_bytes(sample_rate: u32, channels: u16) -> usize {
     samples_per_channel * channels.max(1) as usize * 2
 }
 
+struct AudioUdpSender {
+    socket: UdpSocket,
+    stream_id: u64,
+    packet: Vec<u8>,
+}
+
+impl AudioUdpSender {
+    fn from_payload(payload: &str) -> Result<Option<Self>, String> {
+        if video_control_value(payload, "transport").as_deref() != Some("udp") {
+            return Ok(None);
+        }
+        let host = video_control_value(payload, "udp_host")
+            .ok_or_else(|| "missing audio udp host".to_string())?;
+        let port = video_control_value(payload, "udp_port")
+            .and_then(|value| value.parse::<u16>().ok())
+            .ok_or_else(|| "missing audio udp port".to_string())?;
+        let stream_id = video_control_value(payload, "udp_stream")
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| "missing audio udp stream".to_string())?;
+        let socket =
+            UdpSocket::bind("0.0.0.0:0").map_err(|error| format!("bind udp failed: {error}"))?;
+        socket
+            .connect(format!("{host}:{port}"))
+            .map_err(|error| format!("connect udp relay failed: {error}"))?;
+        Ok(Some(Self {
+            socket,
+            stream_id,
+            packet: Vec::with_capacity(audio_udp::MAX_PACKET_BYTES),
+        }))
+    }
+
+    fn send_frame(
+        &mut self,
+        seq: u64,
+        frame: &crate::live_control::CapturedAudioFrame,
+    ) -> io::Result<()> {
+        audio_udp::encode_audio(
+            self.stream_id,
+            seq,
+            now_epoch_ms() as u64,
+            frame.sample_rate,
+            frame.channels,
+            &frame.format,
+            &frame.bytes,
+            &mut self.packet,
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        self.socket.send(&self.packet).map(|_| ())
+    }
+}
+
 fn client_writer_loop(
     mut writer: TcpStream,
     out_rx: Receiver<ClientOutbound>,
@@ -1575,6 +1626,14 @@ fn audio_stream_loop(
             return;
         }
     };
+    let mut udp_sender = match AudioUdpSender::from_payload(&start_payload) {
+        Ok(sender) => sender,
+        Err(error) => {
+            eprintln!("audio udp setup failed, falling back to tcp: {error}");
+            None
+        }
+    };
+    let mut transport = if udp_sender.is_some() { "udp" } else { "tcp" };
     let _ = queue_message(
         &out_tx,
         &session_token,
@@ -1583,7 +1642,7 @@ fn audio_stream_loop(
             command: CommandKind::AudioListen,
             accepted: true,
             detail: format!(
-                "audio_listen_started\nsample_rate={}\nchannels={}\nformat={}\ngeneration={generation}",
+                "audio_listen_started\nsample_rate={}\nchannels={}\nformat={}\ngeneration={generation}\ntransport={transport}",
                 input_stream.sample_rate, input_stream.channels, input_stream.format
             ),
         },
@@ -1621,37 +1680,55 @@ fn audio_stream_loop(
         };
         for frame in packetizer.push(frame) {
             let frame_bytes = frame.bytes.len() as u64;
-            match try_queue_realtime_message_observed(
-                &realtime_tx,
-                &session_token,
-                Message::AudioFrame {
-                    client_id: client_id.clone(),
-                    source: AudioSource::AudioListen,
-                    seq,
-                    sample_rate: frame.sample_rate,
-                    channels: frame.channels,
-                    format: frame.format,
-                    bytes: frame.bytes,
-                },
-            ) {
-                Ok(true) => {
-                    sent_packets = sent_packets.saturating_add(1);
-                    sent_bytes = sent_bytes.saturating_add(frame_bytes);
+            let mut sent = false;
+            if let Some(sender) = udp_sender.as_mut() {
+                match sender.send_frame(seq, &frame) {
+                    Ok(()) => {
+                        sent = true;
+                        sent_packets = sent_packets.saturating_add(1);
+                        sent_bytes = sent_bytes.saturating_add(frame_bytes);
+                    }
+                    Err(error) => {
+                        eprintln!("audio udp send failed, falling back to tcp: {error}");
+                        udp_sender = None;
+                        transport = "tcp";
+                    }
                 }
-                Ok(false) => {
-                    queue_drops = queue_drops.saturating_add(1);
-                }
-                Err(_) => {
-                    stream_state.running.store(false, Ordering::Relaxed);
-                    break;
+            }
+            if !sent {
+                match try_queue_realtime_message_observed(
+                    &realtime_tx,
+                    &session_token,
+                    Message::AudioFrame {
+                        client_id: client_id.clone(),
+                        source: AudioSource::AudioListen,
+                        seq,
+                        sample_rate: frame.sample_rate,
+                        channels: frame.channels,
+                        format: frame.format,
+                        bytes: frame.bytes,
+                    },
+                ) {
+                    Ok(true) => {
+                        sent_packets = sent_packets.saturating_add(1);
+                        sent_bytes = sent_bytes.saturating_add(frame_bytes);
+                    }
+                    Ok(false) => {
+                        queue_drops = queue_drops.saturating_add(1);
+                    }
+                    Err(_) => {
+                        stream_state.running.store(false, Ordering::Relaxed);
+                        break;
+                    }
                 }
             }
             seq = seq.saturating_add(1);
         }
         if last_report.elapsed() >= Duration::from_millis(AUDIO_STREAM_REPORT_INTERVAL_MS) {
             eprintln!(
-                "debug event=audio_listen_tx client={} packets={} bytes={} queue_drops={} capture_drops={} pending_bytes={}",
+                "debug event=audio_listen_tx client={} transport={} packets={} bytes={} queue_drops={} capture_drops={} pending_bytes={}",
                 client_id,
+                transport,
                 sent_packets,
                 sent_bytes,
                 queue_drops,

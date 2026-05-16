@@ -36,18 +36,19 @@ use crate::{
 };
 use eframe::egui;
 use rdl_protocol::{
-    AudioSource, ClientInfo, CommandKind, CommandOutputStream, FileTransferAction,
-    FileTransferDirection, Message, VideoSource,
+    audio_udp, now_epoch_ms, AudioSource, ClientInfo, CommandKind, CommandOutputStream,
+    FileTransferAction, FileTransferDirection, Message, VideoSource,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
+use std::net::UdpSocket;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, Sender, SyncSender},
     Arc, Mutex,
 };
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const GUI_IDLE_FRAME_INTERVAL_MS: u64 = 250;
 const GUI_REALTIME_AUDIO_FRAME_INTERVAL_MS: u64 = 16;
@@ -56,6 +57,8 @@ const VOICE_AUDIO_OUTBOUND_QUEUE_CAPACITY: usize = 128;
 const MAX_GUI_EVENTS_PER_FRAME: usize = 4096;
 const MAX_PENDING_AUDIO_MS: u64 = 240;
 const MAX_PENDING_AUDIO_FRAMES_PER_SOURCE: usize = 32;
+const AUDIO_UDP_REGISTER_INTERVAL_MS: u64 = 250;
+const AUDIO_UDP_RECV_TIMEOUT_MS: u64 = 20;
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env();
@@ -161,6 +164,75 @@ fn voice_audio_forward_loop(
     }
 }
 
+fn audio_udp_receive_loop(
+    socket: UdpSocket,
+    server_addr: String,
+    client_id: String,
+    stream_id: u64,
+    stop: Arc<AtomicBool>,
+    event_sink: AdminEventSink,
+) {
+    let mut register_packet = Vec::new();
+    let mut unregister_packet = Vec::new();
+    audio_udp::encode_register(stream_id, &mut register_packet);
+    audio_udp::encode_unregister(stream_id, &mut unregister_packet);
+    let mut last_register = Instant::now() - Duration::from_millis(AUDIO_UDP_REGISTER_INTERVAL_MS);
+    let mut buf = [0_u8; audio_udp::MAX_PACKET_BYTES];
+
+    while !stop.load(Ordering::Relaxed) {
+        if last_register.elapsed() >= Duration::from_millis(AUDIO_UDP_REGISTER_INTERVAL_MS) {
+            if let Err(error) = socket.send_to(&register_packet, &server_addr) {
+                event_sink.send(AdminEvent::Log(format!(
+                    "audio udp register failed: {error}"
+                )));
+                break;
+            }
+            last_register = Instant::now();
+        }
+
+        match socket.recv_from(&mut buf) {
+            Ok((len, _)) => match audio_udp::decode(&buf[..len]) {
+                Ok(audio_udp::Packet::Audio {
+                    stream_id: packet_stream_id,
+                    seq,
+                    sample_rate,
+                    channels,
+                    format,
+                    bytes,
+                    ..
+                }) if packet_stream_id == stream_id => {
+                    event_sink.send(AdminEvent::AudioFrame {
+                        client_id: client_id.clone(),
+                        source: AudioSource::AudioListen,
+                        seq,
+                        sample_rate,
+                        channels,
+                        format: format.to_string(),
+                        bytes: bytes.to_vec(),
+                    });
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    event_sink.send(AdminEvent::Log(format!(
+                        "audio udp packet ignored: {error}"
+                    )));
+                }
+            },
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::TimedOut => {}
+            Err(error) => {
+                event_sink.send(AdminEvent::Log(format!(
+                    "audio udp receive failed: {error}"
+                )));
+                break;
+            }
+        }
+    }
+
+    let _ = socket.send_to(&unregister_packet, server_addr);
+}
+
 #[cfg(target_os = "macos")]
 fn disable_macos_automatic_window_tabbing() {
     if let Some(main_thread) = objc2_foundation::MainThreadMarker::new() {
@@ -188,6 +260,8 @@ struct AdminApp {
     desktop_windows: Vec<live_control::remote_desktop::RemoteDesktopWindow>,
     camera_windows: Vec<live_control::camera::CameraWindow>,
     audio_windows: Vec<live_control::audio_listen::AudioListenWindow>,
+    audio_udp_sessions: HashMap<String, AudioUdpSession>,
+    audio_udp_next_stream_id: u64,
     terminal_windows: Vec<remote_management::remote_terminal::TerminalWindow>,
     chat_windows: Vec<user_interaction::text_chat::ChatWindow>,
     voice_chat_windows: Vec<user_interaction::voice_chat::VoiceChatWindow>,
@@ -229,6 +303,11 @@ struct PendingAudioFrame {
     channels: u16,
     format: String,
     bytes: Vec<u8>,
+}
+
+struct AudioUdpSession {
+    stream_id: u64,
+    stop: Arc<AtomicBool>,
 }
 
 fn push_pending_audio_frame(
@@ -312,6 +391,8 @@ impl AdminApp {
             desktop_windows: Vec::new(),
             camera_windows: Vec::new(),
             audio_windows: Vec::new(),
+            audio_udp_sessions: HashMap::new(),
+            audio_udp_next_stream_id: now_epoch_ms() as u64,
             terminal_windows: Vec::new(),
             chat_windows: Vec::new(),
             voice_chat_windows: Vec::new(),
@@ -350,6 +431,7 @@ impl AdminApp {
                 AdminEvent::Disconnected => {
                     self.connected = false;
                     self.push_log("disconnected from server");
+                    self.stop_all_audio_udp_sessions();
                     for client in &mut self.clients {
                         client.status = ClientStatus::Offline;
                     }
@@ -872,6 +954,68 @@ impl AdminApp {
             username,
             self.audio_playback_registry.clone(),
         );
+    }
+
+    fn start_audio_udp_session(&mut self, client_id: &str) -> Option<u64> {
+        self.stop_audio_udp_session(client_id);
+        let server_addr = format!("{}:{}", self.config.ip, self.config.port);
+        let socket = match UdpSocket::bind("0.0.0.0:0") {
+            Ok(socket) => socket,
+            Err(error) => {
+                self.push_log(format!("audio udp bind failed: {error}"));
+                return None;
+            }
+        };
+        if let Err(error) =
+            socket.set_read_timeout(Some(Duration::from_millis(AUDIO_UDP_RECV_TIMEOUT_MS)))
+        {
+            self.push_log(format!("audio udp timeout setup failed: {error}"));
+            return None;
+        }
+        let stream_id = self.audio_udp_next_stream_id.max(1);
+        self.audio_udp_next_stream_id = self.audio_udp_next_stream_id.saturating_add(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let event_sink = AdminEventSink::new(
+            self.event_tx.clone(),
+            Some(self.repaint_handle.clone()),
+            Some(self.audio_playback_registry.clone()),
+        );
+        let worker_stop = stop.clone();
+        let worker_client_id = client_id.to_string();
+        let worker_server_addr = server_addr.clone();
+        thread::spawn(move || {
+            audio_udp_receive_loop(
+                socket,
+                worker_server_addr,
+                worker_client_id,
+                stream_id,
+                worker_stop,
+                event_sink,
+            );
+        });
+        self.audio_udp_sessions
+            .insert(client_id.to_string(), AudioUdpSession { stream_id, stop });
+        self.push_log(format!(
+            "audio udp session started client={client_id} stream={stream_id} relay={server_addr}"
+        ));
+        Some(stream_id)
+    }
+
+    fn stop_audio_udp_session(&mut self, client_id: &str) {
+        if let Some(session) = self.audio_udp_sessions.remove(client_id) {
+            session.stop.store(true, Ordering::Relaxed);
+            self.push_log(format!(
+                "audio udp session stopped client={client_id} stream={}",
+                session.stream_id
+            ));
+        }
+    }
+
+    fn stop_all_audio_udp_sessions(&mut self) {
+        let client_ids: Vec<String> = self.audio_udp_sessions.keys().cloned().collect();
+        for client_id in client_ids {
+            self.stop_audio_udp_session(&client_id);
+        }
     }
 
     fn open_session_command_window(&mut self, client_id: &str, command: CommandKind) {
@@ -1970,7 +2114,20 @@ impl AdminApp {
     }
 
     fn render_audio_windows(&mut self, ctx: &egui::Context) {
-        for outbound in live_control::audio_listen::render_windows(ctx, &mut self.audio_windows) {
+        for mut outbound in live_control::audio_listen::render_windows(ctx, &mut self.audio_windows)
+        {
+            match payload_field(&outbound.payload, "action").as_deref() {
+                Some("start") => {
+                    if let Some(stream_id) = self.start_audio_udp_session(&outbound.client_id) {
+                        outbound.payload.push_str(&format!(
+                            "\ntransport=udp\nudp_host={}\nudp_port={}\nudp_stream={stream_id}",
+                            self.config.ip, self.config.port
+                        ));
+                    }
+                }
+                Some("stop") => self.stop_audio_udp_session(&outbound.client_id),
+                _ => {}
+            }
             let message = if video_stream_payload(&outbound.payload) {
                 AdminInput::AudioControl {
                     target_id: outbound.client_id.clone(),
