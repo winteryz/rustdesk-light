@@ -59,6 +59,7 @@ const MAX_PENDING_AUDIO_MS: u64 = 240;
 const MAX_PENDING_AUDIO_FRAMES_PER_SOURCE: usize = 32;
 const AUDIO_UDP_REGISTER_INTERVAL_MS: u64 = 250;
 const AUDIO_UDP_RECV_TIMEOUT_MS: u64 = 20;
+const AUDIO_STREAM_REPORT_INTERVAL_MS: u64 = 1_000;
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env();
@@ -85,9 +86,10 @@ fn run_gui(config: Config) -> eframe::Result {
     let network_ignored_file_transfers = ignored_file_transfers.clone();
     let audio_playback_registry = live_control::audio_listen::AudioPlaybackRegistry::default();
     let network_audio_playback_registry = audio_playback_registry.clone();
-    let voice_audio_input_tx = input_tx.clone();
+    let voice_udp_senders = Arc::new(Mutex::new(HashMap::new()));
+    let voice_audio_udp_senders = voice_udp_senders.clone();
 
-    thread::spawn(move || voice_audio_forward_loop(voice_audio_rx, voice_audio_input_tx));
+    thread::spawn(move || voice_audio_forward_loop(voice_audio_rx, voice_audio_udp_senders));
 
     thread::spawn(move || {
         let event_sink = AdminEventSink::new(
@@ -127,6 +129,7 @@ fn run_gui(config: Config) -> eframe::Result {
                 ignored_file_transfers,
                 audio_playback_registry,
                 voice_audio_tx,
+                voice_udp_senders,
             )))
         }),
     )
@@ -134,7 +137,7 @@ fn run_gui(config: Config) -> eframe::Result {
 
 fn voice_audio_forward_loop(
     voice_audio_rx: Receiver<user_interaction::voice_chat::OutboundCommand>,
-    input_tx: SyncSender<AdminInput>,
+    voice_udp_senders: Arc<Mutex<HashMap<String, AudioUdpSender>>>,
 ) {
     while let Ok(command) = voice_audio_rx.recv() {
         let user_interaction::voice_chat::OutboundCommand::AudioFrame {
@@ -148,18 +151,22 @@ fn voice_audio_forward_loop(
         else {
             continue;
         };
-        let input = AdminInput::AudioFrame {
-            target_id: client_id,
-            source: AudioSource::VoiceChat,
-            seq,
-            sample_rate,
-            channels,
-            format,
-            bytes,
-        };
-        match input_tx.try_send(input) {
-            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
-            Err(mpsc::TrySendError::Disconnected(_)) => break,
+        let mut remove_sender = false;
+        if let Ok(mut senders) = voice_udp_senders.lock() {
+            if let Some(sender) = senders.get_mut(&client_id) {
+                if let Err(error) =
+                    sender.send_frame(&client_id, seq, sample_rate, channels, &format, &bytes)
+                {
+                    eprintln!(
+                        "debug event=voice_chat_udp_send_failed client={} error={}",
+                        client_id, error
+                    );
+                    remove_sender = true;
+                }
+            }
+            if remove_sender {
+                senders.remove(&client_id);
+            }
         }
     }
 }
@@ -168,6 +175,7 @@ fn audio_udp_receive_loop(
     socket: UdpSocket,
     server_addr: String,
     client_id: String,
+    source: AudioSource,
     stream_id: u64,
     stop: Arc<AtomicBool>,
     event_sink: AdminEventSink,
@@ -203,7 +211,7 @@ fn audio_udp_receive_loop(
                 }) if packet_stream_id == stream_id => {
                     event_sink.send(AdminEvent::AudioFrame {
                         client_id: client_id.clone(),
-                        source: AudioSource::AudioListen,
+                        source: source.clone(),
                         seq,
                         sample_rate,
                         channels,
@@ -268,6 +276,8 @@ struct AdminApp {
     interaction_command_windows: Vec<user_interaction::InteractionCommandWindow>,
     session_command_windows: Vec<crate::session::SessionCommandWindow>,
     execute_windows: Vec<crate::execute::ExecuteWindow>,
+    voice_udp_sessions: HashMap<String, AudioUdpSession>,
+    voice_udp_senders: Arc<Mutex<HashMap<String, AudioUdpSender>>>,
     file_transfer_cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     ignored_file_transfers: Arc<Mutex<HashSet<(String, u64)>>>,
     log_lines: Vec<String>,
@@ -308,6 +318,98 @@ struct PendingAudioFrame {
 struct AudioUdpSession {
     stream_id: u64,
     stop: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct AudioUdpEndpoint {
+    host: String,
+    port: u16,
+    stream_id: u64,
+}
+
+struct AudioUdpSender {
+    socket: UdpSocket,
+    stream_id: u64,
+    packet: Vec<u8>,
+    sent_packets: u64,
+    sent_bytes: u64,
+    last_report: Instant,
+}
+
+impl AudioUdpSender {
+    fn connect(endpoint: &AudioUdpEndpoint) -> Result<Self, String> {
+        let socket =
+            UdpSocket::bind("0.0.0.0:0").map_err(|error| format!("bind udp failed: {error}"))?;
+        socket
+            .connect(endpoint.addr())
+            .map_err(|error| format!("connect udp relay failed: {error}"))?;
+        Ok(Self {
+            socket,
+            stream_id: endpoint.stream_id,
+            packet: Vec::with_capacity(audio_udp::MAX_PACKET_BYTES),
+            sent_packets: 0,
+            sent_bytes: 0,
+            last_report: Instant::now(),
+        })
+    }
+
+    fn send_frame(
+        &mut self,
+        client_id: &str,
+        seq: u64,
+        sample_rate: u32,
+        channels: u16,
+        format: &str,
+        bytes: &[u8],
+    ) -> io::Result<()> {
+        audio_udp::encode_audio(
+            self.stream_id,
+            seq,
+            now_epoch_ms() as u64,
+            sample_rate,
+            channels,
+            format,
+            bytes,
+            &mut self.packet,
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        self.socket.send(&self.packet)?;
+        self.sent_packets = self.sent_packets.saturating_add(1);
+        self.sent_bytes = self.sent_bytes.saturating_add(bytes.len() as u64);
+        if self.last_report.elapsed() >= Duration::from_millis(AUDIO_STREAM_REPORT_INTERVAL_MS) {
+            eprintln!(
+                "debug event=voice_chat_tx client={} transport=udp packets={} bytes={}",
+                client_id, self.sent_packets, self.sent_bytes
+            );
+            self.last_report = Instant::now();
+        }
+        Ok(())
+    }
+}
+
+impl AudioUdpEndpoint {
+    fn from_payload(payload: &str) -> Result<Option<Self>, String> {
+        if payload_field(payload, "transport").as_deref() != Some("udp") {
+            return Ok(None);
+        }
+        let host = payload_field(payload, "udp_host")
+            .ok_or_else(|| "missing audio udp host".to_string())?;
+        let port = payload_field(payload, "udp_port")
+            .and_then(|value| value.parse::<u16>().ok())
+            .ok_or_else(|| "missing audio udp port".to_string())?;
+        let stream_id = payload_field(payload, "udp_stream")
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| "missing audio udp stream".to_string())?;
+        Ok(Some(Self {
+            host,
+            port,
+            stream_id,
+        }))
+    }
+
+    fn addr(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
 }
 
 fn push_pending_audio_frame(
@@ -370,6 +472,7 @@ impl AdminApp {
         ignored_file_transfers: Arc<Mutex<HashSet<(String, u64)>>>,
         audio_playback_registry: live_control::audio_listen::AudioPlaybackRegistry,
         voice_audio_tx: SyncSender<user_interaction::voice_chat::OutboundCommand>,
+        voice_udp_senders: Arc<Mutex<HashMap<String, AudioUdpSender>>>,
     ) -> Self {
         apply_admin_theme(&cc.egui_ctx);
         if let Ok(mut handle) = repaint_handle.lock() {
@@ -400,6 +503,8 @@ impl AdminApp {
             interaction_command_windows: Vec::new(),
             session_command_windows: Vec::new(),
             execute_windows: Vec::new(),
+            voice_udp_sessions: HashMap::new(),
+            voice_udp_senders,
             file_transfer_cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             ignored_file_transfers,
             log_lines: vec![timestamped_log(format!(
@@ -432,6 +537,8 @@ impl AdminApp {
                     self.connected = false;
                     self.push_log("disconnected from server");
                     self.stop_all_audio_udp_sessions();
+                    self.stop_all_voice_udp_sessions();
+                    self.clear_voice_udp_senders();
                     for client in &mut self.clients {
                         client.status = ClientStatus::Offline;
                     }
@@ -956,8 +1063,11 @@ impl AdminApp {
         );
     }
 
-    fn start_audio_udp_session(&mut self, client_id: &str) -> Option<u64> {
-        self.stop_audio_udp_session(client_id);
+    fn start_audio_udp_receive_session(
+        &mut self,
+        client_id: &str,
+        source: AudioSource,
+    ) -> Option<AudioUdpSession> {
         let server_addr = format!("{}:{}", self.config.ip, self.config.port);
         let socket = match UdpSocket::bind("0.0.0.0:0") {
             Ok(socket) => socket,
@@ -983,21 +1093,31 @@ impl AdminApp {
         let worker_stop = stop.clone();
         let worker_client_id = client_id.to_string();
         let worker_server_addr = server_addr.clone();
+        let worker_source = source.clone();
         thread::spawn(move || {
             audio_udp_receive_loop(
                 socket,
                 worker_server_addr,
                 worker_client_id,
+                worker_source,
                 stream_id,
                 worker_stop,
                 event_sink,
             );
         });
-        self.audio_udp_sessions
-            .insert(client_id.to_string(), AudioUdpSession { stream_id, stop });
         self.push_log(format!(
-            "audio udp session started client={client_id} stream={stream_id} relay={server_addr}"
+            "audio udp session started client={client_id} source={} stream={stream_id} relay={server_addr}",
+            source.as_str()
         ));
+        Some(AudioUdpSession { stream_id, stop })
+    }
+
+    fn start_audio_udp_session(&mut self, client_id: &str) -> Option<u64> {
+        self.stop_audio_udp_session(client_id);
+        let session = self.start_audio_udp_receive_session(client_id, AudioSource::AudioListen)?;
+        let stream_id = session.stream_id;
+        self.audio_udp_sessions
+            .insert(client_id.to_string(), session);
         Some(stream_id)
     }
 
@@ -1015,6 +1135,58 @@ impl AdminApp {
         let client_ids: Vec<String> = self.audio_udp_sessions.keys().cloned().collect();
         for client_id in client_ids {
             self.stop_audio_udp_session(&client_id);
+        }
+    }
+
+    fn start_voice_udp_session(&mut self, client_id: &str) -> Option<u64> {
+        self.stop_voice_udp_session(client_id);
+        let session = self.start_audio_udp_receive_session(client_id, AudioSource::VoiceChat)?;
+        let stream_id = session.stream_id;
+        self.voice_udp_sessions
+            .insert(client_id.to_string(), session);
+        Some(stream_id)
+    }
+
+    fn stop_voice_udp_session(&mut self, client_id: &str) {
+        if let Some(session) = self.voice_udp_sessions.remove(client_id) {
+            session.stop.store(true, Ordering::Relaxed);
+            self.push_log(format!(
+                "voice udp session stopped client={client_id} stream={}",
+                session.stream_id
+            ));
+        }
+    }
+
+    fn stop_all_voice_udp_sessions(&mut self) {
+        let client_ids: Vec<String> = self.voice_udp_sessions.keys().cloned().collect();
+        for client_id in client_ids {
+            self.stop_voice_udp_session(&client_id);
+        }
+    }
+
+    fn set_voice_udp_sender(&mut self, client_id: &str, detail: &str) -> Result<(), String> {
+        let endpoint = AudioUdpEndpoint::from_payload(detail)?
+            .ok_or_else(|| "voice chat udp transport unavailable".to_string())?;
+        let sender = AudioUdpSender::connect(&endpoint)?;
+        if let Ok(mut senders) = self.voice_udp_senders.lock() {
+            senders.insert(client_id.to_string(), sender);
+        }
+        self.push_log(format!(
+            "voice udp sender ready client={client_id} stream={} relay={}:{}",
+            endpoint.stream_id, endpoint.host, endpoint.port
+        ));
+        Ok(())
+    }
+
+    fn remove_voice_udp_sender(&mut self, client_id: &str) {
+        if let Ok(mut senders) = self.voice_udp_senders.lock() {
+            senders.remove(client_id);
+        }
+    }
+
+    fn clear_voice_udp_senders(&mut self) {
+        if let Ok(mut senders) = self.voice_udp_senders.lock() {
+            senders.clear();
         }
     }
 
@@ -1292,6 +1464,23 @@ impl AdminApp {
     }
 
     fn handle_voice_chat_ack(&mut self, client_id: &str, accepted: bool, detail: String) {
+        let mut accepted = accepted;
+        let mut detail = detail;
+        if accepted && detail.starts_with("voice_chat_accepted") {
+            if let Err(error) = self.set_voice_udp_sender(client_id, &detail) {
+                self.remove_voice_udp_sender(client_id);
+                self.stop_voice_udp_session(client_id);
+                accepted = false;
+                detail = format!("voice_chat_error\nmessage={error}");
+            }
+        } else if !accepted
+            || detail.starts_with("voice_chat_ended")
+            || detail.starts_with("voice_chat_error")
+            || detail.starts_with("voice_chat_declined")
+        {
+            self.remove_voice_udp_sender(client_id);
+            self.stop_voice_udp_session(client_id);
+        }
         let (hostname, username) = self.client_window_identity(client_id);
         user_interaction::voice_chat::handle_ack(
             &mut self.voice_chat_windows,
@@ -1803,7 +1992,24 @@ impl AdminApp {
             user_interaction::voice_chat::render_windows(ctx, &mut self.voice_chat_windows)
         {
             match outbound {
-                user_interaction::voice_chat::OutboundCommand::Command { client_id, payload } => {
+                user_interaction::voice_chat::OutboundCommand::Command {
+                    client_id,
+                    mut payload,
+                } => {
+                    if payload_field(&payload, "action").as_deref() == Some("invite") {
+                        let Some(stream_id) = self.start_voice_udp_session(&client_id) else {
+                            self.handle_voice_chat_ack(
+                                &client_id,
+                                false,
+                                "voice_chat_error\nmessage=voice udp setup failed".to_string(),
+                            );
+                            continue;
+                        };
+                        payload.push_str(&format!(
+                            "\ntransport=udp\nudp_host={}\nudp_port={}\nudp_stream={stream_id}",
+                            self.config.ip, self.config.port
+                        ));
+                    }
                     let _ = self.input_tx.send(AdminInput::Command {
                         target_id: client_id.clone(),
                         command: CommandKind::VoiceChat,
@@ -1815,6 +2021,13 @@ impl AdminApp {
                     client_id,
                     payload,
                 } => {
+                    match payload_field(&payload, "action").as_deref() {
+                        Some("stop") | Some("end") => {
+                            self.remove_voice_udp_sender(&client_id);
+                            self.stop_voice_udp_session(&client_id);
+                        }
+                        _ => {}
+                    }
                     let _ = self.input_tx.send(AdminInput::AudioControl {
                         target_id: client_id,
                         source: AudioSource::VoiceChat,
@@ -1829,15 +2042,20 @@ impl AdminApp {
                     format,
                     bytes,
                 } => {
-                    let _ = self.input_tx.try_send(AdminInput::AudioFrame {
-                        target_id: client_id,
-                        source: AudioSource::VoiceChat,
-                        seq,
-                        sample_rate,
-                        channels,
-                        format,
-                        bytes,
-                    });
+                    let mut remove_sender = false;
+                    if let Ok(mut senders) = self.voice_udp_senders.lock() {
+                        if let Some(sender) = senders.get_mut(&client_id) {
+                            if sender
+                                .send_frame(&client_id, seq, sample_rate, channels, &format, &bytes)
+                                .is_err()
+                            {
+                                remove_sender = true;
+                            }
+                        }
+                        if remove_sender {
+                            senders.remove(&client_id);
+                        }
+                    }
                 }
             }
         }

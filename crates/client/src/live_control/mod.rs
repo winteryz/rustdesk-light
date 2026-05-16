@@ -4,7 +4,9 @@ mod audio_listen;
 mod camera;
 mod remote_desktop;
 
-pub(crate) use audio_listen::{AudioInputStream, AudioOutputPlayer, CapturedAudioFrame};
+pub(crate) use audio_listen::{
+    AudioInputStream, AudioOutputPlayer, AudioOutputSink, CapturedAudioFrame,
+};
 pub(crate) use camera::CameraVideoFrame;
 pub(crate) use remote_desktop::RemoteDesktopVideoFrame;
 

@@ -30,15 +30,6 @@ pub(super) enum AdminInput {
         source: AudioSource,
         payload: String,
     },
-    AudioFrame {
-        target_id: String,
-        source: AudioSource,
-        seq: u64,
-        sample_rate: u32,
-        channels: u16,
-        format: String,
-        bytes: Vec<u8>,
-    },
     FileTransfer(Message),
     Reconnect {
         reason: String,

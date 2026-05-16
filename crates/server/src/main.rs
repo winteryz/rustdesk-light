@@ -13,7 +13,6 @@ const HEARTBEAT_INTERVAL_MS: u128 = 10_000;
 const STALE_PEER_MS: u128 = 45_000;
 const MAINTENANCE_TICK_MS: u64 = 100;
 const WRITER_BULK_POLL_MS: u64 = 2;
-const WRITER_AUDIO_QUEUE_CAPACITY: usize = 24;
 const WRITER_VIDEO_QUEUE_CAPACITY: usize = 4;
 const UDP_RELAY_IDLE_TIMEOUT_MS: u64 = 30_000;
 const UDP_RELAY_RECV_TIMEOUT_MS: u64 = 100;
@@ -46,16 +45,13 @@ enum ServerEvent {
 #[derive(Clone, Debug)]
 struct PeerSender {
     high: Sender<Message>,
-    audio: SyncSender<Message>,
     video: SyncSender<Message>,
     bulk: Sender<Message>,
 }
 
 impl PeerSender {
     fn send(&self, message: Message) -> Result<(), mpsc::SendError<Message>> {
-        if server_message_is_audio_realtime(&message) {
-            try_send_lossy(&self.audio, message)
-        } else if server_message_is_video_realtime(&message) {
+        if server_message_is_video_realtime(&message) {
             try_send_lossy(&self.video, message)
         } else if server_message_is_bulk(&message) {
             self.bulk.send(message)
@@ -121,7 +117,7 @@ fn start_audio_udp_relay(bind_addr: String) {
 
 #[derive(Clone, Copy)]
 struct AudioUdpRoute {
-    admin_addr: SocketAddr,
+    receiver_addr: SocketAddr,
     last_seen: Instant,
 }
 
@@ -137,7 +133,7 @@ fn audio_udp_relay_loop(socket: UdpSocket) -> io::Result<()> {
                     routes.insert(
                         stream_id,
                         AudioUdpRoute {
-                            admin_addr: addr,
+                            receiver_addr: addr,
                             last_seen: Instant::now(),
                         },
                     );
@@ -145,7 +141,7 @@ fn audio_udp_relay_loop(socket: UdpSocket) -> io::Result<()> {
                 Ok(audio_udp::Packet::Unregister { stream_id }) => {
                     if routes
                         .get(&stream_id)
-                        .map(|route| route.admin_addr == addr)
+                        .map(|route| route.receiver_addr == addr)
                         .unwrap_or(false)
                     {
                         routes.remove(&stream_id);
@@ -154,7 +150,7 @@ fn audio_udp_relay_loop(socket: UdpSocket) -> io::Result<()> {
                 Ok(audio_udp::Packet::Audio { stream_id, .. }) => {
                     if let Some(route) = routes.get_mut(&stream_id) {
                         route.last_seen = Instant::now();
-                        let _ = socket.send_to(&buf[..len], route.admin_addr);
+                        let _ = socket.send_to(&buf[..len], route.receiver_addr);
                     }
                 }
                 Err(error) => {
@@ -202,7 +198,6 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
         eprintln!("peer {peer_id} set TCP_NODELAY failed: {error}");
     }
     let (high_tx, high_rx) = mpsc::channel::<Message>();
-    let (audio_tx, audio_rx) = mpsc::sync_channel::<Message>(WRITER_AUDIO_QUEUE_CAPACITY);
     let (video_tx, video_rx) = mpsc::sync_channel::<Message>(WRITER_VIDEO_QUEUE_CAPACITY);
     let (bulk_tx, bulk_rx) = mpsc::channel::<Message>();
     if events_tx
@@ -210,7 +205,6 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
             peer_id,
             sender: PeerSender {
                 high: high_tx,
-                audio: audio_tx,
                 video: video_tx,
                 bulk: bulk_tx,
             },
@@ -229,7 +223,7 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
         }
     };
 
-    thread::spawn(move || writer_loop(peer_id, writer, high_rx, audio_rx, video_rx, bulk_rx));
+    thread::spawn(move || writer_loop(peer_id, writer, high_rx, video_rx, bulk_rx));
 
     let mut reader = stream;
     loop {
@@ -291,16 +285,14 @@ fn writer_loop(
     peer_id: usize,
     mut writer: TcpStream,
     high_rx: Receiver<Message>,
-    audio_rx: Receiver<Message>,
     video_rx: Receiver<Message>,
     bulk_rx: Receiver<Message>,
 ) {
     let mut next_message_id = 1u64;
     let mut high_open = true;
-    let mut audio_open = true;
     let mut video_open = true;
     let mut bulk_open = true;
-    while high_open || audio_open || video_open || bulk_open {
+    while high_open || video_open || bulk_open {
         loop {
             match high_rx.try_recv() {
                 Ok(message) => {
@@ -311,21 +303,6 @@ fn writer_loop(
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     high_open = false;
-                    break;
-                }
-            }
-        }
-
-        loop {
-            match audio_rx.try_recv() {
-                Ok(message) => {
-                    if !write_server_message(peer_id, &mut writer, &mut next_message_id, message) {
-                        return;
-                    }
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    audio_open = false;
                     break;
                 }
             }
@@ -358,7 +335,7 @@ fn writer_loop(
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                if !high_open && !audio_open && !video_open && !bulk_open {
+                if !high_open && !video_open && !bulk_open {
                     break;
                 }
             }
@@ -380,10 +357,6 @@ fn write_server_message(
         return false;
     }
     true
-}
-
-fn server_message_is_audio_realtime(message: &Message) -> bool {
-    matches!(message, Message::AudioFrame { .. })
 }
 
 fn server_message_is_video_realtime(message: &Message) -> bool {
@@ -786,46 +759,6 @@ fn event_loop(events_rx: Receiver<ServerEvent>) {
                             payload,
                         ) {
                             send_audio_error(peer_id, &target_id, source, error, &peers);
-                        }
-                    }
-                    Message::AudioFrame {
-                        client_id,
-                        source,
-                        seq,
-                        sample_rate,
-                        channels,
-                        format,
-                        bytes,
-                    } => {
-                        mark_seen(peer_id, &mut peers);
-                        let from_admin = peers.get(&peer_id).and_then(|peer| peer.role.as_ref())
-                            == Some(&Role::Admin);
-                        let message = Message::AudioFrame {
-                            client_id: client_id.clone(),
-                            source,
-                            seq,
-                            sample_rate,
-                            channels,
-                            format,
-                            bytes,
-                        };
-                        if from_admin {
-                            if let Some(peer) = peers.values().find(|peer| {
-                                peer.role == Some(Role::Client)
-                                    && peer
-                                        .client_info
-                                        .as_ref()
-                                        .map(|info| info.id == client_id)
-                                        .unwrap_or(false)
-                            }) {
-                                let _ = peer.sender.send(message);
-                            }
-                        } else {
-                            for peer in peers.values() {
-                                if peer.role == Some(Role::Admin) {
-                                    let _ = peer.sender.send(message.clone());
-                                }
-                            }
                         }
                     }
                     Message::Ping => {

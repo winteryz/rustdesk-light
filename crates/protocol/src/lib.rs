@@ -273,8 +273,17 @@ mod tests {
             Ok(audio_udp::Packet::Register { stream_id: 42 })
         ));
 
-        audio_udp::encode_audio(42, 7, 1234, 48_000, 1, "pcm_s16le", &[1, 2, 3, 4], &mut packet)
-            .unwrap();
+        audio_udp::encode_audio(
+            42,
+            7,
+            1234,
+            48_000,
+            1,
+            "pcm_s16le",
+            &[1, 2, 3, 4],
+            &mut packet,
+        )
+        .unwrap();
         match audio_udp::decode(&packet).unwrap() {
             audio_udp::Packet::Audio {
                 stream_id,
@@ -836,15 +845,6 @@ pub enum Message {
         source: AudioSource,
         payload: String,
     },
-    AudioFrame {
-        client_id: String,
-        source: AudioSource,
-        seq: u64,
-        sample_rate: u32,
-        channels: u16,
-        format: String,
-        bytes: Vec<u8>,
-    },
     Error {
         detail: String,
     },
@@ -875,7 +875,6 @@ impl Message {
             Self::CommandOutput { .. } => 15,
             Self::FileTransfer { .. } => 16,
             Self::AudioControl { .. } => 17,
-            Self::AudioFrame { .. } => 18,
         }
     }
 
@@ -1029,23 +1028,6 @@ impl Message {
                 writer.u8(source.to_code());
                 writer.string(payload);
             }
-            Self::AudioFrame {
-                client_id,
-                source,
-                seq,
-                sample_rate,
-                channels,
-                format,
-                bytes,
-            } => {
-                writer.string(client_id);
-                writer.u8(source.to_code());
-                writer.u64(*seq);
-                writer.u32(*sample_rate);
-                writer.u16(*channels);
-                writer.string(format);
-                writer.byte_vec(bytes);
-            }
             Self::Error { detail } => writer.string(detail),
             Self::Session { token } => writer.string(token),
         }
@@ -1158,15 +1140,6 @@ impl Message {
                 target_id: reader.string()?,
                 source: AudioSource::from_code(reader.u8()?)?,
                 payload: reader.string()?,
-            },
-            18 => Self::AudioFrame {
-                client_id: reader.string()?,
-                source: AudioSource::from_code(reader.u8()?)?,
-                seq: reader.u64()?,
-                sample_rate: reader.u32()?,
-                channels: reader.u16()?,
-                format: reader.string()?,
-                bytes: reader.byte_vec()?,
             },
             _ => return Err(ProtocolError::InvalidMessageKind(kind)),
         };

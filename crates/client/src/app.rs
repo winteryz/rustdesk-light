@@ -33,6 +33,8 @@ const AUDIO_CAPTURE_FRAME_MS: u32 = 10;
 const AUDIO_CAPTURE_RECV_TIMEOUT_MS: u64 = 20;
 const AUDIO_STREAM_STOP_SETTLE_MS: u64 = 180;
 const AUDIO_STREAM_REPORT_INTERVAL_MS: u64 = 1_000;
+const AUDIO_UDP_REGISTER_INTERVAL_MS: u64 = 250;
+const AUDIO_UDP_RECV_TIMEOUT_MS: u64 = 20;
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env();
@@ -222,10 +224,10 @@ fn client_connection_once(
         generation: std::sync::atomic::AtomicU64::new(0),
     });
     let voice_chat_mic_muted = Arc::new(AtomicBool::new(false));
-    let mut voice_chat_speaker_muted = false;
+    let voice_chat_speaker_muted = Arc::new(AtomicBool::new(false));
     let mut voice_chat_player: Option<crate::live_control::AudioOutputPlayer> = None;
-    let mut voice_chat_admin_generation: Option<u64> = None;
-    let mut voice_chat_last_admin_seq = 0_u64;
+    let mut voice_chat_invite_udp_endpoint: Option<AudioUdpEndpoint> = None;
+    let mut voice_chat_udp_stop: Option<Arc<AtomicBool>> = None;
     loop {
         while let Ok(input) = input_rx.try_recv() {
             match input {
@@ -241,45 +243,34 @@ fn client_connection_once(
                 )?,
                 ClientInput::VoiceChatAccept => {
                     voice_chat_stream.running.store(false, Ordering::Relaxed);
+                    if let Some(stop) = voice_chat_udp_stop.take() {
+                        stop.store(true, Ordering::Relaxed);
+                    }
                     let generation = voice_chat_stream
                         .generation
                         .fetch_add(1, Ordering::Relaxed)
                         .saturating_add(1);
-                    match crate::live_control::AudioOutputPlayer::start() {
-                        Ok(player) => {
-                            voice_chat_player = Some(player);
-                            voice_chat_stream.running.store(true, Ordering::Relaxed);
+                    let endpoint = match voice_chat_invite_udp_endpoint.clone() {
+                        Some(endpoint) => endpoint,
+                        None => {
+                            voice_chat_stream.running.store(false, Ordering::Relaxed);
+                            let error = "voice chat udp transport unavailable".to_string();
                             let _ = queue_message(
                                 &out_tx,
                                 &session_token,
                                 Message::CommandAck {
                                     client_id: identity.id.clone(),
                                     command: CommandKind::VoiceChat,
-                                    accepted: true,
-                                    detail: format!(
-                                        "voice_chat_accepted\nmessage=accepted\ngeneration={generation}"
-                                    ),
+                                    accepted: false,
+                                    detail: format!("voice_chat_error\nmessage={error}"),
                                 },
                             );
-                            event_sink.send(ClientEvent::VoiceChatConnected);
-                            let worker_tx = out_tx.clone();
-                            let worker_realtime_tx = out_tx.clone();
-                            let worker_token = session_token.clone();
-                            let stream_state = voice_chat_stream.clone();
-                            let mic_muted = voice_chat_mic_muted.clone();
-                            let client_id = identity.id.clone();
-                            thread::spawn(move || {
-                                voice_chat_capture_loop(
-                                    client_id,
-                                    worker_realtime_tx,
-                                    worker_tx,
-                                    worker_token,
-                                    stream_state,
-                                    generation,
-                                    mic_muted,
-                                );
-                            });
+                            event_sink.send(ClientEvent::VoiceChatFailed { message: error });
+                            continue;
                         }
+                    };
+                    let player = match crate::live_control::AudioOutputPlayer::start() {
+                        Ok(player) => player,
                         Err(error) => {
                             voice_chat_stream.running.store(false, Ordering::Relaxed);
                             let _ = queue_message(
@@ -293,15 +284,124 @@ fn client_connection_once(
                                 },
                             );
                             event_sink.send(ClientEvent::VoiceChatFailed { message: error });
+                            continue;
                         }
+                    };
+                    let udp_sender = match AudioUdpSender::connect(endpoint.clone()) {
+                        Ok(sender) => sender,
+                        Err(error) => {
+                            voice_chat_stream.running.store(false, Ordering::Relaxed);
+                            let _ = queue_message(
+                                &out_tx,
+                                &session_token,
+                                Message::CommandAck {
+                                    client_id: identity.id.clone(),
+                                    command: CommandKind::VoiceChat,
+                                    accepted: false,
+                                    detail: format!("voice_chat_error\nmessage={error}"),
+                                },
+                            );
+                            event_sink.send(ClientEvent::VoiceChatFailed { message: error });
+                            continue;
+                        }
+                    };
+                    let receive_stream_id = new_audio_udp_stream_id(generation);
+                    let socket = match UdpSocket::bind("0.0.0.0:0") {
+                        Ok(socket) => socket,
+                        Err(error) => {
+                            voice_chat_stream.running.store(false, Ordering::Relaxed);
+                            let message = format!("bind udp failed: {error}");
+                            let _ = queue_message(
+                                &out_tx,
+                                &session_token,
+                                Message::CommandAck {
+                                    client_id: identity.id.clone(),
+                                    command: CommandKind::VoiceChat,
+                                    accepted: false,
+                                    detail: format!("voice_chat_error\nmessage={message}"),
+                                },
+                            );
+                            event_sink.send(ClientEvent::VoiceChatFailed { message });
+                            continue;
+                        }
+                    };
+                    if let Err(error) = socket
+                        .set_read_timeout(Some(Duration::from_millis(AUDIO_UDP_RECV_TIMEOUT_MS)))
+                    {
+                        voice_chat_stream.running.store(false, Ordering::Relaxed);
+                        let message = format!("udp timeout setup failed: {error}");
+                        let _ = queue_message(
+                            &out_tx,
+                            &session_token,
+                            Message::CommandAck {
+                                client_id: identity.id.clone(),
+                                command: CommandKind::VoiceChat,
+                                accepted: false,
+                                detail: format!("voice_chat_error\nmessage={message}"),
+                            },
+                        );
+                        event_sink.send(ClientEvent::VoiceChatFailed { message });
+                        continue;
                     }
+                    let udp_stop = Arc::new(AtomicBool::new(false));
+                    let sink = player.sink();
+                    let speaker_muted = voice_chat_speaker_muted.clone();
+                    let worker_stop = udp_stop.clone();
+                    let worker_event_sink = event_sink.clone();
+                    let worker_server_addr = endpoint.addr();
+                    thread::spawn(move || {
+                        audio_udp_receive_loop(
+                            socket,
+                            worker_server_addr,
+                            receive_stream_id,
+                            worker_stop,
+                            sink,
+                            speaker_muted,
+                            worker_event_sink,
+                        );
+                    });
+                    voice_chat_player = Some(player);
+                    voice_chat_udp_stop = Some(udp_stop);
+                    voice_chat_stream.running.store(true, Ordering::Relaxed);
+                    let _ = queue_message(
+                        &out_tx,
+                        &session_token,
+                        Message::CommandAck {
+                            client_id: identity.id.clone(),
+                            command: CommandKind::VoiceChat,
+                            accepted: true,
+                            detail: format!(
+                                "voice_chat_accepted\nmessage=accepted\ngeneration={generation}\ntransport=udp\nudp_host={}\nudp_port={}\nudp_stream={receive_stream_id}",
+                                endpoint.host, endpoint.port
+                            ),
+                        },
+                    );
+                    event_sink.send(ClientEvent::VoiceChatConnected);
+                    let worker_tx = out_tx.clone();
+                    let worker_token = session_token.clone();
+                    let stream_state = voice_chat_stream.clone();
+                    let mic_muted = voice_chat_mic_muted.clone();
+                    let client_id = identity.id.clone();
+                    thread::spawn(move || {
+                        voice_chat_capture_loop(
+                            client_id,
+                            udp_sender,
+                            worker_tx,
+                            worker_token,
+                            stream_state,
+                            generation,
+                            mic_muted,
+                        );
+                    });
                 }
                 ClientInput::VoiceChatDecline => {
                     voice_chat_stream.running.store(false, Ordering::Relaxed);
                     voice_chat_stream.generation.fetch_add(1, Ordering::Relaxed);
-                    voice_chat_player = None;
-                    voice_chat_admin_generation = None;
-                    voice_chat_last_admin_seq = 0;
+                    if let Some(stop) = voice_chat_udp_stop.take() {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                    let _ = voice_chat_player.take();
+                    voice_chat_invite_udp_endpoint = None;
                     let _ = queue_message(
                         &out_tx,
                         &session_token,
@@ -319,9 +419,11 @@ fn client_connection_once(
                 ClientInput::VoiceChatEnd => {
                     voice_chat_stream.running.store(false, Ordering::Relaxed);
                     voice_chat_stream.generation.fetch_add(1, Ordering::Relaxed);
-                    voice_chat_player = None;
-                    voice_chat_admin_generation = None;
-                    voice_chat_last_admin_seq = 0;
+                    if let Some(stop) = voice_chat_udp_stop.take() {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                    let _ = voice_chat_player.take();
+                    voice_chat_invite_udp_endpoint = None;
                     let _ = queue_message(
                         &out_tx,
                         &session_token,
@@ -340,7 +442,7 @@ fn client_connection_once(
                     voice_chat_mic_muted.store(muted, Ordering::Relaxed);
                 }
                 ClientInput::VoiceChatSpeakerMuted { muted } => {
-                    voice_chat_speaker_muted = muted;
+                    voice_chat_speaker_muted.store(muted, Ordering::Relaxed);
                 }
             }
         }
@@ -379,8 +481,22 @@ fn client_connection_once(
                     });
                 }
                 if command == CommandKind::VoiceChat {
-                    voice_chat_admin_generation = payload_generation(&payload);
-                    voice_chat_last_admin_seq = 0;
+                    voice_chat_stream.running.store(false, Ordering::Relaxed);
+                    voice_chat_stream.generation.fetch_add(1, Ordering::Relaxed);
+                    if let Some(stop) = voice_chat_udp_stop.take() {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                    let _ = voice_chat_player.take();
+                    voice_chat_invite_udp_endpoint = match AudioUdpEndpoint::from_payload(&payload)
+                    {
+                        Ok(endpoint) => endpoint,
+                        Err(error) => {
+                            event_sink.send(ClientEvent::Log(format!(
+                                "voice chat udp invite ignored: {error}"
+                            )));
+                            None
+                        }
+                    };
                     if gui_mode {
                         event_sink.send(ClientEvent::VoiceChatInvite);
                     } else {
@@ -678,14 +794,12 @@ fn client_connection_once(
                         thread::sleep(Duration::from_millis(AUDIO_STREAM_STOP_SETTLE_MS));
                         audio_stream.running.store(true, Ordering::Relaxed);
                         let worker_tx = out_tx.clone();
-                        let worker_realtime_tx = out_tx.clone();
                         let worker_token = session_token.clone();
                         let stream_state = audio_stream.clone();
                         thread::spawn(move || {
                             audio_stream_loop(
                                 target_id,
                                 payload,
-                                worker_realtime_tx,
                                 worker_tx,
                                 worker_token,
                                 stream_state,
@@ -727,9 +841,11 @@ fn client_connection_once(
                     Some("stop") | Some("end") => {
                         voice_chat_stream.running.store(false, Ordering::Relaxed);
                         voice_chat_stream.generation.fetch_add(1, Ordering::Relaxed);
-                        voice_chat_player = None;
-                        voice_chat_admin_generation = None;
-                        voice_chat_last_admin_seq = 0;
+                        if let Some(stop) = voice_chat_udp_stop.take() {
+                            stop.store(true, Ordering::Relaxed);
+                        }
+                        let _ = voice_chat_player.take();
+                        voice_chat_invite_udp_endpoint = None;
                         let _ = queue_message(
                             &out_tx,
                             &session_token,
@@ -747,42 +863,19 @@ fn client_connection_once(
                     _ => {}
                 },
             },
-            Message::AudioFrame {
-                source,
-                seq,
-                sample_rate,
-                channels,
-                format,
-                bytes,
-                ..
-            } => {
-                if source == AudioSource::VoiceChat && !voice_chat_speaker_muted {
-                    if let Some(generation) = voice_chat_admin_generation {
-                        if sequence_generation(seq) != generation {
-                            continue;
-                        }
-                    }
-                    if seq <= voice_chat_last_admin_seq {
-                        continue;
-                    }
-                    voice_chat_last_admin_seq = seq;
-                    if let Some(player) = &voice_chat_player {
-                        if let Err(error) =
-                            player.push_frame(sample_rate, channels, &format, &bytes)
-                        {
-                            event_sink.send(ClientEvent::Log(format!(
-                                "voice chat playback failed: {error}"
-                            )));
-                        }
-                    }
-                }
-            }
             Message::Ping => queue_message(&out_tx, &session_token, Message::Pong)?,
             other => {
                 event_sink.send(ClientEvent::Log(format!("server: {other:?}")));
             }
         }
     }
+
+    audio_stream.running.store(false, Ordering::Relaxed);
+    voice_chat_stream.running.store(false, Ordering::Relaxed);
+    if let Some(stop) = voice_chat_udp_stop.take() {
+        stop.store(true, Ordering::Relaxed);
+    }
+    let _ = voice_chat_player.take();
 
     Ok(())
 }
@@ -1253,29 +1346,31 @@ struct AudioUdpSender {
     packet: Vec<u8>,
 }
 
+#[derive(Clone)]
+struct AudioUdpEndpoint {
+    host: String,
+    port: u16,
+    stream_id: u64,
+}
+
 impl AudioUdpSender {
     fn from_payload(payload: &str) -> Result<Option<Self>, String> {
-        if video_control_value(payload, "transport").as_deref() != Some("udp") {
-            return Ok(None);
-        }
-        let host = video_control_value(payload, "udp_host")
-            .ok_or_else(|| "missing audio udp host".to_string())?;
-        let port = video_control_value(payload, "udp_port")
-            .and_then(|value| value.parse::<u16>().ok())
-            .ok_or_else(|| "missing audio udp port".to_string())?;
-        let stream_id = video_control_value(payload, "udp_stream")
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| "missing audio udp stream".to_string())?;
+        AudioUdpEndpoint::from_payload(payload)
+            .map(|endpoint| endpoint.map(Self::connect))
+            .and_then(|sender| sender.transpose())
+    }
+
+    fn connect(endpoint: AudioUdpEndpoint) -> Result<Self, String> {
         let socket =
             UdpSocket::bind("0.0.0.0:0").map_err(|error| format!("bind udp failed: {error}"))?;
         socket
-            .connect(format!("{host}:{port}"))
+            .connect(endpoint.addr())
             .map_err(|error| format!("connect udp relay failed: {error}"))?;
-        Ok(Some(Self {
+        Ok(Self {
             socket,
-            stream_id,
+            stream_id: endpoint.stream_id,
             packet: Vec::with_capacity(audio_udp::MAX_PACKET_BYTES),
-        }))
+        })
     }
 
     fn send_frame(
@@ -1296,6 +1391,111 @@ impl AudioUdpSender {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         self.socket.send(&self.packet).map(|_| ())
     }
+}
+
+impl AudioUdpEndpoint {
+    fn from_payload(payload: &str) -> Result<Option<Self>, String> {
+        if video_control_value(payload, "transport").as_deref() != Some("udp") {
+            return Ok(None);
+        }
+        let host = video_control_value(payload, "udp_host")
+            .ok_or_else(|| "missing audio udp host".to_string())?;
+        let port = video_control_value(payload, "udp_port")
+            .and_then(|value| value.parse::<u16>().ok())
+            .ok_or_else(|| "missing audio udp port".to_string())?;
+        let stream_id = video_control_value(payload, "udp_stream")
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| "missing audio udp stream".to_string())?;
+        Ok(Some(Self {
+            host,
+            port,
+            stream_id,
+        }))
+    }
+
+    fn addr(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+fn new_audio_udp_stream_id(tag: u64) -> u64 {
+    ((now_epoch_ms() as u64).saturating_mul(1024))
+        .saturating_add(tag)
+        .max(1)
+}
+
+fn audio_udp_receive_loop(
+    socket: UdpSocket,
+    server_addr: String,
+    stream_id: u64,
+    stop: Arc<AtomicBool>,
+    sink: crate::live_control::AudioOutputSink,
+    speaker_muted: Arc<AtomicBool>,
+    event_sink: ClientEventSink,
+) {
+    let mut register_packet = Vec::new();
+    let mut unregister_packet = Vec::new();
+    audio_udp::encode_register(stream_id, &mut register_packet);
+    audio_udp::encode_unregister(stream_id, &mut unregister_packet);
+    let mut last_register = Instant::now() - Duration::from_millis(AUDIO_UDP_REGISTER_INTERVAL_MS);
+    let mut buf = [0_u8; audio_udp::MAX_PACKET_BYTES];
+    let mut last_seq = 0_u64;
+
+    while !stop.load(Ordering::Relaxed) {
+        if last_register.elapsed() >= Duration::from_millis(AUDIO_UDP_REGISTER_INTERVAL_MS) {
+            if let Err(error) = socket.send_to(&register_packet, &server_addr) {
+                event_sink.send(ClientEvent::Log(format!(
+                    "voice udp register failed: {error}"
+                )));
+                break;
+            }
+            last_register = Instant::now();
+        }
+
+        match socket.recv_from(&mut buf) {
+            Ok((len, _)) => match audio_udp::decode(&buf[..len]) {
+                Ok(audio_udp::Packet::Audio {
+                    stream_id: packet_stream_id,
+                    seq,
+                    sample_rate,
+                    channels,
+                    format,
+                    bytes,
+                    ..
+                }) if packet_stream_id == stream_id => {
+                    if seq <= last_seq {
+                        continue;
+                    }
+                    last_seq = seq;
+                    if speaker_muted.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    if let Err(error) = sink.push_frame(sample_rate, channels, format, bytes) {
+                        event_sink.send(ClientEvent::Log(format!(
+                            "voice udp playback failed: {error}"
+                        )));
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    event_sink.send(ClientEvent::Log(format!(
+                        "voice udp packet ignored: {error}"
+                    )));
+                }
+            },
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::TimedOut => {}
+            Err(error) => {
+                event_sink.send(ClientEvent::Log(format!(
+                    "voice udp receive failed: {error}"
+                )));
+                break;
+            }
+        }
+    }
+
+    let _ = socket.send_to(&unregister_packet, server_addr);
 }
 
 fn client_writer_loop(
@@ -1584,12 +1784,43 @@ fn video_stream_loop(
 fn audio_stream_loop(
     client_id: String,
     start_payload: String,
-    realtime_tx: SyncSender<ClientOutbound>,
     out_tx: SyncSender<ClientOutbound>,
     session_token: String,
     stream_state: Arc<DesktopStreamState>,
     generation: u64,
 ) {
+    let mut udp_sender = match AudioUdpSender::from_payload(&start_payload) {
+        Ok(Some(sender)) => sender,
+        Ok(None) => {
+            stream_state.running.store(false, Ordering::Relaxed);
+            let _ = queue_message(
+                &out_tx,
+                &session_token,
+                Message::CommandAck {
+                    client_id,
+                    command: CommandKind::AudioListen,
+                    accepted: false,
+                    detail: "audio_listen_error\nmessage=udp transport required".to_string(),
+                },
+            );
+            return;
+        }
+        Err(error) => {
+            stream_state.running.store(false, Ordering::Relaxed);
+            let _ = queue_message(
+                &out_tx,
+                &session_token,
+                Message::CommandAck {
+                    client_id,
+                    command: CommandKind::AudioListen,
+                    accepted: false,
+                    detail: format!("audio_listen_error\nmessage={error}"),
+                },
+            );
+            return;
+        }
+    };
+
     if let Err(error) = crate::live_control::confirm_audio_listen() {
         stream_state.running.store(false, Ordering::Relaxed);
         let _ = queue_message(
@@ -1626,14 +1857,6 @@ fn audio_stream_loop(
             return;
         }
     };
-    let mut udp_sender = match AudioUdpSender::from_payload(&start_payload) {
-        Ok(sender) => sender,
-        Err(error) => {
-            eprintln!("audio udp setup failed, falling back to tcp: {error}");
-            None
-        }
-    };
-    let mut transport = if udp_sender.is_some() { "udp" } else { "tcp" };
     let _ = queue_message(
         &out_tx,
         &session_token,
@@ -1642,7 +1865,7 @@ fn audio_stream_loop(
             command: CommandKind::AudioListen,
             accepted: true,
             detail: format!(
-                "audio_listen_started\nsample_rate={}\nchannels={}\nformat={}\ngeneration={generation}\ntransport={transport}",
+                "audio_listen_started\nsample_rate={}\nchannels={}\nformat={}\ngeneration={generation}\ntransport=udp",
                 input_stream.sample_rate, input_stream.channels, input_stream.format
             ),
         },
@@ -1652,7 +1875,6 @@ fn audio_stream_loop(
     let mut packetizer = AudioFramePacketizer::default();
     let mut sent_packets = 0_u64;
     let mut sent_bytes = 0_u64;
-    let mut queue_drops = 0_u64;
     let mut last_report = Instant::now();
     while stream_state.running.load(Ordering::Relaxed)
         && stream_state.generation.load(Ordering::Relaxed) == generation
@@ -1680,46 +1902,24 @@ fn audio_stream_loop(
         };
         for frame in packetizer.push(frame) {
             let frame_bytes = frame.bytes.len() as u64;
-            let mut sent = false;
-            if let Some(sender) = udp_sender.as_mut() {
-                match sender.send_frame(seq, &frame) {
-                    Ok(()) => {
-                        sent = true;
-                        sent_packets = sent_packets.saturating_add(1);
-                        sent_bytes = sent_bytes.saturating_add(frame_bytes);
-                    }
-                    Err(error) => {
-                        eprintln!("audio udp send failed, falling back to tcp: {error}");
-                        udp_sender = None;
-                        transport = "tcp";
-                    }
+            match udp_sender.send_frame(seq, &frame) {
+                Ok(()) => {
+                    sent_packets = sent_packets.saturating_add(1);
+                    sent_bytes = sent_bytes.saturating_add(frame_bytes);
                 }
-            }
-            if !sent {
-                match try_queue_realtime_message_observed(
-                    &realtime_tx,
-                    &session_token,
-                    Message::AudioFrame {
-                        client_id: client_id.clone(),
-                        source: AudioSource::AudioListen,
-                        seq,
-                        sample_rate: frame.sample_rate,
-                        channels: frame.channels,
-                        format: frame.format,
-                        bytes: frame.bytes,
-                    },
-                ) {
-                    Ok(true) => {
-                        sent_packets = sent_packets.saturating_add(1);
-                        sent_bytes = sent_bytes.saturating_add(frame_bytes);
-                    }
-                    Ok(false) => {
-                        queue_drops = queue_drops.saturating_add(1);
-                    }
-                    Err(_) => {
-                        stream_state.running.store(false, Ordering::Relaxed);
-                        break;
-                    }
+                Err(error) => {
+                    let _ = queue_message(
+                        &out_tx,
+                        &session_token,
+                        Message::CommandAck {
+                            client_id: client_id.clone(),
+                            command: CommandKind::AudioListen,
+                            accepted: false,
+                            detail: format!("audio_listen_error\nmessage=udp send failed: {error}"),
+                        },
+                    );
+                    stream_state.running.store(false, Ordering::Relaxed);
+                    break;
                 }
             }
             seq = seq.saturating_add(1);
@@ -1728,10 +1928,10 @@ fn audio_stream_loop(
             eprintln!(
                 "debug event=audio_listen_tx client={} transport={} packets={} bytes={} queue_drops={} capture_drops={} pending_bytes={}",
                 client_id,
-                transport,
+                "udp",
                 sent_packets,
                 sent_bytes,
-                queue_drops,
+                0,
                 input_stream.dropped_callbacks.load(Ordering::Relaxed),
                 packetizer.pending.len()
             );
@@ -1743,7 +1943,7 @@ fn audio_stream_loop(
 
 fn voice_chat_capture_loop(
     client_id: String,
-    realtime_tx: SyncSender<ClientOutbound>,
+    mut udp_sender: AudioUdpSender,
     out_tx: SyncSender<ClientOutbound>,
     session_token: String,
     stream_state: Arc<DesktopStreamState>,
@@ -1771,6 +1971,9 @@ fn voice_chat_capture_loop(
 
     let mut seq = stream_sequence_base(generation);
     let mut packetizer = AudioFramePacketizer::default();
+    let mut sent_packets = 0_u64;
+    let mut sent_bytes = 0_u64;
+    let mut last_report = Instant::now();
     while stream_state.running.load(Ordering::Relaxed)
         && stream_state.generation.load(Ordering::Relaxed) == generation
     {
@@ -1799,25 +2002,39 @@ fn voice_chat_capture_loop(
             continue;
         }
         for frame in packetizer.push(frame) {
-            if try_queue_realtime_message(
-                &realtime_tx,
-                &session_token,
-                Message::AudioFrame {
-                    client_id: client_id.clone(),
-                    source: AudioSource::VoiceChat,
-                    seq,
-                    sample_rate: frame.sample_rate,
-                    channels: frame.channels,
-                    format: frame.format,
-                    bytes: frame.bytes,
-                },
-            )
-            .is_err()
-            {
-                stream_state.running.store(false, Ordering::Relaxed);
-                break;
+            let frame_bytes = frame.bytes.len() as u64;
+            match udp_sender.send_frame(seq, &frame) {
+                Ok(()) => {
+                    sent_packets = sent_packets.saturating_add(1);
+                    sent_bytes = sent_bytes.saturating_add(frame_bytes);
+                }
+                Err(error) => {
+                    let _ = queue_message(
+                        &out_tx,
+                        &session_token,
+                        Message::CommandAck {
+                            client_id: client_id.clone(),
+                            command: CommandKind::VoiceChat,
+                            accepted: false,
+                            detail: format!("voice_chat_error\nmessage=udp send failed: {error}"),
+                        },
+                    );
+                    stream_state.running.store(false, Ordering::Relaxed);
+                    break;
+                }
             }
             seq = seq.saturating_add(1);
+        }
+        if last_report.elapsed() >= Duration::from_millis(AUDIO_STREAM_REPORT_INTERVAL_MS) {
+            eprintln!(
+                "debug event=voice_chat_tx client={} transport=udp packets={} bytes={} capture_drops={} pending_bytes={}",
+                client_id,
+                sent_packets,
+                sent_bytes,
+                input_stream.dropped_callbacks.load(Ordering::Relaxed),
+                packetizer.pending.len()
+            );
+            last_report = Instant::now();
         }
     }
     drop(input_stream);
@@ -1842,18 +2059,6 @@ fn video_control_value(payload: &str, key: &str) -> Option<String> {
     remote_desktop_value(payload, key)
 }
 
-fn payload_value(payload: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}=");
-    payload
-        .lines()
-        .find_map(|line| line.strip_prefix(&prefix))
-        .map(|value| value.trim().to_string())
-}
-
-fn payload_generation(payload: &str) -> Option<u64> {
-    payload_value(payload, "generation").and_then(|value| value.parse::<u64>().ok())
-}
-
 fn video_source_command(source: &VideoSource) -> CommandKind {
     match source {
         VideoSource::RemoteDesktop => CommandKind::RemoteDesktop,
@@ -1863,10 +2068,6 @@ fn video_source_command(source: &VideoSource) -> CommandKind {
 
 fn stream_sequence_base(generation: u64) -> u64 {
     generation.saturating_mul(1_u64 << 32).max(1)
-}
-
-fn sequence_generation(seq: u64) -> u64 {
-    seq >> 32
 }
 
 fn queue_message(
@@ -1887,20 +2088,11 @@ fn try_queue_realtime_message(
     session_token: &str,
     message: Message,
 ) -> io::Result<()> {
-    try_queue_realtime_message_observed(out_tx, session_token, message).map(|_| ())
-}
-
-fn try_queue_realtime_message_observed(
-    out_tx: &SyncSender<ClientOutbound>,
-    session_token: &str,
-    message: Message,
-) -> io::Result<bool> {
     match out_tx.try_send(ClientOutbound {
         session_token: session_token.to_string(),
         message,
     }) {
-        Ok(()) => Ok(true),
-        Err(mpsc::TrySendError::Full(_)) => Ok(false),
+        Ok(()) | Err(mpsc::TrySendError::Full(_)) => Ok(()),
         Err(mpsc::TrySendError::Disconnected(_)) => Err(io::Error::new(
             io::ErrorKind::BrokenPipe,
             "outbound queue disconnected",

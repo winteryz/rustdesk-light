@@ -40,6 +40,13 @@ pub(crate) struct AudioOutputPlayer {
     _stream: cpal::Stream,
 }
 
+#[derive(Clone)]
+pub(crate) struct AudioOutputSink {
+    buffer: Arc<Mutex<AudioPlaybackState>>,
+    output_sample_rate: u32,
+    output_channels: u16,
+}
+
 struct AudioPlaybackState {
     samples: VecDeque<f32>,
     started: bool,
@@ -189,6 +196,16 @@ impl AudioOutputPlayer {
         })
     }
 
+    pub(crate) fn sink(&self) -> AudioOutputSink {
+        AudioOutputSink {
+            buffer: self.buffer.clone(),
+            output_sample_rate: self.output_sample_rate,
+            output_channels: self.output_channels,
+        }
+    }
+}
+
+impl AudioOutputSink {
     pub(crate) fn push_frame(
         &self,
         sample_rate: u32,
