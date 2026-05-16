@@ -1,6 +1,7 @@
 use crate::windowing;
 use base64::Engine;
 use eframe::egui;
+use rfd::FileDialog;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -291,7 +292,6 @@ pub(crate) fn render_windows(
         let selected_device = window.selected_device.clone();
         let quality = window.quality.clone();
         let running = window.running.clone();
-        let save_path = window.save_path.clone();
         let save_requested = window.save_requested.clone();
         let has_frame = window.frame.is_some();
         let status = window.status;
@@ -319,7 +319,6 @@ pub(crate) fn render_windows(
                         &selected_device,
                         &quality,
                         &running,
-                        &save_path,
                         &save_requested,
                         has_frame,
                         &queued_for_ui,
@@ -395,7 +394,6 @@ fn render_toolbar(
     selected_device: &Arc<Mutex<usize>>,
     quality: &Arc<Mutex<String>>,
     running: &Arc<AtomicBool>,
-    save_path: &Arc<Mutex<String>>,
     save_requested: &Arc<AtomicBool>,
     has_frame: bool,
     queued: &Arc<Mutex<Vec<String>>>,
@@ -500,23 +498,9 @@ fn render_toolbar(
                     );
                 }
             }
-        });
-        toolbar_row(ui, |ui| {
-            let mut path = save_path
-                .lock()
-                .map(|value| value.clone())
-                .unwrap_or_default();
-            ui.add_sized(
-                [260.0, TOOLBAR_CONTROL_HEIGHT],
-                egui::TextEdit::singleline(&mut path)
-                    .hint_text("Save path")
-                    .vertical_align(egui::Align::Center),
-            );
-            if let Ok(mut value) = save_path.lock() {
-                *value = path;
-            }
+            ui.separator();
             if ui
-                .add_enabled(has_frame, egui::Button::new("Save Frame"))
+                .add_enabled(has_frame, egui::Button::new("Save Frame..."))
                 .clicked()
             {
                 save_requested.store(true, Ordering::Relaxed);
@@ -706,17 +690,21 @@ fn save_current_frame(window: &mut CameraWindow) {
         window.status = CameraStatus::Failed;
         return;
     };
-    let path = window
+    let default_path = window
         .save_path
         .lock()
         .map(|value| value.trim().to_string())
         .unwrap_or_default();
-    let path = if path.is_empty() {
+    let default_path = if default_path.is_empty() {
         default_save_path(&window.client_id)
     } else {
-        path
+        default_path
     };
-    let path_buf = PathBuf::from(&path);
+    let Some(path_buf) = pick_frame_save_path(&default_path, &frame.format) else {
+        window.notice = "Save frame cancelled".to_string();
+        return;
+    };
+    let path_buf = ensure_frame_extension(path_buf, &frame.format);
     if let Some(parent) = path_buf.parent() {
         if !parent.as_os_str().is_empty() {
             if let Err(error) = std::fs::create_dir_all(parent) {
@@ -731,13 +719,48 @@ fn save_current_frame(window: &mut CameraWindow) {
             window.notice = format!("Saved frame to {}", path_buf.display());
             window.status = CameraStatus::Live;
             if let Ok(mut value) = window.save_path.lock() {
-                *value = path;
+                *value = path_buf.to_string_lossy().to_string();
             }
         }
         Err(error) => {
             window.notice = format!("Save frame failed: {error}");
             window.status = CameraStatus::Failed;
         }
+    }
+}
+
+fn pick_frame_save_path(default_path: &str, format: &str) -> Option<PathBuf> {
+    let default_path = PathBuf::from(default_path);
+    let mut dialog = FileDialog::new().set_title("Save camera frame");
+    if let Some(parent) = default_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        dialog = dialog.set_directory(parent);
+    }
+    if let Some(file_name) = default_path.file_name().and_then(|value| value.to_str()) {
+        dialog = dialog.set_file_name(file_name);
+    }
+    match normalized_image_extension(format).as_str() {
+        "png" => dialog.add_filter("PNG image", &["png"]).save_file(),
+        _ => dialog
+            .add_filter("JPEG image", &["jpg", "jpeg"])
+            .save_file(),
+    }
+}
+
+fn ensure_frame_extension(mut path: PathBuf, format: &str) -> PathBuf {
+    if path.extension().is_none() {
+        path.set_extension(normalized_image_extension(format));
+    }
+    path
+}
+
+fn normalized_image_extension(format: &str) -> String {
+    if format.eq_ignore_ascii_case("png") {
+        "png".to_string()
+    } else {
+        "jpg".to_string()
     }
 }
 

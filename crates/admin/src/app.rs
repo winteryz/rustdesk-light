@@ -62,7 +62,7 @@ const AUDIO_UDP_RECV_TIMEOUT_MS: u64 = 20;
 const AUDIO_STREAM_REPORT_INTERVAL_MS: u64 = 1_000;
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::from_env();
+    let config = Config::from_env()?;
     if terminal_mode() {
         run_terminal(config)?;
     } else {
@@ -1315,6 +1315,8 @@ impl AdminApp {
             hostname,
             username,
             command,
+            &self.config.ip,
+            self.config.port,
         );
     }
 

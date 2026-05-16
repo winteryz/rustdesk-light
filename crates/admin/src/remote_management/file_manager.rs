@@ -3,6 +3,7 @@ use chrono::{Local, TimeZone};
 use eframe::egui;
 use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 use rdl_protocol::{FileTransferAction, FileTransferDirection, Message};
+use rfd::FileDialog;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -327,7 +328,7 @@ pub(crate) fn handle_transfer(
                 status_message,
             );
             if completed {
-                refresh_local_entries(window);
+                refresh_local_entries_if_download_target_visible(window, transfer_id);
                 if window.open {
                     set_status(window, FileStatus::Done, "Download complete");
                 }
@@ -372,7 +373,7 @@ pub(crate) fn handle_transfer(
                         set_status(window, FileStatus::Done, "Transfer cancelled");
                     }
                 } else {
-                    refresh_local_entries(window);
+                    refresh_local_entries_if_download_target_visible(window, transfer_id);
                     if window.open {
                         set_status(window, FileStatus::Done, "Download complete");
                     }
@@ -624,7 +625,7 @@ fn render_remote_panel(
     outbound: &Arc<Mutex<Vec<String>>>,
     status: &Arc<Mutex<FileStatus>>,
     local_path: &Arc<Mutex<String>>,
-    _notice: &Arc<Mutex<String>>,
+    notice: &Arc<Mutex<String>>,
     transfers: &Arc<Mutex<Vec<FileTransferRow>>>,
 ) {
     egui::Frame::default()
@@ -656,7 +657,7 @@ fn render_remote_panel(
                     outbound,
                     status,
                     local_path,
-                    _notice,
+                    notice,
                     transfers,
                 );
             });
@@ -861,6 +862,20 @@ fn render_local_toolbar(
         if ui.button("Refresh").clicked() {
             refresh_local_entries_arc(local_path, local_entries, selected_local_name);
         }
+        if ui.button("Choose...").clicked() {
+            let current = local_path
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            if let Some(path) = pick_local_folder(&current, "Choose local folder") {
+                set_local_dir(
+                    local_path,
+                    local_entries,
+                    selected_local_name,
+                    &path.to_string_lossy(),
+                );
+            }
+        }
         let mut path = local_path
             .lock()
             .map(|value| value.clone())
@@ -901,7 +916,7 @@ fn render_entries_table(
     outbound: &Arc<Mutex<Vec<String>>>,
     status: &Arc<Mutex<FileStatus>>,
     local_path: &Arc<Mutex<String>>,
-    _notice: &Arc<Mutex<String>>,
+    notice: &Arc<Mutex<String>>,
     transfers: &Arc<Mutex<Vec<FileTransferRow>>>,
 ) {
     let entries = entries
@@ -933,8 +948,42 @@ fn render_entries_table(
                     queue_payload(outbound, &request("list", &path, ""));
                     ui.close();
                 }
-                if ui.button("Download").clicked() {
-                    queue_download_remote(current_path, local_path, outbound, transfers, entry);
+                if ui.button("Download...").clicked() {
+                    choose_download_remote(
+                        current_path,
+                        local_path,
+                        outbound,
+                        status,
+                        notice,
+                        transfers,
+                        entry,
+                    );
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    ui.close();
+                }
+                if ui.button("Upload File...").clicked() {
+                    choose_upload_local(
+                        LocalPickMode::File,
+                        current_path,
+                        local_path,
+                        outbound,
+                        status,
+                        notice,
+                        transfers,
+                    );
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    ui.close();
+                }
+                if ui.button("Upload Folder...").clicked() {
+                    choose_upload_local(
+                        LocalPickMode::Folder,
+                        current_path,
+                        local_path,
+                        outbound,
+                        status,
+                        notice,
+                        transfers,
+                    );
                     ctx.request_repaint_of(egui::ViewportId::ROOT);
                     ui.close();
                 }
@@ -1767,6 +1816,51 @@ fn queue_payload(outbound: &Arc<Mutex<Vec<String>>>, payload: &str) {
     }
 }
 
+fn pick_local_folder(current_dir: &str, title: &str) -> Option<PathBuf> {
+    local_file_dialog(current_dir, title).pick_folder()
+}
+
+fn pick_local_file(current_dir: &str, title: &str) -> Option<PathBuf> {
+    local_file_dialog(current_dir, title).pick_file()
+}
+
+fn local_file_dialog(current_dir: &str, title: &str) -> FileDialog {
+    let mut dialog = FileDialog::new().set_title(title);
+    let dir = PathBuf::from(current_dir.trim());
+    if dir.is_dir() {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog
+}
+
+#[derive(Clone, Copy)]
+enum LocalPickMode {
+    File,
+    Folder,
+}
+
+fn choose_download_remote(
+    current_path: &Arc<Mutex<String>>,
+    local_path: &Arc<Mutex<String>>,
+    outbound: &Arc<Mutex<Vec<String>>>,
+    status: &Arc<Mutex<FileStatus>>,
+    notice: &Arc<Mutex<String>>,
+    transfers: &Arc<Mutex<Vec<FileTransferRow>>>,
+    entry: &FileEntry,
+) {
+    let current = local_path
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+    let Some(local_dir) = pick_local_folder(&current, "Choose download folder") else {
+        set_status_arc(status, notice, FileStatus::Ready, "Download cancelled");
+        return;
+    };
+    let local_dir = local_dir.to_string_lossy().to_string();
+    queue_download_remote_to_dir(current_path, &local_dir, outbound, transfers, entry);
+    set_status_arc(status, notice, FileStatus::Done, "Download queued");
+}
+
 fn queue_download_remote(
     current_path: &Arc<Mutex<String>>,
     local_path: &Arc<Mutex<String>>,
@@ -1774,12 +1868,22 @@ fn queue_download_remote(
     transfers: &Arc<Mutex<Vec<FileTransferRow>>>,
     entry: &FileEntry,
 ) {
-    let transfer_id = NEXT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed);
-    let remote_path = join_remote(current_path, &entry.name);
     let local_dir = local_path
         .lock()
         .map(|value| value.clone())
         .unwrap_or_default();
+    queue_download_remote_to_dir(current_path, &local_dir, outbound, transfers, entry);
+}
+
+fn queue_download_remote_to_dir(
+    current_path: &Arc<Mutex<String>>,
+    local_dir: &str,
+    outbound: &Arc<Mutex<Vec<String>>>,
+    transfers: &Arc<Mutex<Vec<FileTransferRow>>>,
+    entry: &FileEntry,
+) {
+    let transfer_id = NEXT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed);
+    let remote_path = join_remote(current_path, &entry.name);
     let total_bytes = if entry.kind == "file" {
         entry.size.trim().parse::<u64>().unwrap_or(0)
     } else {
@@ -1798,7 +1902,7 @@ fn queue_download_remote(
             source: remote_path.clone(),
             destination,
             remote_path: remote_path.clone(),
-            local_root: local_dir.clone(),
+            local_root: local_dir.to_string(),
             total_bytes,
             transferred_bytes: 0,
             status: FileTransferStatus::Running,
@@ -1812,7 +1916,7 @@ fn queue_download_remote(
             transfer_id,
             FileTransferDirection::Download,
             &remote_path,
-            Some(("local_dir", &local_dir)),
+            Some(("local_dir", local_dir)),
         ),
     );
 }
@@ -1843,20 +1947,34 @@ fn update_transfer_status(
             status,
             FileTransferStatus::Done | FileTransferStatus::Cancelled
         );
-    if !keep_failed {
+    let keep_terminal = transfer_status_is_terminal(row.status)
+        && matches!(
+            status,
+            FileTransferStatus::Scanning
+                | FileTransferStatus::Running
+                | FileTransferStatus::Cancelling
+        );
+    if !keep_failed && !keep_terminal {
         row.status = status;
     }
     if let Some(total_bytes) = total_bytes {
         if total_bytes > 0 {
-            row.total_bytes = total_bytes;
+            row.total_bytes = row.total_bytes.max(total_bytes);
         }
     }
     if let Some(transferred_bytes) = transferred_bytes {
-        row.transferred_bytes = transferred_bytes;
+        row.transferred_bytes = row.transferred_bytes.max(transferred_bytes);
     }
-    if !message.trim().is_empty() && !keep_failed {
+    if !message.trim().is_empty() && !keep_failed && !keep_terminal {
         row.message = message.to_string();
     }
+}
+
+fn transfer_status_is_terminal(status: FileTransferStatus) -> bool {
+    matches!(
+        status,
+        FileTransferStatus::Done | FileTransferStatus::Failed | FileTransferStatus::Cancelled
+    )
 }
 
 fn transfer_request_payload(
@@ -2111,6 +2229,31 @@ fn rename_local_path(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn choose_upload_local(
+    mode: LocalPickMode,
+    current_path: &Arc<Mutex<String>>,
+    local_path: &Arc<Mutex<String>>,
+    outbound: &Arc<Mutex<Vec<String>>>,
+    status: &Arc<Mutex<FileStatus>>,
+    notice: &Arc<Mutex<String>>,
+    transfers: &Arc<Mutex<Vec<FileTransferRow>>>,
+) {
+    let current = local_path
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+    let path = match mode {
+        LocalPickMode::File => pick_local_file(&current, "Choose file to upload"),
+        LocalPickMode::Folder => pick_local_folder(&current, "Choose folder to upload"),
+    };
+    let Some(path) = path else {
+        set_status_arc(status, notice, FileStatus::Ready, "Upload cancelled");
+        return;
+    };
+    queue_upload_local_path(current_path, &path, outbound, status, notice, transfers);
+}
+
 fn upload_selected_local(
     current_path: &Arc<Mutex<String>>,
     local_path: &Arc<Mutex<String>>,
@@ -2139,7 +2282,7 @@ fn upload_selected_local(
                 .cloned()
         })
         .unwrap_or(None);
-    let Some(entry) = entry else {
+    let Some(_entry) = entry else {
         set_status_arc(
             status,
             notice,
@@ -2149,11 +2292,56 @@ fn upload_selected_local(
         return;
     };
 
-    let transfer_id = NEXT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed);
     let local_file = join_local(local_path, &name);
-    let remote_path = join_remote(current_path, &name);
-    let total_bytes = if entry.kind == "file" {
-        entry.size.trim().parse::<u64>().unwrap_or(0)
+    queue_upload_local_path(
+        current_path,
+        &PathBuf::from(local_file),
+        outbound,
+        status,
+        notice,
+        transfers,
+    );
+}
+
+fn queue_upload_local_path(
+    current_path: &Arc<Mutex<String>>,
+    local_file: &Path,
+    outbound: &Arc<Mutex<Vec<String>>>,
+    status: &Arc<Mutex<FileStatus>>,
+    notice: &Arc<Mutex<String>>,
+    transfers: &Arc<Mutex<Vec<FileTransferRow>>>,
+) {
+    let Some(name) = local_file.file_name().and_then(|value| value.to_str()) else {
+        set_status_arc(status, notice, FileStatus::Failed, "Invalid local path");
+        return;
+    };
+    let metadata = match fs::metadata(local_file) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            set_status_arc(
+                status,
+                notice,
+                FileStatus::Failed,
+                &format!("Read local item failed: {error}"),
+            );
+            return;
+        }
+    };
+    if !metadata.is_file() && !metadata.is_dir() {
+        set_status_arc(
+            status,
+            notice,
+            FileStatus::Failed,
+            "Select a local file or folder",
+        );
+        return;
+    }
+
+    let transfer_id = NEXT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed);
+    let local_file = local_file.to_string_lossy().to_string();
+    let remote_path = join_remote(current_path, name);
+    let total_bytes = if metadata.is_file() {
+        metadata.len()
     } else {
         0
     };
@@ -2162,7 +2350,7 @@ fn upload_selected_local(
         FileTransferRow {
             transfer_id,
             direction: FileTransferDirection::Upload,
-            name: name.clone(),
+            name: name.to_string(),
             source: local_file.clone(),
             destination: remote_path.clone(),
             remote_path: remote_path.clone(),
@@ -2218,6 +2406,24 @@ fn refresh_local_entries(window: &FileManagerWindow) {
         &window.local_entries,
         &window.selected_local_name,
     );
+}
+
+fn refresh_local_entries_if_download_target_visible(window: &FileManagerWindow, transfer_id: u64) {
+    let target = transfer_local_root(window, transfer_id);
+    let current = window
+        .local_path
+        .lock()
+        .map(|value| PathBuf::from(value.trim()))
+        .unwrap_or_else(|_| PathBuf::from("."));
+    if same_local_dir(&target, &current) {
+        refresh_local_entries(window);
+    }
+}
+
+fn same_local_dir(left: &Path, right: &Path) -> bool {
+    let normalized_left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let normalized_right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    normalized_left == normalized_right
 }
 
 fn refresh_local_entries_arc(
@@ -2706,6 +2912,169 @@ mod tests {
         );
 
         fs::remove_dir_all(local_root).unwrap();
+    }
+
+    #[test]
+    fn late_download_progress_does_not_downgrade_done_transfer() {
+        let mut windows = Vec::new();
+        open_window(
+            &mut windows,
+            "client-1",
+            "host".to_string(),
+            "user".to_string(),
+        );
+        {
+            let window = windows.first_mut().expect("window exists");
+            window.outbound.lock().unwrap().clear();
+            add_transfer_row(
+                &window.transfers,
+                FileTransferRow {
+                    transfer_id: 43,
+                    direction: FileTransferDirection::Download,
+                    name: "large.bin".to_string(),
+                    source: "/remote/large.bin".to_string(),
+                    destination: "/local/large.bin".to_string(),
+                    remote_path: "/remote/large.bin".to_string(),
+                    local_root: "/local".to_string(),
+                    total_bytes: 100,
+                    transferred_bytes: 100,
+                    status: FileTransferStatus::Done,
+                    message: "download complete".to_string(),
+                },
+            );
+        }
+
+        handle_transfer(
+            &mut windows,
+            "client-1",
+            "host".to_string(),
+            "user".to_string(),
+            Message::FileTransfer {
+                target_id: "client-1".to_string(),
+                transfer_id: 43,
+                direction: FileTransferDirection::Download,
+                action: FileTransferAction::Progress,
+                path: "/remote/large.bin".to_string(),
+                relative_path: String::new(),
+                total_bytes: 100,
+                transferred_bytes: 80,
+                file_size: 0,
+                offset: 0,
+                bytes: Vec::new(),
+                message: "download started".to_string(),
+            },
+        );
+
+        let row = windows[0].transfers.lock().unwrap()[0].clone();
+        assert!(matches!(row.status, FileTransferStatus::Done));
+        assert_eq!(row.message, "download complete");
+        assert_eq!(row.transferred_bytes, 100);
+    }
+
+    #[test]
+    fn completed_download_refreshes_local_list_only_for_visible_target() {
+        let visible_root = test_dir("rdl-admin-visible-download-target");
+        let hidden_root = test_dir("rdl-admin-hidden-download-target");
+        fs::write(visible_root.join("visible.txt"), b"visible").unwrap();
+        fs::write(hidden_root.join("hidden.txt"), b"hidden").unwrap();
+
+        let mut windows = Vec::new();
+        open_window(
+            &mut windows,
+            "client-1",
+            "host".to_string(),
+            "user".to_string(),
+        );
+        {
+            let window = windows.first_mut().expect("window exists");
+            window.outbound.lock().unwrap().clear();
+            *window.local_path.lock().unwrap() = visible_root.display().to_string();
+            window.local_entries.lock().unwrap().clear();
+            add_transfer_row(
+                &window.transfers,
+                FileTransferRow {
+                    transfer_id: 44,
+                    direction: FileTransferDirection::Download,
+                    name: "visible.txt".to_string(),
+                    source: "/remote/visible.txt".to_string(),
+                    destination: visible_root.join("visible.txt").display().to_string(),
+                    remote_path: "/remote/visible.txt".to_string(),
+                    local_root: visible_root.display().to_string(),
+                    total_bytes: 7,
+                    transferred_bytes: 7,
+                    status: FileTransferStatus::Running,
+                    message: "running".to_string(),
+                },
+            );
+            add_transfer_row(
+                &window.transfers,
+                FileTransferRow {
+                    transfer_id: 45,
+                    direction: FileTransferDirection::Download,
+                    name: "hidden.txt".to_string(),
+                    source: "/remote/hidden.txt".to_string(),
+                    destination: hidden_root.join("hidden.txt").display().to_string(),
+                    remote_path: "/remote/hidden.txt".to_string(),
+                    local_root: hidden_root.display().to_string(),
+                    total_bytes: 6,
+                    transferred_bytes: 6,
+                    status: FileTransferStatus::Running,
+                    message: "running".to_string(),
+                },
+            );
+        }
+
+        handle_transfer(
+            &mut windows,
+            "client-1",
+            "host".to_string(),
+            "user".to_string(),
+            Message::FileTransfer {
+                target_id: "client-1".to_string(),
+                transfer_id: 45,
+                direction: FileTransferDirection::Download,
+                action: FileTransferAction::Complete,
+                path: "/remote/hidden.txt".to_string(),
+                relative_path: String::new(),
+                total_bytes: 6,
+                transferred_bytes: 6,
+                file_size: 0,
+                offset: 0,
+                bytes: Vec::new(),
+                message: "download complete".to_string(),
+            },
+        );
+        assert!(windows[0].local_entries.lock().unwrap().is_empty());
+
+        handle_transfer(
+            &mut windows,
+            "client-1",
+            "host".to_string(),
+            "user".to_string(),
+            Message::FileTransfer {
+                target_id: "client-1".to_string(),
+                transfer_id: 44,
+                direction: FileTransferDirection::Download,
+                action: FileTransferAction::Complete,
+                path: "/remote/visible.txt".to_string(),
+                relative_path: String::new(),
+                total_bytes: 7,
+                transferred_bytes: 7,
+                file_size: 0,
+                offset: 0,
+                bytes: Vec::new(),
+                message: "download complete".to_string(),
+            },
+        );
+        assert!(windows[0]
+            .local_entries
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.name == "visible.txt"));
+
+        fs::remove_dir_all(visible_root).unwrap();
+        fs::remove_dir_all(hidden_root).unwrap();
     }
 
     #[test]

@@ -70,6 +70,13 @@ fn render_session(
         menu_command(
             ui,
             client_id,
+            "Client Config",
+            CommandKind::ClientConfig,
+            send_command,
+        );
+        menu_command(
+            ui,
+            client_id,
             "Delete Client",
             CommandKind::DeleteClient,
             send_command,
@@ -359,6 +366,7 @@ fn command_is_implemented(command: &CommandKind) -> bool {
             | CommandKind::KillClientProcess
             | CommandKind::Shutdown
             | CommandKind::Reboot
+            | CommandKind::ClientConfig
             | CommandKind::DeleteClient
             | CommandKind::ComputerInfo
             | CommandKind::Clipboard

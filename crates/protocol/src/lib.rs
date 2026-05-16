@@ -388,6 +388,7 @@ pub enum CommandKind {
     CreateTask,
     CommandPreset,
     PluginManager,
+    ClientConfig,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -528,6 +529,7 @@ impl CommandKind {
             Self::CreateTask => "create_task",
             Self::CommandPreset => "command_preset",
             Self::PluginManager => "plugin_manager",
+            Self::ClientConfig => "client_config",
         }
     }
 
@@ -569,6 +571,7 @@ impl CommandKind {
             "create_task" => Self::CreateTask,
             "command_preset" => Self::CommandPreset,
             "plugin_manager" => Self::PluginManager,
+            "client_config" => Self::ClientConfig,
             _ => return None,
         })
     }
@@ -611,6 +614,7 @@ impl CommandKind {
             Self::CommandPreset => 34,
             Self::PluginManager => 35,
             Self::KillTargetProcess => 36,
+            Self::ClientConfig => 37,
         }
     }
 
@@ -652,6 +656,7 @@ impl CommandKind {
             34 => Self::CommandPreset,
             35 => Self::PluginManager,
             36 => Self::KillTargetProcess,
+            37 => Self::ClientConfig,
             _ => return Err(ProtocolError::InvalidCommand),
         })
     }

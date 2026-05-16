@@ -15,10 +15,11 @@ use std::thread;
 
 pub(super) fn run_terminal(config: Config) -> io::Result<()> {
     println!(
-        "rust-desk-light admin {} terminal mode, server={}:{}",
+        "rust-desk-light admin {} terminal mode, server={}:{} config={}",
         rdl_version::display_version(),
         config.ip,
-        config.port
+        config.port,
+        config.config_path.display()
     );
 
     let (input_tx, input_rx) = mpsc::sync_channel(ADMIN_INPUT_QUEUE_CAPACITY);
@@ -157,6 +158,7 @@ fn terminal_input_loop(input_tx: SyncSender<AdminInput>) {
     println!("commands:");
     println!("  list");
     println!("  cmd <client-id> <command-kind> [payload]");
+    println!("  cmd <client-id> client_config confirm=true ip=127.0.0.1 port=5169 reconnect=true");
     println!("  quit");
     let stdin = io::stdin();
     for line in stdin.lock().lines() {

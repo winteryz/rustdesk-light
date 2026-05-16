@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/assets",
+    "crates/config",
     "crates/protocol",
     "crates/version",
     "crates/server",

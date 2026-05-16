@@ -246,6 +246,7 @@ pub(super) fn session_command_requires_confirmation(command: &CommandKind) -> bo
             | CommandKind::KillClientProcess
             | CommandKind::Shutdown
             | CommandKind::Reboot
+            | CommandKind::ClientConfig
             | CommandKind::DeleteClient
     )
 }

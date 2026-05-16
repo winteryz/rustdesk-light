@@ -197,6 +197,41 @@ On Windows PowerShell, use the `.exe` files:
 
 Start order is normally server first, then one or more clients, then the admin console. For cross-machine deployments, open the configured server port as described in [Feature Paths](#feature-paths).
 
+## Configuration
+
+Config files are initialized automatically on startup if missing. Default paths:
+
+```text
+Windows: %APPDATA%\rust-desk-light\<admin|client|server>.toml
+Linux/macOS: $XDG_CONFIG_HOME/rust-desk-light/<admin|client|server>.toml, or ~/.config/rust-desk-light/<admin|client|server>.toml
+```
+
+Priority: built-in defaults < config file < startup arguments. `--ip` and `--port` always win for the current process.
+
+Use `--config` for an explicit path:
+
+```sh
+rdl-server --config config/server.toml
+rdl-client --config config/client.toml
+rdl-admin --config config/admin.toml
+```
+
+Admin/client use `[server]`; server uses `[listen]`:
+
+```toml
+[server]
+ip = "127.0.0.1"
+port = 5169
+```
+
+Admin can update client config from `Session -> Client Config`, or in terminal mode:
+
+```text
+cmd <client-id> client_config confirm=true ip=127.0.0.1 port=5169 reconnect=true
+```
+
+If a client was launched with `--ip` or `--port`, remote updates still write the file, but startup arguments remain effective until restart without them.
+
 ## Quick Start
 
 Launch the local development stack. This starts the server, client, and admin GUI for manual testing:

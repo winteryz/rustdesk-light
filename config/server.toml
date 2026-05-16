@@ -1,0 +1,6 @@
+# Example rdl-server config.
+# Startup arguments override this file.
+
+[listen]
+ip = "0.0.0.0"
+port = 5169

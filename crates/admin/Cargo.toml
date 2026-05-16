@@ -16,7 +16,9 @@ cpal = "0.15.3"
 eframe = "0.34.2"
 egui_extras = "0.34.2"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+rfd = "0.15.4"
 rust-desk-light-assets = { path = "../assets" }
+rust-desk-light-config = { path = "../config" }
 rust-desk-light-protocol = { path = "../protocol" }
 rust-desk-light-version = { path = "../version" }
 

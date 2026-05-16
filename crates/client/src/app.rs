@@ -37,7 +37,12 @@ const AUDIO_UDP_RECV_TIMEOUT_MS: u64 = 20;
 const AUDIO_UDP_MAX_PAYLOAD_BYTES: usize = 1_200;
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::from_env();
+    let process_lock = crate::runtime::acquire_client_process_lock()?;
+    debug_log!(
+        "debug event=client_process_lock path={}",
+        process_lock.path().display()
+    );
+    let config = Config::from_env()?;
     if gui_available() {
         run_gui(config)?;
     } else {
@@ -114,10 +119,11 @@ fn run_terminal(config: Config) -> io::Result<()> {
     let (event_tx, event_rx) = mpsc::channel();
     let (_input_tx, input_rx) = mpsc::channel();
     println!(
-        "rust-desk-light client {} terminal fallback, server={}:{}",
+        "rust-desk-light client {} terminal fallback, server={}:{} config={}",
         rdl_version::display_version(),
         config.ip,
-        config.port
+        config.port,
+        config.config_path.display()
     );
     println!("client id: {}", identity.id);
     println!("fingerprint: {}", identity.fingerprint);
@@ -159,9 +165,23 @@ fn client_network_loop(
     input_rx: Receiver<ClientInput>,
 ) -> io::Result<()> {
     let mut delay = INITIAL_RECONNECT_DELAY_MS;
+    let mut last_config = config.clone();
     loop {
+        let active_config = match config.reload() {
+            Ok(config) => {
+                last_config = config.clone();
+                config
+            }
+            Err(error) => {
+                event_sink.send(ClientEvent::Log(format!(
+                    "config reload failed: {error}; using last known endpoint {}:{}",
+                    last_config.ip, last_config.port
+                )));
+                last_config.clone()
+            }
+        };
         match client_connection_once(
-            config.clone(),
+            active_config,
             identity.clone(),
             gui_mode,
             event_sink.clone(),
@@ -486,6 +506,23 @@ fn client_connection_once(
                     command: command.clone(),
                     payload: payload.clone(),
                 });
+                if command == CommandKind::ClientConfig {
+                    let update = crate::runtime::update_client_config(&config, &payload);
+                    let _ = queue_message(
+                        &out_tx,
+                        &session_token,
+                        Message::CommandAck {
+                            client_id: target_id,
+                            command: CommandKind::ClientConfig,
+                            accepted: update.accepted,
+                            detail: update.detail,
+                        },
+                    );
+                    if update.reconnect {
+                        break;
+                    }
+                    continue;
+                }
                 if command == CommandKind::TextChat && gui_mode {
                     event_sink.send(ClientEvent::ChatMessage {
                         text: payload.clone(),
@@ -2167,7 +2204,9 @@ fn file_transfer_reply_is_bulk(message: &Message) -> bool {
         message,
         Message::FileTransfer {
             direction: FileTransferDirection::Download,
-            action: FileTransferAction::Directory | FileTransferAction::Chunk,
+            action: FileTransferAction::Directory
+                | FileTransferAction::Chunk
+                | FileTransferAction::Complete,
             ..
         }
     )

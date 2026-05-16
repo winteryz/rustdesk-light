@@ -1,0 +1,6 @@
+# Example rdl-admin config.
+# Startup arguments override this file.
+
+[server]
+ip = "127.0.0.1"
+port = 5169

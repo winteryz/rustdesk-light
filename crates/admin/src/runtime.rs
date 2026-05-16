@@ -1,4 +1,4 @@
-use rdl_protocol::{DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT};
+use rdl_config::{ConfigKind, EndpointOverrides};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -7,41 +7,38 @@ use std::process::Command;
 pub(crate) struct Config {
     pub(crate) ip: String,
     pub(crate) port: u16,
+    pub(crate) config_path: PathBuf,
+    overrides: EndpointOverrides,
 }
 
 impl Config {
-    pub(crate) fn from_env() -> Self {
-        let mut ip = DEFAULT_SERVER_IP.to_string();
-        let mut port = DEFAULT_SERVER_PORT;
-        let mut args = std::env::args().skip(1);
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--ip" => {
-                    if let Some(value) = args.next() {
-                        ip = value;
-                    }
-                }
-                "--port" => {
-                    if let Some(value) = args.next() {
-                        if let Ok(value) = value.parse() {
-                            port = value;
-                        }
-                    }
-                }
-                "--version" | "-V" => {
-                    println!("{}", rdl_version::app_version("rdl-admin"));
-                    std::process::exit(0);
-                }
-                "--help" | "-h" => {
-                    println!("Usage: rdl-admin [--ip 127.0.0.1] [--port 5169] [--version]");
-                    std::process::exit(0);
-                }
-                _ => {}
-            }
+    pub(crate) fn from_env() -> Result<Self, rdl_config::ConfigError> {
+        let parsed = rdl_config::parse_endpoint_args(std::env::args().skip(1))?;
+        if parsed.version {
+            println!("{}", rdl_version::app_version("rdl-admin"));
+            std::process::exit(0);
+        }
+        if parsed.help {
+            println!("{}", rdl_config::help_text("rdl-admin", ConfigKind::Admin));
+            std::process::exit(0);
         }
 
-        Self { ip, port }
+        Self::load(parsed.overrides)
+    }
+
+    fn load(overrides: EndpointOverrides) -> Result<Self, rdl_config::ConfigError> {
+        let loaded = rdl_config::load_endpoint_config(ConfigKind::Admin, &overrides)?;
+        Ok(Self {
+            ip: loaded.endpoint.ip,
+            port: loaded.endpoint.port,
+            config_path: loaded.config_path,
+            overrides,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn reload(&self) -> Result<Self, rdl_config::ConfigError> {
+        Self::load(self.overrides.clone())
     }
 }
 
@@ -151,18 +148,7 @@ fn fingerprint_for(id: &str) -> String {
 }
 
 fn identity_file_path(file_name: &str) -> PathBuf {
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        return PathBuf::from(appdata)
-            .join("rust-desk-light")
-            .join(file_name);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".config")
-            .join("rust-desk-light")
-            .join(file_name);
-    }
-    PathBuf::from(file_name)
+    rdl_config::default_config_dir().join(file_name)
 }
 
 fn sanitize(value: &str) -> String {

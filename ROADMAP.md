@@ -6,6 +6,7 @@ This project is a lightweight Rust remote assistance tool with three small binar
 - `rdl-client`: endpoint agent with GUI status and terminal fallback.
 - `rdl-admin`: operator GUI for listing clients and sending commands.
 - `rdl_protocol`: shared wire protocol and command model.
+- `rust-desk-light-config`: shared startup config loading and persistence.
 - `rust-desk-light-assets`: shared embedded GUI resources.
 
 ## Principles
@@ -217,11 +218,13 @@ Notes:
 ## Milestone 9: Packaging And Runtime
 
 - [x] Persistent client/admin identity config files.
+- [x] Persistent admin/client/server startup config files with `--config`, `--ip`, and `--port` precedence.
+- [x] Auto-initialize missing config files on startup.
+- [x] Allow admin to remotely update a client's server config and reconnect it when effective settings change.
+- [x] Add client process single-instance lock.
 - [x] Avoid repeated macOS hostname `scutil` calls by caching hostname and using `gethostname` first.
 - [x] Automatically ad-hoc sign macOS debug builds for `rdl-client`, `rdl-admin`, and `rdl-server`.
 - [x] Embed shared app icon assets for the admin and client GUI windows.
-- [ ] General persistent config files beyond identity.
-- [ ] Server config file.
 - [x] Windows build artifact.
 - [x] Linux build artifact.
 - [x] macOS release artifact.
@@ -257,6 +260,7 @@ Session
   [x] Reboot: reboot
   [ ] Move To Group: move_to_group
   [ ] Clone Client Settings: clone_client_settings
+  [x] Client Config: client_config
   [x] Delete Client: delete_client
 
 Remote Management

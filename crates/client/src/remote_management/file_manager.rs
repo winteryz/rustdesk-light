@@ -419,14 +419,19 @@ fn send_download_contents<F>(
 where
     F: FnMut(Message) -> io::Result<()>,
 {
-    let mut dirs = Vec::new();
-    let mut files = Vec::new();
     let base = root
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "download".to_string());
+    let root_metadata = fs::metadata(root)?;
+    let total_bytes = if root_metadata.is_file() {
+        root_metadata.len()
+    } else {
+        0
+    };
+    let mut transferred_bytes = 0u64;
     debug_log!(
-        "debug event=client_file_download_scan_start client={} id={} root={}",
+        "debug event=client_file_download_stream_start client={} id={} root={}",
         client_id,
         transfer_id,
         sanitize_log_value(&root.display().to_string())
@@ -438,82 +443,33 @@ where
         FileTransferAction::Progress,
         requested_path.to_string(),
         String::new(),
-        0,
-        0,
-        0,
-        0,
-        Vec::new(),
-        "scanning download".to_string(),
-    ))?;
-
-    match collect_download_entries(root, Path::new(&base), &mut dirs, &mut files, &cancel) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-            debug_log!(
-                "debug event=client_file_download_scan_cancelled client={} id={}",
-                client_id,
-                transfer_id
-            );
-            return send_cancelled(
-                client_id,
-                transfer_id,
-                FileTransferDirection::Download,
-                requested_path,
-                0,
-                0,
-                send,
-            );
-        }
-        Err(error) => return Err(error),
-    }
-    let total_bytes = files.iter().map(|file| file.size).sum::<u64>();
-    let mut transferred_bytes = 0u64;
-    debug_log!(
-        "debug event=client_file_download_scan_done client={} id={} dirs={} files={} total_bytes={}",
-        client_id,
-        transfer_id,
-        dirs.len(),
-        files.len(),
-        total_bytes
-    );
-
-    if cancel.load(Ordering::Relaxed) {
-        debug_log!(
-            "debug event=client_file_download_cancel_before_stream client={} id={} total_bytes={}",
-            client_id,
-            transfer_id,
-            total_bytes
-        );
-        return send_cancelled(
-            client_id,
-            transfer_id,
-            FileTransferDirection::Download,
-            requested_path,
-            total_bytes,
-            transferred_bytes,
-            send,
-        );
-    }
-
-    send(transfer_message(
-        client_id.to_string(),
-        transfer_id,
-        FileTransferDirection::Download,
-        FileTransferAction::Progress,
-        requested_path.to_string(),
-        String::new(),
         total_bytes,
-        transferred_bytes,
+        0,
         0,
         0,
         Vec::new(),
         "download started".to_string(),
     ))?;
 
-    for dir in dirs {
-        if cancel.load(Ordering::Relaxed) {
+    let mut buffer = vec![0u8; FILE_TRANSFER_CHUNK_SIZE];
+    match stream_download_entry(
+        DownloadStreamContext {
+            client_id,
+            transfer_id,
+            requested_path,
+            total_bytes,
+            cancel: &cancel,
+        },
+        root,
+        Path::new(&base),
+        &mut transferred_bytes,
+        &mut buffer,
+        send,
+    ) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
             debug_log!(
-                "debug event=client_file_download_cancel_during_dirs client={} id={} transferred_bytes={} total_bytes={}",
+                "debug event=client_file_download_cancelled client={} id={} transferred_bytes={} total_bytes={}",
                 client_id, transfer_id, transferred_bytes, total_bytes
             );
             return send_cancelled(
@@ -526,83 +482,16 @@ where
                 send,
             );
         }
-        send(transfer_message(
-            client_id.to_string(),
-            transfer_id,
-            FileTransferDirection::Download,
-            FileTransferAction::Directory,
-            requested_path.to_string(),
-            dir.to_string_lossy().to_string(),
-            total_bytes,
-            transferred_bytes,
-            0,
-            0,
-            Vec::new(),
-            String::new(),
-        ))?;
+        Err(error) => return Err(error),
     }
 
-    let mut buffer = vec![0u8; FILE_TRANSFER_CHUNK_SIZE];
-    for file in files {
-        if cancel.load(Ordering::Relaxed) {
-            debug_log!(
-                "debug event=client_file_download_cancel_before_file client={} id={} transferred_bytes={} total_bytes={}",
-                client_id, transfer_id, transferred_bytes, total_bytes
-            );
-            return send_cancelled(
-                client_id,
-                transfer_id,
-                FileTransferDirection::Download,
-                requested_path,
-                total_bytes,
-                transferred_bytes,
-                send,
-            );
-        }
-        let mut input = File::open(&file.path)?;
-        let mut offset = 0u64;
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                debug_log!(
-                    "debug event=client_file_download_cancel_during_file client={} id={} transferred_bytes={} total_bytes={} file={}",
-                    client_id,
-                    transfer_id,
-                    transferred_bytes,
-                    total_bytes,
-                    sanitize_log_value(&file.relative.display().to_string())
-                );
-                return send_cancelled(
-                    client_id,
-                    transfer_id,
-                    FileTransferDirection::Download,
-                    requested_path,
-                    total_bytes,
-                    transferred_bytes,
-                    send,
-                );
-            }
-            let count = input.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            transferred_bytes = transferred_bytes.saturating_add(count as u64);
-            send(transfer_message(
-                client_id.to_string(),
-                transfer_id,
-                FileTransferDirection::Download,
-                FileTransferAction::Chunk,
-                requested_path.to_string(),
-                file.relative.to_string_lossy().to_string(),
-                total_bytes,
-                transferred_bytes,
-                file.size,
-                offset,
-                buffer[..count].to_vec(),
-                String::new(),
-            ))?;
-            offset = offset.saturating_add(count as u64);
-        }
-    }
+    debug_log!(
+        "debug event=client_file_download_stream_done client={} id={} transferred_bytes={} total_bytes={}",
+        client_id,
+        transfer_id,
+        transferred_bytes,
+        total_bytes
+    );
 
     send(transfer_message(
         client_id.to_string(),
@@ -618,6 +507,132 @@ where
         Vec::new(),
         "download complete".to_string(),
     ))
+}
+
+#[derive(Clone, Copy)]
+struct DownloadStreamContext<'a> {
+    client_id: &'a str,
+    transfer_id: u64,
+    requested_path: &'a str,
+    total_bytes: u64,
+    cancel: &'a AtomicBool,
+}
+
+fn stream_download_entry<F>(
+    context: DownloadStreamContext<'_>,
+    path: &Path,
+    relative: &Path,
+    transferred_bytes: &mut u64,
+    buffer: &mut [u8],
+    send: &mut F,
+) -> io::Result<()>
+where
+    F: FnMut(Message) -> io::Result<()>,
+{
+    if context.cancel.load(Ordering::Relaxed) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "download cancelled",
+        ));
+    }
+
+    let metadata = fs::metadata(path)?;
+    if metadata.is_dir() {
+        send(transfer_message(
+            context.client_id.to_string(),
+            context.transfer_id,
+            FileTransferDirection::Download,
+            FileTransferAction::Directory,
+            context.requested_path.to_string(),
+            relative.to_string_lossy().to_string(),
+            context.total_bytes,
+            *transferred_bytes,
+            0,
+            0,
+            Vec::new(),
+            String::new(),
+        ))?;
+
+        let mut children = fs::read_dir(path)?.flatten().collect::<Vec<_>>();
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            let child_name = child.file_name();
+            let child_relative = relative.join(child_name);
+            stream_download_entry(
+                context,
+                &child.path(),
+                &child_relative,
+                transferred_bytes,
+                buffer,
+                send,
+            )?;
+        }
+        return Ok(());
+    }
+
+    stream_download_file(
+        context,
+        path,
+        relative,
+        metadata.len(),
+        transferred_bytes,
+        buffer,
+        send,
+    )
+}
+
+fn stream_download_file<F>(
+    context: DownloadStreamContext<'_>,
+    path: &Path,
+    relative: &Path,
+    file_size: u64,
+    transferred_bytes: &mut u64,
+    buffer: &mut [u8],
+    send: &mut F,
+) -> io::Result<()>
+where
+    F: FnMut(Message) -> io::Result<()>,
+{
+    let mut input = File::open(path)?;
+    let mut offset = 0u64;
+    loop {
+        if context.cancel.load(Ordering::Relaxed) {
+            debug_log!(
+                "debug event=client_file_download_cancel_during_file client={} id={} transferred_bytes={} total_bytes={} file={}",
+                context.client_id,
+                context.transfer_id,
+                *transferred_bytes,
+                context.total_bytes,
+                sanitize_log_value(&relative.display().to_string())
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "download cancelled",
+            ));
+        }
+
+        let count = input.read(buffer)?;
+        if count == 0 {
+            break;
+        }
+        *transferred_bytes = (*transferred_bytes).saturating_add(count as u64);
+        send(transfer_message(
+            context.client_id.to_string(),
+            context.transfer_id,
+            FileTransferDirection::Download,
+            FileTransferAction::Chunk,
+            context.requested_path.to_string(),
+            relative.to_string_lossy().to_string(),
+            context.total_bytes,
+            *transferred_bytes,
+            file_size,
+            offset,
+            buffer[..count].to_vec(),
+            String::new(),
+        ))?;
+        offset = offset.saturating_add(count as u64);
+    }
+    Ok(())
 }
 
 fn cancel_download_transfer<F>(
@@ -889,52 +904,6 @@ where
         Vec::new(),
         "upload cancelled".to_string(),
     ))
-}
-
-#[derive(Clone)]
-struct DownloadFileEntry {
-    path: PathBuf,
-    relative: PathBuf,
-    size: u64,
-}
-
-fn collect_download_entries(
-    path: &Path,
-    relative: &Path,
-    dirs: &mut Vec<PathBuf>,
-    files: &mut Vec<DownloadFileEntry>,
-    cancel: &AtomicBool,
-) -> io::Result<()> {
-    if cancel.load(Ordering::Relaxed) {
-        return Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "download cancelled",
-        ));
-    }
-    let metadata = fs::metadata(path)?;
-    if metadata.is_dir() {
-        dirs.push(relative.to_path_buf());
-        let mut children = fs::read_dir(path)?.flatten().collect::<Vec<_>>();
-        children.sort_by_key(|entry| entry.file_name());
-        for child in children {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "download cancelled",
-                ));
-            }
-            let child_name = child.file_name();
-            let child_relative = relative.join(child_name);
-            collect_download_entries(&child.path(), &child_relative, dirs, files, cancel)?;
-        }
-    } else {
-        files.push(DownloadFileEntry {
-            path: path.to_path_buf(),
-            relative: relative.to_path_buf(),
-            size: metadata.len(),
-        });
-    }
-    Ok(())
 }
 
 fn upload_target_path(
@@ -1248,21 +1217,10 @@ mod tests {
                 action: FileTransferAction::Progress,
                 direction: FileTransferDirection::Download,
                 message,
+                total_bytes: 0,
                 ..
-            }) if message == "scanning download"
+            }) if message == "download started"
         ));
-        assert!(replies.iter().any(|message| {
-            matches!(
-                message,
-                Message::FileTransfer {
-                    action: FileTransferAction::Progress,
-                    direction: FileTransferDirection::Download,
-                    total_bytes: 5,
-                    message,
-                    ..
-                } if message == "download started"
-            )
-        }));
         assert!(replies.iter().any(|message| {
             matches!(
                 message,
@@ -1292,6 +1250,8 @@ mod tests {
                 Message::FileTransfer {
                     action: FileTransferAction::Complete,
                     direction: FileTransferDirection::Download,
+                    total_bytes: 0,
+                    transferred_bytes: 5,
                     ..
                 }
             )
@@ -1300,27 +1260,39 @@ mod tests {
     }
 
     #[test]
-    fn download_entry_collection_can_be_cancelled() {
+    fn download_stream_can_be_cancelled_before_work() {
         let root = test_dir("rdl-download-cancel-scan");
         let source = root.join("source-dir");
         fs::create_dir_all(source.join("nested")).unwrap();
         fs::write(source.join("nested/file.txt"), b"hello").unwrap();
         let cancel = AtomicBool::new(true);
-        let mut dirs = Vec::new();
-        let mut files = Vec::new();
+        let mut replies = Vec::new();
+        let mut transferred_bytes = 0u64;
+        let mut buffer = vec![0u8; FILE_TRANSFER_CHUNK_SIZE];
+        let requested_path = source.display().to_string();
 
-        let error = collect_download_entries(
+        let error = stream_download_entry(
+            DownloadStreamContext {
+                client_id: "client-c",
+                transfer_id: 12,
+                requested_path: &requested_path,
+                total_bytes: 0,
+                cancel: &cancel,
+            },
             &source,
             Path::new("source-dir"),
-            &mut dirs,
-            &mut files,
-            &cancel,
+            &mut transferred_bytes,
+            &mut buffer,
+            &mut |message| {
+                replies.push(message);
+                Ok(())
+            },
         )
         .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
-        assert!(dirs.is_empty());
-        assert!(files.is_empty());
+        assert!(replies.is_empty());
+        assert_eq!(transferred_bytes, 0);
         let _ = fs::remove_dir_all(root);
     }
 

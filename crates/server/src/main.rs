@@ -88,14 +88,16 @@ struct Peer {
 type FileTransferKey = (String, u64, &'static str);
 
 fn main() -> io::Result<()> {
-    let config = Config::from_env();
+    let config = Config::from_env()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     let bind_addr = format!("{}:{}", config.ip, config.port);
     let listener = TcpListener::bind(&bind_addr)?;
     let (events_tx, events_rx) = mpsc::channel();
 
     println!(
-        "rust-desk-light server listening on {bind_addr} version={}",
-        rdl_version::display_version()
+        "rust-desk-light server listening on {bind_addr} version={} config={}",
+        rdl_version::display_version(),
+        config.config_path.display()
     );
     start_audio_udp_relay(bind_addr.clone());
     thread::spawn(move || accept_loop(listener, events_tx));
@@ -1241,40 +1243,30 @@ fn online_clients(peers: &HashMap<usize, Peer>) -> Vec<ClientInfo> {
 struct Config {
     ip: String,
     port: u16,
+    config_path: std::path::PathBuf,
 }
 
 impl Config {
-    fn from_env() -> Self {
-        let mut ip = "0.0.0.0".to_string();
-        let mut port = rdl_protocol::DEFAULT_SERVER_PORT;
-        let mut args = std::env::args().skip(1);
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--ip" => {
-                    if let Some(value) = args.next() {
-                        ip = value;
-                    }
-                }
-                "--port" => {
-                    if let Some(value) = args.next() {
-                        if let Ok(value) = value.parse() {
-                            port = value;
-                        }
-                    }
-                }
-                "--version" | "-V" => {
-                    println!("{}", rdl_version::app_version("rdl-server"));
-                    std::process::exit(0);
-                }
-                "--help" | "-h" => {
-                    println!("Usage: rdl-server [--ip 0.0.0.0] [--port 5169] [--version]");
-                    std::process::exit(0);
-                }
-                _ => {}
-            }
+    fn from_env() -> Result<Self, rdl_config::ConfigError> {
+        let parsed = rdl_config::parse_endpoint_args(std::env::args().skip(1))?;
+        if parsed.version {
+            println!("{}", rdl_version::app_version("rdl-server"));
+            std::process::exit(0);
+        }
+        if parsed.help {
+            println!(
+                "{}",
+                rdl_config::help_text("rdl-server", rdl_config::ConfigKind::Server)
+            );
+            std::process::exit(0);
         }
 
-        Self { ip, port }
+        let loaded =
+            rdl_config::load_endpoint_config(rdl_config::ConfigKind::Server, &parsed.overrides)?;
+        Ok(Self {
+            ip: loaded.endpoint.ip,
+            port: loaded.endpoint.port,
+            config_path: loaded.config_path,
+        })
     }
 }

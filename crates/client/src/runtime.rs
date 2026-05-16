@@ -1,5 +1,8 @@
-use rdl_protocol::{DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT};
+use fs2::FileExt;
+use rdl_config::{ConfigKind, EndpointConfig, EndpointOverrides};
 use std::fs;
+use std::fs::File;
+use std::io;
 use std::os::raw::{c_char, c_int};
 use std::path::PathBuf;
 use std::process::Command;
@@ -7,46 +10,288 @@ use std::sync::OnceLock;
 
 static HOSTNAME_CACHE: OnceLock<String> = OnceLock::new();
 
+pub(crate) struct ClientProcessLock {
+    _file: File,
+    path: PathBuf,
+}
+
+impl ClientProcessLock {
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+pub(crate) fn acquire_client_process_lock() -> io::Result<ClientProcessLock> {
+    let path = rdl_config::default_config_dir().join("client.lock");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            file.set_len(0)?;
+            use std::io::Write;
+            writeln!(&file, "pid={}", std::process::id())?;
+            Ok(ClientProcessLock { _file: file, path })
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "another rdl-client process is already running (lock: {})",
+                path.display()
+            ),
+        )),
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Config {
     pub(crate) ip: String,
     pub(crate) port: u16,
+    pub(crate) config_path: PathBuf,
+    cli_ip: Option<String>,
+    cli_port: Option<u16>,
+    overrides: EndpointOverrides,
 }
 
 impl Config {
-    pub(crate) fn from_env() -> Self {
-        let mut ip = DEFAULT_SERVER_IP.to_string();
-        let mut port = DEFAULT_SERVER_PORT;
-        let mut args = std::env::args().skip(1);
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--ip" => {
-                    if let Some(value) = args.next() {
-                        ip = value;
-                    }
-                }
-                "--port" => {
-                    if let Some(value) = args.next() {
-                        if let Ok(value) = value.parse() {
-                            port = value;
-                        }
-                    }
-                }
-                "--version" | "-V" => {
-                    println!("{}", rdl_version::app_version("rdl-client"));
-                    std::process::exit(0);
-                }
-                "--help" | "-h" => {
-                    println!("Usage: rdl-client [--ip 127.0.0.1] [--port 5169] [--version]");
-                    std::process::exit(0);
-                }
-                _ => {}
-            }
+    pub(crate) fn from_env() -> Result<Self, rdl_config::ConfigError> {
+        let parsed = rdl_config::parse_endpoint_args(std::env::args().skip(1))?;
+        if parsed.version {
+            println!("{}", rdl_version::app_version("rdl-client"));
+            std::process::exit(0);
+        }
+        if parsed.help {
+            println!(
+                "{}",
+                rdl_config::help_text("rdl-client", ConfigKind::Client)
+            );
+            std::process::exit(0);
         }
 
-        Self { ip, port }
+        Self::load(parsed.overrides)
     }
+
+    fn load(overrides: EndpointOverrides) -> Result<Self, rdl_config::ConfigError> {
+        let loaded = rdl_config::load_endpoint_config(ConfigKind::Client, &overrides)?;
+        Ok(Self {
+            ip: loaded.endpoint.ip,
+            port: loaded.endpoint.port,
+            config_path: loaded.config_path,
+            cli_ip: loaded.cli_ip,
+            cli_port: loaded.cli_port,
+            overrides,
+        })
+    }
+
+    pub(crate) fn reload(&self) -> Result<Self, rdl_config::ConfigError> {
+        Self::load(self.overrides.clone())
+    }
+
+    pub(crate) fn endpoint(&self) -> EndpointConfig {
+        EndpointConfig::new(self.ip.clone(), self.port)
+    }
+
+    pub(crate) fn cli_ip_overridden(&self) -> bool {
+        self.cli_ip.is_some()
+    }
+
+    pub(crate) fn cli_port_overridden(&self) -> bool {
+        self.cli_port.is_some()
+    }
+}
+
+pub(crate) struct ClientConfigUpdate {
+    pub(crate) accepted: bool,
+    pub(crate) detail: String,
+    pub(crate) reconnect: bool,
+}
+
+pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConfigUpdate {
+    let request = ClientConfigUpdateRequest::parse(payload);
+    if request.show {
+        return ClientConfigUpdate {
+            accepted: true,
+            detail: client_config_detail("current", config, config, None, false, "current config"),
+            reconnect: false,
+        };
+    }
+    if !request.confirm {
+        return ClientConfigUpdate {
+            accepted: false,
+            detail: "client_config\nstatus=refused\nmessage=confirm=true is required".to_string(),
+            reconnect: false,
+        };
+    }
+    if let Some(port) = request.invalid_port.as_ref() {
+        return ClientConfigUpdate {
+            accepted: false,
+            detail: format!(
+                "client_config\nstatus=error\nmessage=invalid port: {}",
+                clean_value(port)
+            ),
+            reconnect: false,
+        };
+    }
+
+    let mut endpoint = config.endpoint();
+    if let Some(ip) = request.ip.as_ref() {
+        endpoint.ip = ip.clone();
+    }
+    if let Some(port) = request.port {
+        endpoint.port = port;
+    }
+    if endpoint.ip.trim().is_empty() {
+        return ClientConfigUpdate {
+            accepted: false,
+            detail: "client_config\nstatus=error\nmessage=ip cannot be empty".to_string(),
+            reconnect: false,
+        };
+    }
+    if request.ip.is_none() && request.port.is_none() {
+        return ClientConfigUpdate {
+            accepted: false,
+            detail: "client_config\nstatus=error\nmessage=ip or port is required".to_string(),
+            reconnect: false,
+        };
+    }
+
+    if request.dry_run {
+        let mut next = config.clone();
+        if !config.cli_ip_overridden() {
+            next.ip = endpoint.ip.clone();
+        }
+        if !config.cli_port_overridden() {
+            next.port = endpoint.port;
+        }
+        return ClientConfigUpdate {
+            accepted: true,
+            detail: client_config_detail(
+                "dry_run",
+                config,
+                &next,
+                Some(&endpoint),
+                false,
+                "config would be updated",
+            ),
+            reconnect: false,
+        };
+    }
+
+    if let Err(error) =
+        rdl_config::write_endpoint_config(ConfigKind::Client, &config.config_path, &endpoint)
+    {
+        return ClientConfigUpdate {
+            accepted: false,
+            detail: format!(
+                "client_config\nstatus=error\nmessage={}",
+                clean_value(&error.to_string())
+            ),
+            reconnect: false,
+        };
+    }
+
+    let reloaded = match config.reload() {
+        Ok(config) => config,
+        Err(error) => {
+            return ClientConfigUpdate {
+                accepted: false,
+                detail: format!(
+                    "client_config\nstatus=error\nmessage=config was written but reload failed: {}",
+                    clean_value(&error.to_string())
+                ),
+                reconnect: false,
+            }
+        }
+    };
+    let effective_changed = reloaded.ip != config.ip || reloaded.port != config.port;
+    let reconnect = request.reconnect && effective_changed;
+    let message = if reconnect {
+        "config updated; reconnecting"
+    } else if effective_changed {
+        "config updated; reconnect disabled"
+    } else if config.cli_ip_overridden() || config.cli_port_overridden() {
+        "config updated; startup arguments still override effective endpoint"
+    } else {
+        "config updated"
+    };
+
+    ClientConfigUpdate {
+        accepted: true,
+        detail: client_config_detail(
+            "updated",
+            config,
+            &reloaded,
+            Some(&endpoint),
+            reconnect,
+            message,
+        ),
+        reconnect,
+    }
+}
+
+#[derive(Debug, Default)]
+struct ClientConfigUpdateRequest {
+    confirm: bool,
+    dry_run: bool,
+    show: bool,
+    reconnect: bool,
+    ip: Option<String>,
+    port: Option<u16>,
+    invalid_port: Option<String>,
+}
+
+impl ClientConfigUpdateRequest {
+    fn parse(payload: &str) -> Self {
+        let action = payload_field(payload, "action");
+        Self {
+            confirm: bool_field(payload, "confirm"),
+            dry_run: bool_field(payload, "dry_run"),
+            show: action.as_deref() == Some("show"),
+            reconnect: payload_field(payload, "reconnect")
+                .map(|value| bool_value(&value))
+                .unwrap_or(true),
+            ip: payload_field(payload, "ip").filter(|value| !value.trim().is_empty()),
+            port: payload_field(payload, "port").and_then(|value| value.parse::<u16>().ok()),
+            invalid_port: payload_field(payload, "port")
+                .filter(|value| value.parse::<u16>().is_err()),
+        }
+    }
+}
+
+fn client_config_detail(
+    status: &str,
+    current: &Config,
+    effective: &Config,
+    file_endpoint: Option<&EndpointConfig>,
+    reconnect: bool,
+    message: &str,
+) -> String {
+    let file_endpoint = file_endpoint
+        .cloned()
+        .unwrap_or_else(|| effective.endpoint());
+    [
+        "client_config".to_string(),
+        format!("status={status}"),
+        format!("message={}", clean_value(message)),
+        format!(
+            "path={}",
+            clean_value(&current.config_path.display().to_string())
+        ),
+        format!("config_ip={}", clean_value(&file_endpoint.ip)),
+        format!("config_port={}", file_endpoint.port),
+        format!("effective_ip={}", clean_value(&effective.ip)),
+        format!("effective_port={}", effective.port),
+        format!("cli_ip_override={}", current.cli_ip_overridden()),
+        format!("cli_port_override={}", current.cli_port_overridden()),
+        format!("reconnect={reconnect}"),
+    ]
+    .join("\n")
 }
 
 #[derive(Clone)]
@@ -196,18 +441,7 @@ fn fingerprint_for(id: &str) -> String {
 }
 
 fn identity_file_path(file_name: &str) -> PathBuf {
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        return PathBuf::from(appdata)
-            .join("rust-desk-light")
-            .join(file_name);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".config")
-            .join("rust-desk-light")
-            .join(file_name);
-    }
-    PathBuf::from(file_name)
+    rdl_config::default_config_dir().join(file_name)
 }
 
 fn command_first_line(program: &str, args: &[&str]) -> Result<String, String> {
@@ -228,6 +462,38 @@ fn command_first_line(program: &str, args: &[&str]) -> Result<String, String> {
         .ok_or_else(|| "empty output".to_string())
 }
 
+fn payload_field(payload: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    if let Some(value) = payload
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&prefix).map(str::trim))
+        .map(|value| value.trim_matches('"').to_string())
+    {
+        return Some(value);
+    }
+    payload.split_whitespace().find_map(|part| {
+        part.strip_prefix(&prefix)
+            .map(|value| value.trim_matches('"').to_string())
+    })
+}
+
+fn bool_field(payload: &str, key: &str) -> bool {
+    payload_field(payload, key)
+        .map(|value| bool_value(&value))
+        .unwrap_or(false)
+}
+
+fn bool_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
+}
+
+fn clean_value(value: &str) -> String {
+    value.replace(['\t', '\r', '\n'], " ").trim().to_string()
+}
+
 fn simple_hash(value: &str) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in value.as_bytes() {
@@ -235,4 +501,65 @@ fn simple_hash(value: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn remote_config_update_writes_file_and_requests_reconnect() {
+        let path = temp_config_path("client-update");
+        let config = Config::load(EndpointOverrides {
+            config_path: Some(path.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let update = update_client_config(
+            &config,
+            "confirm=true\nip=10.0.0.9\nport=7000\nreconnect=true",
+        );
+
+        assert!(update.accepted);
+        assert!(update.reconnect);
+        let reloaded = config.reload().unwrap();
+        assert_eq!(reloaded.ip, "10.0.0.9");
+        assert_eq!(reloaded.port, 7000);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn startup_args_override_remote_config_file_updates() {
+        let path = temp_config_path("client-cli-override");
+        let config = Config::load(EndpointOverrides {
+            config_path: Some(path.clone()),
+            ip: Some("192.0.2.10".to_string()),
+            port: Some(6000),
+        })
+        .unwrap();
+
+        let update = update_client_config(
+            &config,
+            "confirm=true\nip=10.0.0.9\nport=7000\nreconnect=true",
+        );
+
+        assert!(update.accepted);
+        assert!(!update.reconnect);
+        assert!(update.detail.contains("cli_ip_override=true"));
+        assert!(update.detail.contains("cli_port_override=true"));
+        let reloaded = config.reload().unwrap();
+        assert_eq!(reloaded.ip, "192.0.2.10");
+        assert_eq!(reloaded.port, 6000);
+        let _ = fs::remove_file(path);
+    }
+
+    fn temp_config_path(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{nanos}.toml", std::process::id()))
+    }
 }
