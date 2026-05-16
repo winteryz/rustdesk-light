@@ -10,6 +10,7 @@ name = "rdl-server"
 path = "src/main.rs"
 
 [dependencies]
+maxminddb = "0.28.1"
 rust-desk-light-config = { path = "../config" }
 rust-desk-light-protocol = { path = "../protocol" }
 rust-desk-light-version = { path = "../version" }

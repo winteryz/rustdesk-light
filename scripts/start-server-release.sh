@@ -8,6 +8,8 @@ LOG_DIR="${RDL_LOG_DIR:-$ROOT_DIR/target/rdl-server}"
 PID_FILE="$LOG_DIR/rdl-server.pid"
 LOG_FILE="$LOG_DIR/rdl-server.log"
 
+. "$ROOT_DIR/scripts/geoip-db.sh"
+
 mkdir -p "$LOG_DIR"
 
 cd "$ROOT_DIR"
@@ -22,6 +24,7 @@ fi
 echo "Building rdl-server (release)"
 cargo build -p rust-desk-light-server --release
 SERVER_BIN="$ROOT_DIR/target/release/rdl-server"
+GEOIP_DB_PATH="$(rdl_find_geoip_db "$ROOT_DIR" || true)"
 
 stop_existing() {
   if [ ! -f "$PID_FILE" ]; then
@@ -58,8 +61,15 @@ stop_existing() {
 
 stop_existing
 
-echo "Starting rdl-server on $IP:$PORT"
-nohup "$SERVER_BIN" --ip "$IP" --port "$PORT" >>"$LOG_FILE" 2>&1 &
+if [ -n "$GEOIP_DB_PATH" ]; then
+  echo "Using GeoIP database: $GEOIP_DB_PATH"
+  echo "Starting rdl-server on $IP:$PORT"
+  nohup "$SERVER_BIN" --ip "$IP" --port "$PORT" --geoip-db "$GEOIP_DB_PATH" >>"$LOG_FILE" 2>&1 &
+else
+  echo "No GeoIP database found; starting without client map locations"
+  echo "Starting rdl-server on $IP:$PORT"
+  nohup "$SERVER_BIN" --ip "$IP" --port "$PORT" >>"$LOG_FILE" 2>&1 &
+fi
 new_pid="$!"
 echo "$new_pid" >"$PID_FILE"
 

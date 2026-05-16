@@ -1,3 +1,4 @@
+mod client_map;
 mod command_result;
 mod event;
 mod file_transfer;
@@ -7,6 +8,7 @@ mod terminal;
 mod ui;
 
 use self::{
+    client_map::{client_location_label, ClientMapWindow},
     command_result::{
         command_status_notice, command_title, command_window_identity_title, detail_status,
         kill_target_process_succeeded, performance_auto_refresh_due,
@@ -348,6 +350,7 @@ struct AdminApp {
     connected: bool,
     clients: Vec<ClientRow>,
     client_filter: String,
+    client_map_window: ClientMapWindow,
     selected_client_id: Option<String>,
     command_windows: Vec<CommandResultWindow>,
     file_manager_windows: Vec<remote_management::file_manager::FileManagerWindow>,
@@ -578,6 +581,7 @@ impl AdminApp {
             connected: false,
             clients: Vec::new(),
             client_filter: String::new(),
+            client_map_window: ClientMapWindow::new(),
             selected_client_id: None,
             command_windows: Vec::new(),
             file_manager_windows: Vec::new(),
@@ -1759,7 +1763,14 @@ impl AdminApp {
     fn render_menu_bar(&mut self, ui: &mut egui::Ui) {
         panel(ui, |ui| {
             ui.horizontal(|ui| {
-                section_title(ui, "Commands");
+                section_title(ui, "Menu");
+                ui.separator();
+                ui.menu_button("Global", |ui| {
+                    if ui.button("Client Map").clicked() {
+                        self.client_map_window.open();
+                        ui.close();
+                    }
+                });
                 ui.separator();
                 if let Some(client_id) = self.selected_client_id.clone() {
                     let gui_available = self.client_gui_available(&client_id);
@@ -1867,6 +1878,7 @@ impl AdminApp {
                         .column(egui_extras::Column::exact(150.0))
                         .column(egui_extras::Column::exact(120.0))
                         .column(egui_extras::Column::exact(220.0))
+                        .column(egui_extras::Column::exact(180.0))
                         .column(egui_extras::Column::exact(70.0))
                         .column(egui_extras::Column::exact(130.0))
                         .header(24.0, |mut header| {
@@ -1877,6 +1889,7 @@ impl AdminApp {
                             header.col(|ui| table_header(ui, "Host"));
                             header.col(|ui| table_header(ui, "User"));
                             header.col(|ui| table_header(ui, "OS Version"));
+                            header.col(|ui| table_header(ui, "Location"));
                             header.col(|ui| table_header(ui, "GUI"));
                             header.col(|ui| table_header(ui, "Last Heartbeat"));
                         })
@@ -1918,6 +1931,11 @@ impl AdminApp {
                                 row.col(|ui| {
                                     centered_cell(ui, |ui| {
                                         cell_label(ui, &client.os);
+                                    });
+                                });
+                                row.col(|ui| {
+                                    centered_cell(ui, |ui| {
+                                        cell_label(ui, client_location_label(client));
                                     });
                                 });
                                 row.col(|ui| {
@@ -2542,6 +2560,12 @@ impl eframe::App for AdminApp {
         self.render_interaction_command_windows(ui.ctx());
         self.render_session_command_windows(ui.ctx());
         self.render_execute_windows(ui.ctx());
+        self.client_map_window.render(
+            ui.ctx(),
+            &self.clients,
+            &mut self.selected_client_id,
+            &mut self.client_filter,
+        );
 
         if changed {
             ui.ctx().request_repaint();

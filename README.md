@@ -280,6 +280,34 @@ RDL_FORCE_TERMINAL=1
 
 In the admin GUI, select an online client, right-click the client row, and choose a command from the menu.
 
+## Client Map
+
+The admin GUI includes a client map view. It is populated by the server from
+the connecting client IP address when a MaxMind GeoLite2/GeoIP2 City database is
+configured:
+
+```sh
+./target/release/rdl-server --ip 0.0.0.0 --port 5169 --geoip-db /path/GeoLite2-City.mmdb
+```
+
+You can also set:
+
+```sh
+RDL_GEOIP_DB=/path/GeoLite2-City.mmdb
+```
+
+The shell startup scripts also auto-detect a bundled database at
+`third_party/geoip/GeoLite2-City.mmdb` and start the server with it.
+
+IP geolocation is approximate and should be treated as country/region/city-level
+context. It is not precise enough to identify a street address, household, or
+individual. Private LAN, loopback, VPN, proxy, and relay addresses may have no
+location or a location that represents the network endpoint rather than the
+physical client.
+
+See [GeoLite2 City setup](docs/geolite2-city-setup.md) for download, extraction,
+server deployment, and troubleshooting notes.
+
 ## Smoke Test
 
 Run the automated local smoke flow. It uses terminal mode so CI and local shells can drive the protocol without opening GUI windows:

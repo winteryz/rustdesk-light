@@ -235,8 +235,9 @@ pub fn static_command_script_for_os(id: &str, os_label: &str) -> Option<&'static
 #[cfg(test)]
 mod tests {
     use super::{
-        audio_udp, default_static_command_preset_id, static_command_presets,
-        static_command_script_for_os,
+        audio_udp, decode_envelope, default_static_command_preset_id, encode_envelope,
+        static_command_presets, static_command_script_for_os, ClientInfo, ClientLocation, Envelope,
+        Message, Role, PROTOCOL_VERSION,
     };
 
     #[test]
@@ -304,6 +305,40 @@ mod tests {
             }
             other => panic!("unexpected packet: {other:?}"),
         }
+    }
+
+    #[test]
+    fn clients_message_roundtrips_location() {
+        let location =
+            ClientLocation::from_degrees(31.2304, 121.4737, 50_000, "ip", "Shanghai, China", 99);
+        let envelope = Envelope {
+            version: PROTOCOL_VERSION,
+            message_id: 7,
+            correlation_id: None,
+            role: Role::Server,
+            session_token: String::new(),
+            message: Message::Clients(vec![ClientInfo {
+                id: "client-1".to_string(),
+                fingerprint: "fp".to_string(),
+                peer_addr: "203.0.113.10:5169".to_string(),
+                hostname: "host".to_string(),
+                os: "linux x86_64".to_string(),
+                username: "user".to_string(),
+                gui_available: true,
+                started_at_epoch_ms: 1,
+                last_seen_epoch_ms: 2,
+                location: Some(location.clone()),
+            }]),
+        };
+
+        let frame = encode_envelope(&envelope).unwrap();
+        let decoded = decode_envelope(&frame).unwrap();
+
+        assert_eq!(decoded.message, envelope.message);
+        let Message::Clients(clients) = decoded.message else {
+            panic!("expected clients message");
+        };
+        assert_eq!(clients[0].location, Some(location));
     }
 }
 
@@ -756,6 +791,46 @@ impl FileTransferAction {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientLocation {
+    pub latitude_e7: i32,
+    pub longitude_e7: i32,
+    pub accuracy_meters: u32,
+    pub source: String,
+    pub label: String,
+    pub updated_at_epoch_ms: u128,
+}
+
+impl ClientLocation {
+    pub const SCALE: f64 = 10_000_000.0;
+
+    pub fn from_degrees(
+        latitude: f64,
+        longitude: f64,
+        accuracy_meters: u32,
+        source: impl Into<String>,
+        label: impl Into<String>,
+        updated_at_epoch_ms: u128,
+    ) -> Self {
+        Self {
+            latitude_e7: (latitude * Self::SCALE).round() as i32,
+            longitude_e7: (longitude * Self::SCALE).round() as i32,
+            accuracy_meters,
+            source: source.into(),
+            label: label.into(),
+            updated_at_epoch_ms,
+        }
+    }
+
+    pub fn latitude(&self) -> f64 {
+        self.latitude_e7 as f64 / Self::SCALE
+    }
+
+    pub fn longitude(&self) -> f64 {
+        self.longitude_e7 as f64 / Self::SCALE
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientInfo {
     pub id: String,
     pub fingerprint: String,
@@ -766,6 +841,7 @@ pub struct ClientInfo {
     pub gui_available: bool,
     pub started_at_epoch_ms: u128,
     pub last_seen_epoch_ms: u128,
+    pub location: Option<ClientLocation>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -915,6 +991,15 @@ impl Message {
                     writer.bool(client.gui_available);
                     writer.u128(client.started_at_epoch_ms);
                     writer.u128(client.last_seen_epoch_ms);
+                    writer.bool(client.location.is_some());
+                    if let Some(location) = client.location.as_ref() {
+                        writer.i32(location.latitude_e7);
+                        writer.i32(location.longitude_e7);
+                        writer.u32(location.accuracy_meters);
+                        writer.string(&location.source);
+                        writer.string(&location.label);
+                        writer.u128(location.updated_at_epoch_ms);
+                    }
                 }
             }
             Self::Command {
@@ -1055,16 +1140,38 @@ impl Message {
                 let count = reader.u32()? as usize;
                 let mut clients = Vec::with_capacity(count);
                 for _ in 0..count {
+                    let id = reader.string()?;
+                    let fingerprint = reader.string()?;
+                    let peer_addr = reader.string()?;
+                    let hostname = reader.string()?;
+                    let os = reader.string()?;
+                    let username = reader.string()?;
+                    let gui_available = reader.bool()?;
+                    let started_at_epoch_ms = reader.u128()?;
+                    let last_seen_epoch_ms = reader.u128()?;
+                    let location = if reader.bool()? {
+                        Some(ClientLocation {
+                            latitude_e7: reader.i32()?,
+                            longitude_e7: reader.i32()?,
+                            accuracy_meters: reader.u32()?,
+                            source: reader.string()?,
+                            label: reader.string()?,
+                            updated_at_epoch_ms: reader.u128()?,
+                        })
+                    } else {
+                        None
+                    };
                     clients.push(ClientInfo {
-                        id: reader.string()?,
-                        fingerprint: reader.string()?,
-                        peer_addr: reader.string()?,
-                        hostname: reader.string()?,
-                        os: reader.string()?,
-                        username: reader.string()?,
-                        gui_available: reader.bool()?,
-                        started_at_epoch_ms: reader.u128()?,
-                        last_seen_epoch_ms: reader.u128()?,
+                        id,
+                        fingerprint,
+                        peer_addr,
+                        hostname,
+                        os,
+                        username,
+                        gui_available,
+                        started_at_epoch_ms,
+                        last_seen_epoch_ms,
+                        location,
                     });
                 }
                 Self::Clients(clients)
@@ -1432,6 +1539,10 @@ impl BinaryWriter {
         self.buffer.extend_from_slice(&value.to_be_bytes());
     }
 
+    fn i32(&mut self, value: i32) {
+        self.buffer.extend_from_slice(&value.to_be_bytes());
+    }
+
     fn u32(&mut self, value: u32) {
         self.buffer.extend_from_slice(&value.to_be_bytes());
     }
@@ -1502,6 +1613,11 @@ impl<'a> BinaryReader<'a> {
     fn u16(&mut self) -> Result<u16, ProtocolError> {
         let bytes = self.bytes(2)?;
         Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn i32(&mut self) -> Result<i32, ProtocolError> {
+        let bytes = self.bytes(4)?;
+        Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
     fn u32(&mut self) -> Result<u32, ProtocolError> {

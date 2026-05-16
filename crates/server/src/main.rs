@@ -1,10 +1,11 @@
 use rdl_protocol::{
     audio_udp, now_epoch_ms, read_envelope, write_envelope, AudioSource, ClientInfo,
-    FileTransferAction, FileTransferDirection, Message, Role,
+    ClientLocation, FileTransferAction, FileTransferDirection, Message, Role,
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -87,21 +88,145 @@ struct Peer {
 
 type FileTransferKey = (String, u64, &'static str);
 
+struct GeoIpLocator {
+    reader: Option<maxminddb::Reader<Vec<u8>>>,
+    path: Option<PathBuf>,
+}
+
+impl GeoIpLocator {
+    fn open(path: Option<&Path>) -> Self {
+        let Some(path) = path else {
+            return Self {
+                reader: None,
+                path: None,
+            };
+        };
+        match maxminddb::Reader::open_readfile(path) {
+            Ok(reader) => Self {
+                reader: Some(reader),
+                path: Some(path.to_path_buf()),
+            },
+            Err(error) => {
+                eprintln!("geoip disabled: {}: {error}", path.display());
+                Self {
+                    reader: None,
+                    path: Some(path.to_path_buf()),
+                }
+            }
+        }
+    }
+
+    fn status_label(&self) -> String {
+        match (&self.reader, &self.path) {
+            (Some(_), Some(path)) => path.display().to_string(),
+            (Some(_), None) => "enabled".to_string(),
+            (None, Some(path)) => format!("disabled({})", path.display()),
+            (None, None) => "disabled".to_string(),
+        }
+    }
+
+    fn lookup_peer_addr(&self, peer_addr: &str) -> Option<ClientLocation> {
+        let reader = self.reader.as_ref()?;
+        let ip = peer_ip(peer_addr)?;
+        if !geoip_candidate(ip) {
+            return None;
+        }
+        let result = reader.lookup(ip).ok()?;
+        let city = result.decode::<maxminddb::geoip2::City>().ok()??;
+        let latitude = city.location.latitude?;
+        let longitude = city.location.longitude?;
+        let accuracy_meters = city
+            .location
+            .accuracy_radius
+            .map(|km| u32::from(km).saturating_mul(1_000))
+            .unwrap_or(0);
+        Some(ClientLocation::from_degrees(
+            latitude,
+            longitude,
+            accuracy_meters,
+            "ip",
+            geoip_label(&city),
+            now_epoch_ms(),
+        ))
+    }
+}
+
+fn peer_ip(peer_addr: &str) -> Option<IpAddr> {
+    peer_addr
+        .parse::<SocketAddr>()
+        .map(|addr| addr.ip())
+        .ok()
+        .or_else(|| peer_addr.parse::<IpAddr>().ok())
+}
+
+fn geoip_candidate(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            !(ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_multicast()
+                || ip.is_unspecified())
+        }
+        IpAddr::V6(ip) => {
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_unique_local()
+                || ((ip.segments()[0] & 0xffc0) == 0xfe80))
+        }
+    }
+}
+
+fn geoip_label(city: &maxminddb::geoip2::City<'_>) -> String {
+    let mut parts = Vec::new();
+    if let Some(name) = preferred_name(&city.city.names) {
+        parts.push(name.to_string());
+    }
+    if let Some(subdivision) = city
+        .subdivisions
+        .first()
+        .and_then(|subdivision| preferred_name(&subdivision.names))
+    {
+        if !parts.iter().any(|part| part == subdivision) {
+            parts.push(subdivision.to_string());
+        }
+    }
+    if let Some(country) = preferred_name(&city.country.names).or(city.country.iso_code) {
+        if !parts.iter().any(|part| part == country) {
+            parts.push(country.to_string());
+        }
+    }
+    if parts.is_empty() {
+        "IP geolocation".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn preferred_name<'a>(names: &'a maxminddb::geoip2::Names<'a>) -> Option<&'a str> {
+    names.simplified_chinese.or(names.english)
+}
+
 fn main() -> io::Result<()> {
     let config = Config::from_env()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    let geoip = GeoIpLocator::open(config.geoip_db_path.as_deref());
     let bind_addr = format!("{}:{}", config.ip, config.port);
     let listener = TcpListener::bind(&bind_addr)?;
     let (events_tx, events_rx) = mpsc::channel();
 
     println!(
-        "rust-desk-light server listening on {bind_addr} version={} config={}",
+        "rust-desk-light server listening on {bind_addr} version={} config={} geoip={}",
         rdl_version::display_version(),
-        config.config_path.display()
+        config.config_path.display(),
+        geoip.status_label()
     );
     start_audio_udp_relay(bind_addr.clone());
     thread::spawn(move || accept_loop(listener, events_tx));
-    event_loop(events_rx);
+    event_loop(events_rx, geoip);
     Ok(())
 }
 
@@ -258,6 +383,7 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
                         gui_available,
                         started_at_epoch_ms: now_epoch_ms(),
                         last_seen_epoch_ms: now_epoch_ms(),
+                        location: None,
                     })
                 } else {
                     None
@@ -377,7 +503,7 @@ fn server_message_is_bulk(message: &Message) -> bool {
     )
 }
 
-fn event_loop(events_rx: Receiver<ServerEvent>) {
+fn event_loop(events_rx: Receiver<ServerEvent>, geoip: GeoIpLocator) {
     let mut peers: HashMap<usize, Peer> = HashMap::new();
     let mut cancelled_file_transfers = HashSet::<FileTransferKey>::new();
 
@@ -429,6 +555,7 @@ fn event_loop(events_rx: Receiver<ServerEvent>) {
                     peer.session_token = Some(token.clone());
                     peer.client_info = info.map(|mut info| {
                         info.peer_addr = peer.peer_addr.clone();
+                        info.location = geoip.lookup_peer_addr(&peer.peer_addr);
                         info
                     });
                     peer.last_seen_epoch_ms = now_epoch_ms();
@@ -1243,30 +1370,85 @@ fn online_clients(peers: &HashMap<usize, Peer>) -> Vec<ClientInfo> {
 struct Config {
     ip: String,
     port: u16,
-    config_path: std::path::PathBuf,
+    config_path: PathBuf,
+    geoip_db_path: Option<PathBuf>,
 }
 
 impl Config {
     fn from_env() -> Result<Self, rdl_config::ConfigError> {
-        let parsed = rdl_config::parse_endpoint_args(std::env::args().skip(1))?;
+        let args = std::env::args().skip(1).collect::<Vec<_>>();
+        let parsed = rdl_config::parse_endpoint_args(args.clone())?;
         if parsed.version {
             println!("{}", rdl_version::app_version("rdl-server"));
             std::process::exit(0);
         }
         if parsed.help {
-            println!(
-                "{}",
-                rdl_config::help_text("rdl-server", rdl_config::ConfigKind::Server)
-            );
+            println!("{}", server_help_text());
             std::process::exit(0);
         }
 
         let loaded =
             rdl_config::load_endpoint_config(rdl_config::ConfigKind::Server, &parsed.overrides)?;
+        let geoip_db_path = parse_geoip_db_path(&args)?;
         Ok(Self {
             ip: loaded.endpoint.ip,
             port: loaded.endpoint.port,
             config_path: loaded.config_path,
+            geoip_db_path,
         })
+    }
+}
+
+fn parse_geoip_db_path(args: &[String]) -> Result<Option<PathBuf>, rdl_config::ConfigError> {
+    let mut value = std::env::var_os("RDL_GEOIP_DB").map(PathBuf::from);
+    let mut index = 0usize;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--geoip-db" {
+            let Some(path) = args.get(index + 1) else {
+                return Err(rdl_config::ConfigError::MissingValue("--geoip-db"));
+            };
+            value = Some(PathBuf::from(path));
+            index += 2;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("--geoip-db=") {
+            value = Some(PathBuf::from(path));
+        }
+        index += 1;
+    }
+    Ok(value)
+}
+
+fn server_help_text() -> String {
+    format!(
+        "{}\n\nGeoIP:\n  --geoip-db PATH     Optional MaxMind GeoLite2/GeoIP2 City .mmdb used to place clients on the admin map.\n  RDL_GEOIP_DB=PATH   Environment variable fallback for --geoip-db.",
+        rdl_config::help_text("rdl-server", rdl_config::ConfigKind::Server)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{geoip_candidate, peer_ip};
+    use std::net::IpAddr;
+
+    #[test]
+    fn peer_ip_parses_socket_addresses() {
+        assert_eq!(
+            peer_ip("203.0.113.10:5169"),
+            Some("203.0.113.10".parse::<IpAddr>().unwrap())
+        );
+        assert_eq!(
+            peer_ip("[2001:db8::1]:5169"),
+            Some("2001:db8::1".parse::<IpAddr>().unwrap())
+        );
+    }
+
+    #[test]
+    fn geoip_candidate_skips_local_addresses() {
+        assert!(!geoip_candidate("127.0.0.1".parse().unwrap()));
+        assert!(!geoip_candidate("10.0.0.2".parse().unwrap()));
+        assert!(!geoip_candidate("::1".parse().unwrap()));
+        assert!(!geoip_candidate("fe80::1".parse().unwrap()));
     }
 }

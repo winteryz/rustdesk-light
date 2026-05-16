@@ -6,18 +6,34 @@ IP="${RDL_IP:-127.0.0.1}"
 PORT="${RDL_PORT:-5169}"
 LOG_DIR="$ROOT_DIR/target/rdl-dev"
 
+source "$ROOT_DIR/scripts/geoip-db.sh"
+
 mkdir -p "$LOG_DIR"
 : >"$LOG_DIR/server.log"
+
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
 
 echo "Building rust-desk-light"
 cargo build --workspace --manifest-path "$ROOT_DIR/Cargo.toml"
 
-SERVER_CMD="cd '$ROOT_DIR' && ./target/debug/rdl-server --ip '$IP' --port '$PORT' 2>&1 | tee '$LOG_DIR/server.log'"
+GEOIP_DB_PATH="$(rdl_find_geoip_db "$ROOT_DIR" || true)"
+SERVER_CMD="cd $(shell_quote "$ROOT_DIR") && ./target/debug/rdl-server --ip $(shell_quote "$IP") --port $(shell_quote "$PORT")"
+if [[ -n "$GEOIP_DB_PATH" ]]; then
+  SERVER_CMD="$SERVER_CMD --geoip-db $(shell_quote "$GEOIP_DB_PATH")"
+fi
+SERVER_CMD="$SERVER_CMD 2>&1 | tee $(shell_quote "$LOG_DIR/server.log")"
 CLIENT_BIN="$ROOT_DIR/target/debug/rdl-client"
 ADMIN_BIN="$ROOT_DIR/target/debug/rdl-admin"
 
 echo "Starting rust-desk-light dev stack"
 echo "server: $IP:$PORT"
+if [[ -n "$GEOIP_DB_PATH" ]]; then
+  echo "geoip: $GEOIP_DB_PATH"
+else
+  echo "geoip: disabled (no GeoLite2-City db/archive found)"
+fi
 echo "logs: $LOG_DIR"
 echo
 

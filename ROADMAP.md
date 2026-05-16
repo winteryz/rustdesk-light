@@ -100,6 +100,7 @@ Reference direction:
 - [x] Add clearer status badges: online, offline, reconnecting, stale.
 - [x] Show client fingerprint, hostname, user, OS, and last heartbeat.
 - [x] Show client IP address, OS version, GUI availability, and full-row selection in the admin client list.
+- [x] Show approximate client locations on an admin map when the server has a GeoLite2/GeoIP2 City database.
 - [x] Add a simple command result panel.
 - [x] Allow command result text selection/copy for plain text outputs.
 - [x] Disable problematic macOS child-window maximize controls and keep child windows out of automatic tabbing.
