@@ -269,6 +269,15 @@ pub(crate) fn handle_audio_frame(
     }
 }
 
+pub(crate) fn has_active_windows(windows: &[VoiceChatWindow]) -> bool {
+    windows.iter().any(|window| {
+        matches!(
+            window.status,
+            VoiceChatStatus::Ringing | VoiceChatStatus::Live
+        )
+    })
+}
+
 pub(crate) fn render_windows(
     ctx: &egui::Context,
     windows: &mut Vec<VoiceChatWindow>,

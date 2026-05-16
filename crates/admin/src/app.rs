@@ -49,7 +49,8 @@ use std::sync::{
 use std::thread;
 use std::time::Instant;
 
-const GUI_FRAME_INTERVAL_MS: u64 = 250;
+const GUI_IDLE_FRAME_INTERVAL_MS: u64 = 250;
+const GUI_REALTIME_AUDIO_FRAME_INTERVAL_MS: u64 = 16;
 const ADMIN_INPUT_QUEUE_CAPACITY: usize = 8;
 const MAX_GUI_EVENTS_PER_FRAME: usize = 4096;
 const MAX_PENDING_AUDIO_MS: u64 = 240;
@@ -542,6 +543,11 @@ impl AdminApp {
                 ),
             },
         }
+    }
+
+    fn realtime_audio_active(&self) -> bool {
+        live_control::audio_listen::has_active_windows(&self.audio_windows)
+            || user_interaction::voice_chat::has_active_windows(&self.voice_chat_windows)
     }
 
     fn ignore_file_transfer(&self, client_id: &str, transfer_id: u64) {
@@ -1964,8 +1970,13 @@ impl eframe::App for AdminApp {
         if changed {
             ui.ctx().request_repaint();
         } else {
+            let interval_ms = if self.realtime_audio_active() {
+                GUI_REALTIME_AUDIO_FRAME_INTERVAL_MS
+            } else {
+                GUI_IDLE_FRAME_INTERVAL_MS
+            };
             ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(GUI_FRAME_INTERVAL_MS));
+                .request_repaint_after(std::time::Duration::from_millis(interval_ms));
         }
     }
 }

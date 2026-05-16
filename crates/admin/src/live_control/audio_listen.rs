@@ -131,6 +131,12 @@ pub(crate) fn handle_audio_frame(
     handle_frame(window, frame);
 }
 
+pub(crate) fn has_active_windows(windows: &[AudioListenWindow]) -> bool {
+    windows
+        .iter()
+        .any(|window| window.running.load(Ordering::Relaxed) || window.pending_since.is_some())
+}
+
 pub(crate) fn open_window(
     windows: &mut Vec<AudioListenWindow>,
     client_id: &str,
