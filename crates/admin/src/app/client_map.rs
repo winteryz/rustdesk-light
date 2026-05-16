@@ -1,3 +1,5 @@
+mod world_map_data;
+
 use super::{ui, ClientRow};
 use crate::windowing;
 use eframe::egui;
@@ -46,7 +48,7 @@ impl ClientMapWindow {
         let clients = filtered_clients(clients, client_filter);
         let viewport_id = egui::ViewportId::from_hash_of("admin_client_map");
         let builder =
-            windowing::child_viewport_builder("Client Map", [980.0, 660.0], [720.0, 520.0]);
+            windowing::child_viewport_builder("Client Map", [1040.0, 680.0], [760.0, 540.0]);
 
         ctx.show_viewport_immediate(viewport_id, builder, |ui, _class| {
             if ui.ctx().input(|input| input.viewport().close_requested()) {
@@ -102,6 +104,10 @@ struct MapCluster {
     detail: String,
     pos: egui::Pos2,
 }
+
+const MAP_ASPECT_RATIO: f32 = 2.0;
+const MAP_MIN_HEIGHT: f32 = 320.0;
+const MAP_STATS_HEIGHT: f32 = 30.0;
 
 fn render_map_contents(
     ui: &mut egui::Ui,
@@ -173,47 +179,45 @@ fn render_map_contents(
             return;
         }
 
-        ui.horizontal(|ui| {
-            ui::metric(ui, "Located clients", located.to_string());
-            ui.separator();
-            ui::metric(ui, "Filtered clients", clients.len().to_string());
-        });
-        ui.add_space(8.0);
+        let map_size = world_map_size(ui.available_size());
+        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+            render_map_stats_bar(ui, map_size.x, located, clients.len());
+            ui.add_space(8.0);
 
-        let desired_size = egui::vec2(ui.available_width(), ui.available_height().max(380.0));
-        let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
-        let painter = ui.painter_at(rect);
-        let map_rect = rect.shrink2(egui::vec2(10.0, 8.0));
-        draw_world_map(&painter, map_rect);
+            let (map_rect, response) = ui.allocate_exact_size(map_size, egui::Sense::click());
+            let painter = ui.painter_at(map_rect);
+            draw_world_map(&painter, map_rect);
 
-        let clusters = map_clusters(clients, map_rect);
-        for cluster in &clusters {
-            let selected = cluster
-                .client_ids
-                .iter()
-                .any(|id| selected_client_id == Some(id.as_str()));
-            draw_map_cluster(&painter, cluster, selected);
-        }
-
-        if let Some(pointer) = response.hover_pos() {
-            if let Some(cluster) = nearest_cluster(&clusters, pointer) {
-                response
-                    .clone()
-                    .on_hover_text(format!("{}\n{}", cluster.title, cluster.detail));
+            let clusters = map_clusters(clients, map_rect);
+            draw_map_summary(&painter, map_rect, located, clusters.len());
+            for cluster in &clusters {
+                let selected = cluster
+                    .client_ids
+                    .iter()
+                    .any(|id| selected_client_id == Some(id.as_str()));
+                draw_map_cluster(&painter, cluster, selected);
             }
-        }
 
-        if response.clicked() {
-            if let Some(pointer) = response.interact_pointer_pos() {
+            if let Some(pointer) = response.hover_pos() {
                 if let Some(cluster) = nearest_cluster(&clusters, pointer) {
-                    if let Some(client_id) = cluster.client_ids.first() {
-                        if let Ok(mut target) = selected_sink.lock() {
-                            *target = Some(client_id.clone());
+                    response
+                        .clone()
+                        .on_hover_text(format!("{}\n{}", cluster.title, cluster.detail));
+                }
+            }
+
+            if response.clicked() {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    if let Some(cluster) = nearest_cluster(&clusters, pointer) {
+                        if let Some(client_id) = cluster.client_ids.first() {
+                            if let Ok(mut target) = selected_sink.lock() {
+                                *target = Some(client_id.clone());
+                            }
                         }
                     }
                 }
             }
-        }
+        });
     });
 }
 
@@ -236,61 +240,308 @@ fn filtered_clients(clients: &[ClientRow], filter: &str) -> Vec<ClientRow> {
 }
 
 fn draw_world_map(painter: &egui::Painter, rect: egui::Rect) {
-    painter.rect_filled(rect, 8.0, egui::Color32::from_rgb(232, 240, 248));
+    draw_ocean(painter, rect);
+    draw_graticule(painter, rect);
+    draw_land_shapes(painter, rect);
+    draw_map_labels(painter, rect);
     painter.rect_stroke(
         rect,
         8.0,
         egui::Stroke::new(1.0, ui::COLOR_BORDER),
         egui::StrokeKind::Inside,
     );
-    draw_graticule(painter, rect);
-    draw_land_shapes(painter, rect);
+    painter.rect_stroke(
+        rect.shrink(1.0),
+        7.0,
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 170),
+        ),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn world_map_size(available: egui::Vec2) -> egui::Vec2 {
+    let available_height = (available.y - MAP_STATS_HEIGHT - 8.0).max(MAP_MIN_HEIGHT);
+    let width = available
+        .x
+        .min(available_height * MAP_ASPECT_RATIO)
+        .max(0.0);
+    egui::vec2(width, width / MAP_ASPECT_RATIO)
+}
+
+fn render_map_stats_bar(
+    ui: &mut egui::Ui,
+    width: f32,
+    located_count: usize,
+    filtered_count: usize,
+) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, MAP_STATS_HEIGHT), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let chip_width = ((width - 8.0) / 2.0).min(220.0).max(0.0);
+    let total_width = chip_width * 2.0 + 8.0;
+    let left = rect.center().x - total_width / 2.0;
+    let first = egui::Rect::from_min_size(
+        egui::pos2(left, rect.top()),
+        egui::vec2(chip_width, MAP_STATS_HEIGHT),
+    );
+    let second = first.translate(egui::vec2(chip_width + 8.0, 0.0));
+    draw_stat_chip(&painter, first, "Located clients", located_count);
+    draw_stat_chip(&painter, second, "Filtered clients", filtered_count);
+}
+
+fn draw_stat_chip(painter: &egui::Painter, rect: egui::Rect, label: &str, value: usize) {
+    painter.rect_filled(
+        rect,
+        8.0,
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+    );
+    painter.rect_stroke(
+        rect,
+        8.0,
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(208, 218, 229, 180),
+        ),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.left_center() + egui::vec2(12.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(11.0),
+        ui::COLOR_MUTED,
+    );
+    painter.text(
+        rect.right_center() - egui::vec2(12.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        value.to_string(),
+        egui::FontId::proportional(12.0),
+        ui::COLOR_TEXT,
+    );
+}
+
+fn draw_ocean(painter: &egui::Painter, rect: egui::Rect) {
+    painter.rect_filled(rect, 8.0, egui::Color32::from_rgb(226, 239, 249));
+    let bands = [
+        egui::Color32::from_rgba_unmultiplied(214, 231, 245, 120),
+        egui::Color32::from_rgba_unmultiplied(236, 246, 251, 120),
+        egui::Color32::from_rgba_unmultiplied(219, 235, 247, 120),
+        egui::Color32::from_rgba_unmultiplied(241, 248, 252, 120),
+    ];
+    for index in 0..12 {
+        let top = rect.top() + rect.height() * index as f32 / 12.0;
+        let bottom = rect.top() + rect.height() * (index + 1) as f32 / 12.0;
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left(), top),
+                egui::pos2(rect.right(), bottom),
+            ),
+            0.0,
+            bands[index % bands.len()],
+        );
+    }
 }
 
 fn draw_graticule(painter: &egui::Painter, rect: egui::Rect) {
-    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(206, 218, 230));
-    for lon in (-180..=180).step_by(60) {
+    for lon in (-180..=180).step_by(30) {
         let x = map_project(rect, 0.0, lon as f64).x;
+        let major = lon % 60 == 0;
         painter.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            stroke,
+            graticule_stroke(major),
         );
     }
-    for lat in (-60..=60).step_by(30) {
+    for lat in (-60..=60).step_by(15) {
         let y = map_project(rect, lat as f64, 0.0).y;
+        let major = lat % 30 == 0;
         painter.line_segment(
             [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-            stroke,
+            graticule_stroke(major),
         );
+    }
+
+    let equator_y = map_project(rect, 0.0, 0.0).y;
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), equator_y),
+            egui::pos2(rect.right(), equator_y),
+        ],
+        egui::Stroke::new(1.2, egui::Color32::from_rgba_unmultiplied(95, 132, 154, 80)),
+    );
+
+    for lon in (-120_i32..=120_i32).step_by(60) {
+        let x = map_project(rect, 0.0, lon as f64).x;
+        let label = if lon == 0 {
+            "0".to_string()
+        } else if lon < 0 {
+            format!("{}W", lon.abs())
+        } else {
+            format!("{lon}E")
+        };
+        painter.text(
+            egui::pos2(x, rect.bottom() - 8.0),
+            egui::Align2::CENTER_BOTTOM,
+            label,
+            egui::FontId::proportional(9.0),
+            egui::Color32::from_rgba_unmultiplied(74, 92, 110, 120),
+        );
+    }
+}
+
+fn graticule_stroke(major: bool) -> egui::Stroke {
+    if major {
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(112, 145, 168, 70),
+        )
+    } else {
+        egui::Stroke::new(
+            0.8,
+            egui::Color32::from_rgba_unmultiplied(112, 145, 168, 38),
+        )
     }
 }
 
 fn draw_land_shapes(painter: &egui::Painter, rect: egui::Rect) {
-    let fill = egui::Color32::from_rgb(214, 224, 213);
-    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(174, 190, 174));
-    for polygon in WORLD_LAND_POLYGONS {
-        let points = polygon
-            .iter()
-            .map(|(lon, lat)| map_project(rect, *lat, *lon))
-            .collect::<Vec<_>>();
-        painter.add(egui::Shape::convex_polygon(points, fill, stroke));
+    draw_land_mesh(
+        painter,
+        rect.translate(egui::vec2(0.0, 1.6)),
+        egui::Color32::from_rgba_unmultiplied(69, 88, 80, 32),
+    );
+    draw_land_mesh(painter, rect, egui::Color32::from_rgb(221, 231, 214));
+
+    let coast_glow = egui::Stroke::new(
+        2.2,
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 95),
+    );
+    let coast = egui::Stroke::new(
+        0.9,
+        egui::Color32::from_rgba_unmultiplied(126, 151, 126, 170),
+    );
+    for polygon in world_map_data::LAND_POLYGONS {
+        let points = projected_polygon_points(rect, polygon.points);
+        painter.add(egui::Shape::closed_line(points.clone(), coast_glow));
+        painter.add(egui::Shape::closed_line(points, coast));
     }
+}
+
+fn draw_land_mesh(painter: &egui::Painter, rect: egui::Rect, fill: egui::Color32) {
+    let mut mesh = egui::Mesh::default();
+    let point_count = world_map_data::LAND_POLYGONS
+        .iter()
+        .map(|polygon| polygon.points.len())
+        .sum();
+    let triangle_count = world_map_data::LAND_POLYGONS
+        .iter()
+        .map(|polygon| polygon.triangles.len())
+        .sum();
+    mesh.reserve_vertices(point_count);
+    mesh.reserve_triangles(triangle_count);
+
+    for polygon in world_map_data::LAND_POLYGONS {
+        let base = mesh.vertices.len() as u32;
+        for (lon, lat) in polygon.points {
+            mesh.colored_vertex(map_project(rect, *lat as f64, *lon as f64), fill);
+        }
+        for [a, b, c] in polygon.triangles {
+            mesh.add_triangle(base + *a as u32, base + *b as u32, base + *c as u32);
+        }
+    }
+
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+fn projected_polygon_points(rect: egui::Rect, polygon: &[(f32, f32)]) -> Vec<egui::Pos2> {
+    polygon
+        .iter()
+        .map(|(lon, lat)| map_project(rect, *lat as f64, *lon as f64))
+        .collect()
+}
+
+fn draw_map_labels(painter: &egui::Painter, rect: egui::Rect) {
+    for label in MAP_LABELS {
+        let pos = map_project(rect, label.latitude, label.longitude);
+        painter.text(
+            pos,
+            egui::Align2::CENTER_CENTER,
+            label.text,
+            egui::FontId::proportional(label.size),
+            egui::Color32::from_rgba_unmultiplied(76, 91, 77, label.alpha),
+        );
+    }
+}
+
+fn draw_map_summary(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    located_count: usize,
+    cluster_count: usize,
+) {
+    let summary = if located_count == cluster_count {
+        format!("{located_count} locations")
+    } else {
+        format!("{located_count} clients / {cluster_count} clusters")
+    };
+    let badge_rect = egui::Rect::from_min_size(
+        rect.left_top() + egui::vec2(14.0, 14.0),
+        egui::vec2(190.0, 34.0),
+    );
+    painter.rect_filled(
+        badge_rect,
+        8.0,
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 218),
+    );
+    painter.rect_stroke(
+        badge_rect,
+        8.0,
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(188, 202, 214, 165),
+        ),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        badge_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        summary,
+        egui::FontId::proportional(12.0),
+        ui::COLOR_TEXT,
+    );
 }
 
 fn draw_map_cluster(painter: &egui::Painter, cluster: &MapCluster, selected: bool) {
     let count = cluster.client_ids.len();
-    let radius = if count > 1 { 13.0 } else { 8.0 };
+    let radius = if count > 1 { 14.0 } else { 8.5 };
     let fill = if selected {
         ui::COLOR_ACCENT
     } else {
         ui::COLOR_GOOD
     };
+    painter.circle_filled(
+        cluster.pos,
+        radius + 8.0,
+        egui::Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), 32),
+    );
+    painter.circle_filled(
+        cluster.pos + egui::vec2(0.0, 1.5),
+        radius + 2.0,
+        egui::Color32::from_rgba_unmultiplied(25, 36, 48, 45),
+    );
     painter.circle_filled(cluster.pos, radius, fill);
     painter.circle_stroke(
         cluster.pos,
         radius,
-        egui::Stroke::new(2.0, ui::COLOR_PANEL.gamma_multiply(0.95)),
+        egui::Stroke::new(2.2, ui::COLOR_PANEL.gamma_multiply(0.98)),
     );
+    if selected {
+        painter.circle_stroke(
+            cluster.pos,
+            radius + 4.0,
+            egui::Stroke::new(2.0, ui::COLOR_ACCENT.gamma_multiply(0.55)),
+        );
+    }
     if count > 1 {
         painter.text(
             cluster.pos,
@@ -330,6 +581,7 @@ fn map_clusters(clients: &[ClientRow], rect: egui::Rect) -> Vec<MapCluster> {
             cluster.client_ids.push(row.info.id.clone());
             cluster.title = format!("{} clients", cluster.client_ids.len());
             cluster.detail.push('\n');
+            cluster.detail.push('\n');
             cluster.detail.push_str(&detail);
         } else {
             clusters.push(MapCluster {
@@ -364,24 +616,59 @@ fn nearest_cluster(clusters: &[MapCluster], pointer: egui::Pos2) -> Option<&MapC
 }
 
 fn map_point_detail(row: &ClientRow) -> String {
-    let Some(location) = row.info.location.as_ref() else {
-        return row.info.id.clone();
-    };
-    let accuracy = if location.accuracy_meters == 0 {
-        "unknown accuracy".to_string()
-    } else if location.accuracy_meters >= 1_000 {
-        format!("~{} km", location.accuracy_meters / 1_000)
-    } else {
-        format!("~{} m", location.accuracy_meters)
-    };
+    let location = row
+        .info
+        .location
+        .as_ref()
+        .map(|location| {
+            format!(
+                "{} ({}, {})",
+                location.label,
+                location.source,
+                map_accuracy(location.accuracy_meters)
+            )
+        })
+        .unwrap_or_else(|| "-".to_string());
+
     format!(
-        "{} / {} / {} / {} / {}",
+        "id: {}\nip: {}\nhost: {}\nuser: {}\nos: {}\nlocation: {}",
         ui::compact_id(&row.info.id),
-        row.info.username,
-        row.info.os,
-        location.label,
-        accuracy
+        client_peer_ip(&row.info.peer_addr),
+        display_value(&row.info.hostname),
+        display_value(&row.info.username),
+        display_value(&row.info.os),
+        location
     )
+}
+
+fn map_accuracy(accuracy_meters: u32) -> String {
+    if accuracy_meters == 0 {
+        "unknown accuracy".to_string()
+    } else if accuracy_meters >= 1_000 {
+        format!("~{} km", accuracy_meters / 1_000)
+    } else {
+        format!("~{} m", accuracy_meters)
+    }
+}
+
+fn client_peer_ip(peer_addr: &str) -> String {
+    let peer_addr = peer_addr.trim();
+    if peer_addr.is_empty() {
+        return "-".to_string();
+    }
+    peer_addr
+        .parse::<std::net::SocketAddr>()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| peer_addr.to_string())
+}
+
+fn display_value(value: &str) -> &str {
+    let value = value.trim();
+    if value.is_empty() {
+        "-"
+    } else {
+        value
+    }
 }
 
 fn map_project(rect: egui::Rect, latitude: f64, longitude: f64) -> egui::Pos2 {
@@ -390,58 +677,55 @@ fn map_project(rect: egui::Rect, latitude: f64, longitude: f64) -> egui::Pos2 {
     egui::pos2(x, y)
 }
 
-const WORLD_LAND_POLYGONS: &[&[(f64, f64)]] = &[
-    &[
-        (-168.0, 72.0),
-        (-130.0, 72.0),
-        (-100.0, 58.0),
-        (-62.0, 52.0),
-        (-58.0, 28.0),
-        (-96.0, 16.0),
-        (-118.0, 24.0),
-        (-126.0, 48.0),
-        (-168.0, 54.0),
-    ],
-    &[
-        (-84.0, 13.0),
-        (-50.0, 10.0),
-        (-36.0, -16.0),
-        (-52.0, -55.0),
-        (-75.0, -47.0),
-        (-81.0, -18.0),
-    ],
-    &[
-        (-18.0, 36.0),
-        (34.0, 36.0),
-        (52.0, 8.0),
-        (35.0, -35.0),
-        (12.0, -35.0),
-        (-16.0, 4.0),
-    ],
-    &[
-        (-12.0, 72.0),
-        (44.0, 70.0),
-        (66.0, 54.0),
-        (34.0, 36.0),
-        (-10.0, 36.0),
-        (-24.0, 56.0),
-    ],
-    &[
-        (34.0, 36.0),
-        (74.0, 55.0),
-        (138.0, 52.0),
-        (164.0, 62.0),
-        (178.0, 42.0),
-        (138.0, 8.0),
-        (104.0, 2.0),
-        (76.0, 8.0),
-        (52.0, 24.0),
-    ],
-    &[
-        (112.0, -10.0),
-        (154.0, -12.0),
-        (154.0, -38.0),
-        (114.0, -44.0),
-        (108.0, -26.0),
-    ],
+struct MapLabel {
+    text: &'static str,
+    latitude: f64,
+    longitude: f64,
+    size: f32,
+    alpha: u8,
+}
+
+const MAP_LABELS: &[MapLabel] = &[
+    MapLabel {
+        text: "North America",
+        latitude: 47.0,
+        longitude: -108.0,
+        size: 11.0,
+        alpha: 92,
+    },
+    MapLabel {
+        text: "South America",
+        latitude: -19.0,
+        longitude: -62.0,
+        size: 11.0,
+        alpha: 88,
+    },
+    MapLabel {
+        text: "Europe",
+        latitude: 51.0,
+        longitude: 17.0,
+        size: 10.5,
+        alpha: 84,
+    },
+    MapLabel {
+        text: "Africa",
+        latitude: 7.0,
+        longitude: 21.0,
+        size: 11.0,
+        alpha: 90,
+    },
+    MapLabel {
+        text: "Asia",
+        latitude: 42.0,
+        longitude: 88.0,
+        size: 11.0,
+        alpha: 92,
+    },
+    MapLabel {
+        text: "Oceania",
+        latitude: -27.0,
+        longitude: 136.0,
+        size: 10.5,
+        alpha: 82,
+    },
 ];
