@@ -21,7 +21,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const INITIAL_RECONNECT_DELAY_MS: u64 = 500;
 const MAX_RECONNECT_DELAY_MS: u64 = 8_000;
@@ -31,6 +31,7 @@ const NETWORK_IDLE_SLEEP_MS: u64 = 4;
 const FILE_TRANSFER_CHUNK_SIZE: usize = 512 * 1024;
 const ADMIN_INPUT_QUEUE_CAPACITY: usize = 8;
 const MAX_GUI_EVENTS_PER_FRAME: usize = 512;
+const PERFORMANCE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env();
@@ -577,6 +578,8 @@ struct CommandResultWindow {
     open: bool,
     close_requested: Arc<AtomicBool>,
     refresh_requested: Arc<AtomicBool>,
+    auto_refresh_enabled: Arc<AtomicBool>,
+    last_auto_refresh_at: Option<Instant>,
     process_kill_requested: Arc<Mutex<Option<String>>>,
     table_filter: Arc<Mutex<String>>,
     table_sort: Arc<Mutex<Option<TableSort>>>,
@@ -1087,6 +1090,8 @@ impl AdminApp {
             open: true,
             close_requested: Arc::new(AtomicBool::new(false)),
             refresh_requested: Arc::new(AtomicBool::new(false)),
+            auto_refresh_enabled: Arc::new(AtomicBool::new(false)),
+            last_auto_refresh_at: None,
             process_kill_requested: Arc::new(Mutex::new(None)),
             table_filter: Arc::new(Mutex::new(String::new())),
             table_sort: Arc::new(Mutex::new(None)),
@@ -1182,6 +1187,22 @@ impl AdminApp {
                 && window.command == command
                 && matches!(window.status, CommandResultStatus::Pending)
         }) {
+            if window.command == CommandKind::PerformanceMonitor
+                && window.close_requested.load(Ordering::Relaxed)
+            {
+                window.status = if accepted {
+                    CommandResultStatus::Accepted
+                } else {
+                    CommandResultStatus::Failed
+                };
+                window.detail = detail;
+                window.hostname = hostname;
+                window.username = username;
+                window.open = false;
+                window.auto_refresh_enabled.store(false, Ordering::Relaxed);
+                window.last_auto_refresh_at = None;
+                return;
+            }
             update_command_window(window, accepted, detail, hostname, username);
             return;
         }
@@ -1222,6 +1243,8 @@ impl AdminApp {
             open: true,
             close_requested: Arc::new(AtomicBool::new(false)),
             refresh_requested: Arc::new(AtomicBool::new(false)),
+            auto_refresh_enabled: Arc::new(AtomicBool::new(false)),
+            last_auto_refresh_at: None,
             process_kill_requested: Arc::new(Mutex::new(None)),
             table_filter: Arc::new(Mutex::new(String::new())),
             table_sort: Arc::new(Mutex::new(None)),
@@ -1566,24 +1589,32 @@ impl AdminApp {
 
     fn render_command_windows(&mut self, ctx: &egui::Context) {
         let mut pending_logs = Vec::new();
+        let now = Instant::now();
         for window in &mut self.command_windows {
             if window.close_requested.load(Ordering::Relaxed) {
                 window.open = false;
+                window.auto_refresh_enabled.store(false, Ordering::Relaxed);
+                window.last_auto_refresh_at = None;
             }
             if window.refresh_requested.swap(false, Ordering::Relaxed) {
-                let _ = self.input_tx.send(AdminInput::Command {
-                    target_id: window.client_id.clone(),
-                    command: window.command.clone(),
-                    payload: String::new(),
-                });
-                window.status = CommandResultStatus::Pending;
-                window.detail = "Refreshing command result...".to_string();
-                window.open = true;
-                pending_logs.push(format!(
-                    "refresh command={} to {}",
-                    window.command.as_str(),
-                    window.client_id
-                ));
+                refresh_command_window(
+                    &self.input_tx,
+                    window,
+                    "Refreshing command result...",
+                    "refresh",
+                    now,
+                    &mut pending_logs,
+                );
+            }
+            if performance_auto_refresh_due(window, now) {
+                refresh_command_window(
+                    &self.input_tx,
+                    window,
+                    "Auto refreshing performance monitor...",
+                    "auto_refresh",
+                    now,
+                    &mut pending_logs,
+                );
             }
             let process_id = window
                 .process_kill_requested
@@ -1623,6 +1654,7 @@ impl AdminApp {
             let detail = window.detail.clone();
             let close_requested = window.close_requested.clone();
             let refresh_requested = window.refresh_requested.clone();
+            let auto_refresh_enabled = window.auto_refresh_enabled.clone();
             let process_kill_requested = window.process_kill_requested.clone();
             let table_filter = window.table_filter.clone();
             let table_sort = window.table_sort.clone();
@@ -1658,6 +1690,7 @@ impl AdminApp {
                                             &table_sort,
                                             &table_selected_row,
                                             &refresh_requested,
+                                            &auto_refresh_enabled,
                                             matches!(status, CommandResultStatus::Pending),
                                             &process_kill_requested,
                                         );
@@ -2185,6 +2218,52 @@ fn update_command_window(
     window.open = true;
 }
 
+fn refresh_command_window(
+    input_tx: &SyncSender<AdminInput>,
+    window: &mut CommandResultWindow,
+    detail: &str,
+    log_prefix: &str,
+    now: Instant,
+    pending_logs: &mut Vec<String>,
+) {
+    let _ = input_tx.send(AdminInput::Command {
+        target_id: window.client_id.clone(),
+        command: window.command.clone(),
+        payload: String::new(),
+    });
+    window.status = CommandResultStatus::Pending;
+    window.detail = detail.to_string();
+    window.open = true;
+    if window.command == CommandKind::PerformanceMonitor {
+        window.last_auto_refresh_at = Some(now);
+    }
+    pending_logs.push(format!(
+        "{log_prefix} command={} to {}",
+        window.command.as_str(),
+        window.client_id
+    ));
+}
+
+fn performance_auto_refresh_due(window: &mut CommandResultWindow, now: Instant) -> bool {
+    if window.command != CommandKind::PerformanceMonitor || !window.open {
+        window.last_auto_refresh_at = None;
+        return false;
+    }
+    if !window.auto_refresh_enabled.load(Ordering::Relaxed) {
+        window.last_auto_refresh_at = None;
+        return false;
+    }
+    if matches!(window.status, CommandResultStatus::Pending) {
+        return false;
+    }
+
+    let Some(last_refresh) = window.last_auto_refresh_at else {
+        window.last_auto_refresh_at = Some(now);
+        return false;
+    };
+    now.duration_since(last_refresh) >= PERFORMANCE_AUTO_REFRESH_INTERVAL
+}
+
 fn render_command_window_status_bar(
     ui: &mut egui::Ui,
     status: &CommandResultStatus,
@@ -2295,6 +2374,7 @@ fn render_command_result(
     table_sort: &Arc<Mutex<Option<TableSort>>>,
     table_selected_row: &Arc<Mutex<Option<String>>>,
     refresh_requested: &Arc<AtomicBool>,
+    auto_refresh_enabled: &Arc<AtomicBool>,
     refresh_in_flight: bool,
     process_kill_requested: &Arc<Mutex<Option<String>>>,
 ) {
@@ -2317,6 +2397,15 @@ fn render_command_result(
             );
             return;
         }
+    }
+    if matches!(command, CommandKind::PerformanceMonitor) {
+        render_performance_monitor_toolbar(
+            ui,
+            refresh_requested,
+            auto_refresh_enabled,
+            refresh_in_flight,
+        );
+        ui.add_space(8.0);
     }
     if matches!(command, CommandKind::Camera) {
         render_camera_result(ui, detail);
@@ -2400,7 +2489,13 @@ fn render_table_toolbar(
 
     ui.horizontal(|ui| {
         ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
-        ui.label(egui::RichText::new("Filter").size(12.0).color(COLOR_MUTED));
+        ui.allocate_ui_with_layout(
+            egui::vec2(38.0, TOOLBAR_CONTROL_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(egui::RichText::new("Filter").size(12.0).color(COLOR_MUTED));
+            },
+        );
         let response = ui.add_sized(
             [240.0, TOOLBAR_CONTROL_HEIGHT],
             egui::TextEdit::singleline(&mut filter)
@@ -2426,9 +2521,44 @@ fn render_table_toolbar(
     });
 }
 
+fn render_performance_monitor_toolbar(
+    ui: &mut egui::Ui,
+    refresh_requested: &Arc<AtomicBool>,
+    auto_refresh_enabled: &Arc<AtomicBool>,
+    refresh_in_flight: bool,
+) {
+    let mut auto_refresh = auto_refresh_enabled.load(Ordering::Relaxed);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
+        let label = if refresh_in_flight {
+            "Refreshing..."
+        } else {
+            "Refresh"
+        };
+        if ui
+            .add_enabled(!refresh_in_flight, egui::Button::new(label))
+            .clicked()
+        {
+            refresh_requested.store(true, Ordering::Relaxed);
+        }
+        if ui
+            .checkbox(&mut auto_refresh, "Auto refresh (5s)")
+            .changed()
+        {
+            auto_refresh_enabled.store(auto_refresh, Ordering::Relaxed);
+        }
+    });
+}
+
 struct ResultTable {
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
+}
+
+#[derive(Clone)]
+struct DisplayTableRow {
+    source_index: usize,
+    cells: Vec<String>,
 }
 
 fn parse_result_table(detail: &str) -> Option<ResultTable> {
@@ -2523,7 +2653,8 @@ fn render_result_table(
         .unwrap_or(None);
     let mut rows = filtered_table_rows(table, &filter);
     sort_table_rows(&mut rows, sort);
-    let widths = table_column_widths(command, &table.headers, &rows, ui.available_width());
+    let row_cells = rows.iter().map(|row| row.cells.clone()).collect::<Vec<_>>();
+    let widths = table_column_widths(command, &table.headers, &row_cells, ui.available_width());
     let alignments = table_column_alignments(command, &table.headers);
 
     egui::Frame::default()
@@ -2535,7 +2666,7 @@ fn render_result_table(
                 let row_key = table_row_key(row);
                 table_row(
                     ui,
-                    row,
+                    &row.cells,
                     &widths,
                     &alignments,
                     false,
@@ -2543,7 +2674,7 @@ fn render_result_table(
                     selected_row.as_deref() == Some(row_key.as_str()),
                     &row_key,
                     table_selected_row,
-                    process_row_pid(command, &table.headers, row),
+                    process_row_pid(command, &table.headers, &row.cells),
                     process_kill_requested,
                 );
             }
@@ -2562,28 +2693,42 @@ fn render_result_table(
     }
 }
 
-fn filtered_table_rows(table: &ResultTable, filter: &str) -> Vec<Vec<String>> {
+fn filtered_table_rows(table: &ResultTable, filter: &str) -> Vec<DisplayTableRow> {
     table
         .rows
         .iter()
+        .enumerate()
         .filter(|row| {
+            let row = row.1;
             filter.is_empty()
                 || row
                     .iter()
                     .any(|cell| cell.to_ascii_lowercase().contains(filter))
         })
-        .cloned()
+        .map(|(source_index, cells)| DisplayTableRow {
+            source_index,
+            cells: cells.clone(),
+        })
         .collect()
 }
 
-fn sort_table_rows(rows: &mut [Vec<String>], sort: Option<TableSort>) {
+fn sort_table_rows(rows: &mut [DisplayTableRow], sort: Option<TableSort>) {
     let Some(sort) = sort else {
         return;
     };
     rows.sort_by(|left, right| {
-        let left = left.get(sort.column).map(String::as_str).unwrap_or("");
-        let right = right.get(sort.column).map(String::as_str).unwrap_or("");
-        let ordering = compare_table_cells(left, right);
+        let left_cell = left
+            .cells
+            .get(sort.column)
+            .map(String::as_str)
+            .unwrap_or("");
+        let right_cell = right
+            .cells
+            .get(sort.column)
+            .map(String::as_str)
+            .unwrap_or("");
+        let ordering = compare_table_cells(left_cell, right_cell)
+            .then_with(|| left.source_index.cmp(&right.source_index));
         if sort.ascending {
             ordering
         } else {
@@ -2601,8 +2746,8 @@ fn compare_table_cells(left: &str, right: &str) -> std::cmp::Ordering {
     }
 }
 
-fn table_row_key(row: &[String]) -> String {
-    row.join("\t")
+fn table_row_key(row: &DisplayTableRow) -> String {
+    format!("{}\t{}", row.source_index, row.cells.join("\t"))
 }
 
 fn table_header_row(
@@ -2993,8 +3138,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn table_row_keys_stay_unique_for_duplicate_display_values() {
+        let table = ResultTable {
+            headers: strings(["Time", "Level", "Message"]),
+            rows: vec![
+                strings(["2026-05-16 12:00:00", "Info", "same"]),
+                strings(["2026-05-16 12:00:00", "Info", "same"]),
+            ],
+        };
+
+        let rows = filtered_table_rows(&table, "");
+
+        assert_eq!(rows.len(), 2);
+        assert_ne!(table_row_key(&rows[0]), table_row_key(&rows[1]));
+    }
+
+    #[test]
+    fn table_row_keys_stay_unique_after_sorting_duplicate_times() {
+        let table = ResultTable {
+            headers: strings(["Time", "Level", "Message"]),
+            rows: vec![
+                strings(["2026-05-16 12:00:00", "Info", "first"]),
+                strings(["2026-05-16 12:00:00", "Warn", "second"]),
+                strings(["2026-05-16 12:01:00", "Info", "third"]),
+            ],
+        };
+        let mut rows = filtered_table_rows(&table, "");
+
+        sort_table_rows(
+            &mut rows,
+            Some(TableSort {
+                column: 0,
+                ascending: true,
+            }),
+        );
+        let keys = rows.iter().map(table_row_key).collect::<Vec<_>>();
+        let unique = keys.iter().collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(keys.len(), unique.len());
+    }
+
+    #[test]
+    fn performance_auto_refresh_waits_for_interval() {
+        let now = Instant::now();
+        let mut window = test_command_window(CommandKind::PerformanceMonitor);
+        window.auto_refresh_enabled.store(true, Ordering::Relaxed);
+
+        assert!(!performance_auto_refresh_due(&mut window, now));
+        assert!(!performance_auto_refresh_due(
+            &mut window,
+            now + PERFORMANCE_AUTO_REFRESH_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(performance_auto_refresh_due(
+            &mut window,
+            now + PERFORMANCE_AUTO_REFRESH_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn performance_auto_refresh_stops_when_window_closes() {
+        let now = Instant::now();
+        let mut window = test_command_window(CommandKind::PerformanceMonitor);
+        window.auto_refresh_enabled.store(true, Ordering::Relaxed);
+        window.last_auto_refresh_at = Some(now - PERFORMANCE_AUTO_REFRESH_INTERVAL);
+        window.open = false;
+
+        assert!(!performance_auto_refresh_due(&mut window, now));
+        assert!(window.last_auto_refresh_at.is_none());
+    }
+
     fn strings<const N: usize>(values: [&str; N]) -> Vec<String> {
         values.into_iter().map(str::to_string).collect()
+    }
+
+    fn test_command_window(command: CommandKind) -> CommandResultWindow {
+        CommandResultWindow {
+            id: 1,
+            client_id: "client".to_string(),
+            hostname: "host".to_string(),
+            username: "user".to_string(),
+            command,
+            status: CommandResultStatus::Accepted,
+            detail: String::new(),
+            open: true,
+            close_requested: Arc::new(AtomicBool::new(false)),
+            refresh_requested: Arc::new(AtomicBool::new(false)),
+            auto_refresh_enabled: Arc::new(AtomicBool::new(false)),
+            last_auto_refresh_at: None,
+            process_kill_requested: Arc::new(Mutex::new(None)),
+            table_filter: Arc::new(Mutex::new(String::new())),
+            table_sort: Arc::new(Mutex::new(None)),
+            table_selected_row: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
