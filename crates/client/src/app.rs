@@ -220,6 +220,8 @@ fn client_connection_once(
     let voice_chat_mic_muted = Arc::new(AtomicBool::new(false));
     let mut voice_chat_speaker_muted = false;
     let mut voice_chat_player: Option<crate::live_control::AudioOutputPlayer> = None;
+    let mut voice_chat_admin_generation: Option<u64> = None;
+    let mut voice_chat_last_admin_seq = 0_u64;
     loop {
         while let Ok(input) = input_rx.try_recv() {
             match input {
@@ -250,7 +252,9 @@ fn client_connection_once(
                                     client_id: identity.id.clone(),
                                     command: CommandKind::VoiceChat,
                                     accepted: true,
-                                    detail: "voice_chat_accepted\nmessage=accepted".to_string(),
+                                    detail: format!(
+                                        "voice_chat_accepted\nmessage=accepted\ngeneration={generation}"
+                                    ),
                                 },
                             );
                             event_sink.send(ClientEvent::VoiceChatConnected);
@@ -292,6 +296,8 @@ fn client_connection_once(
                     voice_chat_stream.running.store(false, Ordering::Relaxed);
                     voice_chat_stream.generation.fetch_add(1, Ordering::Relaxed);
                     voice_chat_player = None;
+                    voice_chat_admin_generation = None;
+                    voice_chat_last_admin_seq = 0;
                     let _ = queue_message(
                         &out_tx,
                         &session_token,
@@ -310,6 +316,8 @@ fn client_connection_once(
                     voice_chat_stream.running.store(false, Ordering::Relaxed);
                     voice_chat_stream.generation.fetch_add(1, Ordering::Relaxed);
                     voice_chat_player = None;
+                    voice_chat_admin_generation = None;
+                    voice_chat_last_admin_seq = 0;
                     let _ = queue_message(
                         &out_tx,
                         &session_token,
@@ -367,6 +375,8 @@ fn client_connection_once(
                     });
                 }
                 if command == CommandKind::VoiceChat {
+                    voice_chat_admin_generation = payload_generation(&payload);
+                    voice_chat_last_admin_seq = 0;
                     if gui_mode {
                         event_sink.send(ClientEvent::VoiceChatInvite);
                     } else {
@@ -713,6 +723,8 @@ fn client_connection_once(
                         voice_chat_stream.running.store(false, Ordering::Relaxed);
                         voice_chat_stream.generation.fetch_add(1, Ordering::Relaxed);
                         voice_chat_player = None;
+                        voice_chat_admin_generation = None;
+                        voice_chat_last_admin_seq = 0;
                         let _ = queue_message(
                             &out_tx,
                             &session_token,
@@ -732,6 +744,7 @@ fn client_connection_once(
             },
             Message::AudioFrame {
                 source,
+                seq,
                 sample_rate,
                 channels,
                 format,
@@ -739,6 +752,15 @@ fn client_connection_once(
                 ..
             } => {
                 if source == AudioSource::VoiceChat && !voice_chat_speaker_muted {
+                    if let Some(generation) = voice_chat_admin_generation {
+                        if sequence_generation(seq) != generation {
+                            continue;
+                        }
+                    }
+                    if seq <= voice_chat_last_admin_seq {
+                        continue;
+                    }
+                    voice_chat_last_admin_seq = seq;
                     if let Some(player) = &voice_chat_player {
                         if let Err(error) =
                             player.push_frame(sample_rate, channels, &format, &bytes)
@@ -1503,7 +1525,7 @@ fn audio_stream_loop(
             command: CommandKind::AudioListen,
             accepted: true,
             detail: format!(
-                "audio_listen_started\nsample_rate={}\nchannels={}\nformat={}",
+                "audio_listen_started\nsample_rate={}\nchannels={}\nformat={}\ngeneration={generation}",
                 input_stream.sample_rate, input_stream.channels, input_stream.format
             ),
         },
@@ -1650,6 +1672,18 @@ fn video_control_value(payload: &str, key: &str) -> Option<String> {
     remote_desktop_value(payload, key)
 }
 
+fn payload_value(payload: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    payload
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(|value| value.trim().to_string())
+}
+
+fn payload_generation(payload: &str) -> Option<u64> {
+    payload_value(payload, "generation").and_then(|value| value.parse::<u64>().ok())
+}
+
 fn video_source_command(source: &VideoSource) -> CommandKind {
     match source {
         VideoSource::RemoteDesktop => CommandKind::RemoteDesktop,
@@ -1659,6 +1693,10 @@ fn video_source_command(source: &VideoSource) -> CommandKind {
 
 fn stream_sequence_base(generation: u64) -> u64 {
     generation.saturating_mul(1_u64 << 32).max(1)
+}
+
+fn sequence_generation(seq: u64) -> u64 {
+    seq >> 32
 }
 
 fn queue_message(

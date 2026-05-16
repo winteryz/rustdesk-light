@@ -14,6 +14,7 @@ const COLOR_MUTED: egui::Color32 = egui::Color32::from_rgb(96, 108, 124);
 const COLOR_GOOD: egui::Color32 = egui::Color32::from_rgb(24, 135, 84);
 const COLOR_BAD: egui::Color32 = egui::Color32::from_rgb(190, 58, 58);
 const COLOR_WARN: egui::Color32 = egui::Color32::from_rgb(179, 116, 28);
+const VOICE_CHAT_REPAINT_MS: u64 = 20;
 
 pub(crate) struct VoiceChatWindow {
     status: VoiceChatStatus,
@@ -199,7 +200,8 @@ pub(crate) fn render_window(
                 });
             });
         if matches!(status, VoiceChatStatus::Live | VoiceChatStatus::Connecting) {
-            ui.ctx().request_repaint_after(Duration::from_millis(250));
+            ui.ctx()
+                .request_repaint_after(Duration::from_millis(VOICE_CHAT_REPAINT_MS));
         }
     });
 

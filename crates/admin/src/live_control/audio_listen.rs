@@ -34,6 +34,8 @@ pub(crate) struct AudioListenWindow {
     open: bool,
     close_requested: Arc<AtomicBool>,
     player: Option<AudioPlayer>,
+    inbound_generation: Option<u64>,
+    last_incoming_seq: u64,
 }
 
 #[derive(Clone)]
@@ -114,6 +116,15 @@ pub(crate) fn handle_audio_frame(
     if !window.running.load(Ordering::Relaxed) {
         return;
     }
+    if let Some(generation) = window.inbound_generation {
+        if sequence_generation(frame.seq) != generation {
+            return;
+        }
+    }
+    if frame.seq <= window.last_incoming_seq {
+        return;
+    }
+    window.last_incoming_seq = frame.seq;
     if let Some(player) = &window.player {
         player.push_frame(&frame);
     }
@@ -153,6 +164,8 @@ pub(crate) fn open_window(
         open: true,
         close_requested: Arc::new(AtomicBool::new(false)),
         player: None,
+        inbound_generation: None,
+        last_incoming_seq: 0,
     };
     window.queue_devices();
     windows.push(window);
@@ -204,9 +217,14 @@ pub(crate) fn handle_ack(
                 "Select an input device and click Start".to_string()
             };
         }
-        AudioResponse::Started(message) => {
+        AudioResponse::Started {
+            message,
+            generation,
+        } => {
             window.status = AudioStatus::Pending;
             window.notice = message;
+            window.inbound_generation = generation;
+            window.last_incoming_seq = 0;
         }
         AudioResponse::Stopped => stop_listen(window, "Stopped"),
         AudioResponse::Error(message) => {
@@ -535,6 +553,8 @@ fn stop_listen(window: &mut AudioListenWindow, notice: &str) {
     window.outbound.clear();
     window.pending_since = None;
     window.player = None;
+    window.inbound_generation = None;
+    window.last_incoming_seq = 0;
     window.stats.peak = 0.0;
     window.status = AudioStatus::Ready;
     window.notice = notice.to_string();
@@ -773,9 +793,16 @@ fn mapped_channel_sample(
     sum / input_channels as f32
 }
 
+fn sequence_generation(seq: u64) -> u64 {
+    seq >> 32
+}
+
 enum AudioResponse {
     Devices(Vec<AudioDevice>),
-    Started(String),
+    Started {
+        message: String,
+        generation: Option<u64>,
+    },
     Stopped,
     Error(String),
     Other(String),
@@ -786,7 +813,11 @@ impl AudioResponse {
         let mut lines = detail.lines();
         match lines.next().unwrap_or_default().trim() {
             "audio_listen_devices" => Self::Devices(parse_devices(lines)),
-            "audio_listen_started" => Self::Started("Client accepted audio listen".to_string()),
+            "audio_listen_started" => Self::Started {
+                message: "Client accepted audio listen".to_string(),
+                generation: payload_field(detail, "generation")
+                    .and_then(|value| value.parse::<u64>().ok()),
+            },
             "audio_listen_stopped" => Self::Stopped,
             "audio_listen_error" => Self::Error(
                 payload_field(detail, "message")

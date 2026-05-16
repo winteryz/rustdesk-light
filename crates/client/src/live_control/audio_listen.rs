@@ -3,8 +3,8 @@ use std::collections::VecDeque;
 use std::process::{Command, Stdio};
 use std::sync::{mpsc::SyncSender, Arc, Mutex};
 
-const MAX_AUDIO_BUFFER_MS: usize = 500;
-const MIN_AUDIO_PREBUFFER_MS: usize = 80;
+const MAX_AUDIO_BUFFER_MS: usize = 300;
+const MIN_AUDIO_PREBUFFER_MS: usize = 60;
 
 pub(crate) struct CapturedAudioFrame {
     pub(crate) sample_rate: u32,

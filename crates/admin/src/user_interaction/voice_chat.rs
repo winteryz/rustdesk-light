@@ -17,8 +17,11 @@ const COLOR_MUTED: egui::Color32 = egui::Color32::from_rgb(96, 108, 124);
 const COLOR_GOOD: egui::Color32 = egui::Color32::from_rgb(24, 135, 84);
 const COLOR_BAD: egui::Color32 = egui::Color32::from_rgb(190, 58, 58);
 const COLOR_WARN: egui::Color32 = egui::Color32::from_rgb(179, 116, 28);
-const MAX_AUDIO_BUFFER_MS: usize = 500;
-const MIN_AUDIO_PREBUFFER_MS: usize = 80;
+const MAX_AUDIO_BUFFER_MS: usize = 300;
+const MIN_AUDIO_PREBUFFER_MS: usize = 60;
+const MAX_CAPTURE_QUEUE_MS: u64 = 240;
+const MAX_CAPTURE_QUEUE_FRAMES: usize = 24;
+const VOICE_CHAT_REPAINT_MS: u64 = 20;
 
 pub(crate) struct VoiceChatWindow {
     pub(crate) client_id: String,
@@ -39,6 +42,9 @@ pub(crate) struct VoiceChatWindow {
     frame_rx: Option<Receiver<CapturedAudioFrame>>,
     player: Option<AudioPlayer>,
     seq: u64,
+    call_generation: u64,
+    inbound_generation: Option<u64>,
+    last_incoming_seq: u64,
     stats: VoiceStats,
 }
 
@@ -146,6 +152,9 @@ pub(crate) fn open_window(
         frame_rx: None,
         player: None,
         seq: 1,
+        call_generation: 0,
+        inbound_generation: None,
+        last_incoming_seq: 0,
         stats: VoiceStats::default(),
     });
 }
@@ -167,12 +176,14 @@ pub(crate) fn handle_ack(
     window.hostname = hostname;
     window.username = username;
     match VoiceChatResponse::parse(&detail, accepted) {
-        VoiceChatResponse::Accepted => match start_local_audio(window) {
+        VoiceChatResponse::Accepted { generation } => match start_local_audio(window) {
             Ok(()) => {
                 window.status = VoiceChatStatus::Live;
                 window.notice = "Voice chat connected".to_string();
                 window.started_at = Some(Instant::now());
                 window.running.store(true, Ordering::Relaxed);
+                window.inbound_generation = generation;
+                window.last_incoming_seq = 0;
             }
             Err(error) => {
                 stop_call(window, &format!("Local audio failed: {error}"));
@@ -236,6 +247,15 @@ pub(crate) fn handle_audio_frame(
     if !matches!(window.status, VoiceChatStatus::Live) {
         return;
     }
+    if let Some(generation) = window.inbound_generation {
+        if sequence_generation(frame.seq) != generation {
+            return;
+        }
+    }
+    if frame.seq <= window.last_incoming_seq {
+        return;
+    }
+    window.last_incoming_seq = frame.seq;
     let samples = pcm_s16le_to_f32(&frame.bytes);
     window.stats.incoming_peak = samples
         .iter()
@@ -280,9 +300,13 @@ pub(crate) fn render_windows(
         if window.call_requested.swap(false, Ordering::Relaxed) {
             window.status = VoiceChatStatus::Ringing;
             window.notice = "Calling client".to_string();
+            window.call_generation = window.call_generation.saturating_add(1).max(1);
+            window.seq = stream_sequence_base(window.call_generation);
+            window.inbound_generation = None;
+            window.last_incoming_seq = 0;
             window.queue_outbound(OutboundCommand::Command {
                 client_id: window.client_id.clone(),
-                payload: "action=invite".to_string(),
+                payload: format!("action=invite\ngeneration={}", window.call_generation),
             });
         }
         if window.end_requested.swap(false, Ordering::Relaxed) {
@@ -373,7 +397,8 @@ fn render_window(ctx: &egui::Context, window: &mut VoiceChatWindow) {
                 });
             });
         if matches!(status, VoiceChatStatus::Live | VoiceChatStatus::Ringing) {
-            ui.ctx().request_repaint_after(Duration::from_millis(250));
+            ui.ctx()
+                .request_repaint_after(Duration::from_millis(VOICE_CHAT_REPAINT_MS));
         }
     });
 }
@@ -474,7 +499,11 @@ fn drain_captured_audio(window: &mut VoiceChatWindow, outbound: &mut Vec<Outboun
     let Some(frame_rx) = &window.frame_rx else {
         return;
     };
+    let mut pending = VecDeque::new();
     while let Ok(frame) = frame_rx.try_recv() {
+        push_capture_frame(&mut pending, frame);
+    }
+    for frame in pending {
         let samples = pcm_s16le_to_f32(&frame.bytes);
         window.stats.outgoing_peak = samples
             .iter()
@@ -512,6 +541,8 @@ fn stop_call(window: &mut VoiceChatWindow, notice: &str) {
     window.frame_rx = None;
     window.player = None;
     window.started_at = None;
+    window.inbound_generation = None;
+    window.last_incoming_seq = 0;
     window.stats = VoiceStats::default();
     window.notice = notice.to_string();
 }
@@ -746,6 +777,29 @@ fn send_frame(
     });
 }
 
+fn push_capture_frame(queue: &mut VecDeque<CapturedAudioFrame>, frame: CapturedAudioFrame) {
+    queue.push_back(frame);
+    while queue.len() > MAX_CAPTURE_QUEUE_FRAMES
+        || capture_queue_duration_ms(queue) > MAX_CAPTURE_QUEUE_MS
+    {
+        if queue.len() <= 1 {
+            break;
+        }
+        let _ = queue.pop_front();
+    }
+}
+
+fn capture_queue_duration_ms(queue: &VecDeque<CapturedAudioFrame>) -> u64 {
+    queue.iter().map(captured_frame_duration_ms).sum()
+}
+
+fn captured_frame_duration_ms(frame: &CapturedAudioFrame) -> u64 {
+    let channels = frame.channels.max(1) as usize;
+    let sample_rate = frame.sample_rate.max(1) as u64;
+    let frames = frame.bytes.len() / 2 / channels;
+    ((frames as u64 * 1000) / sample_rate).max(1)
+}
+
 fn f32_to_pcm_s16(data: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(data.len() * 2);
     for sample in data {
@@ -861,7 +915,7 @@ fn mapped_channel_sample(
 }
 
 enum VoiceChatResponse {
-    Accepted,
+    Accepted { generation: Option<u64> },
     Declined(String),
     Ended(String),
     Error(String),
@@ -872,7 +926,10 @@ impl VoiceChatResponse {
     fn parse(detail: &str, accepted: bool) -> Self {
         let mut lines = detail.lines();
         match lines.next().unwrap_or_default().trim() {
-            "voice_chat_accepted" if accepted => Self::Accepted,
+            "voice_chat_accepted" if accepted => Self::Accepted {
+                generation: payload_field(detail, "generation")
+                    .and_then(|value| value.parse::<u64>().ok()),
+            },
             "voice_chat_declined" => Self::Declined(
                 payload_field(detail, "message").unwrap_or_else(|| "Declined".to_string()),
             ),
@@ -890,6 +947,14 @@ impl VoiceChatResponse {
             other => Self::Other(other.to_string()),
         }
     }
+}
+
+fn stream_sequence_base(generation: u64) -> u64 {
+    generation.saturating_mul(1_u64 << 32).max(1)
+}
+
+fn sequence_generation(seq: u64) -> u64 {
+    seq >> 32
 }
 
 fn payload_field(payload: &str, key: &str) -> Option<String> {

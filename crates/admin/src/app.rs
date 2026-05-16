@@ -39,7 +39,7 @@ use rdl_protocol::{
     AudioSource, ClientInfo, CommandKind, CommandOutputStream, FileTransferAction,
     FileTransferDirection, Message, VideoSource,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -51,7 +51,9 @@ use std::time::Instant;
 
 const GUI_FRAME_INTERVAL_MS: u64 = 250;
 const ADMIN_INPUT_QUEUE_CAPACITY: usize = 8;
-const MAX_GUI_EVENTS_PER_FRAME: usize = 512;
+const MAX_GUI_EVENTS_PER_FRAME: usize = 4096;
+const MAX_PENDING_AUDIO_MS: u64 = 240;
+const MAX_PENDING_AUDIO_FRAMES_PER_SOURCE: usize = 32;
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env();
@@ -172,6 +174,51 @@ struct PendingVideoFrame {
     bytes: Vec<u8>,
 }
 
+struct PendingAudioFrame {
+    source: AudioSource,
+    seq: u64,
+    sample_rate: u32,
+    channels: u16,
+    format: String,
+    bytes: Vec<u8>,
+}
+
+fn push_pending_audio_frame(
+    queues: &mut HashMap<(String, u8), VecDeque<PendingAudioFrame>>,
+    client_id: String,
+    frame: PendingAudioFrame,
+) {
+    let source_key = audio_source_key(&frame.source);
+    let queue = queues.entry((client_id, source_key)).or_default();
+    queue.push_back(frame);
+    while queue.len() > MAX_PENDING_AUDIO_FRAMES_PER_SOURCE
+        || pending_audio_duration_ms(queue) > MAX_PENDING_AUDIO_MS
+    {
+        if queue.len() <= 1 {
+            break;
+        }
+        let _ = queue.pop_front();
+    }
+}
+
+fn pending_audio_duration_ms(queue: &VecDeque<PendingAudioFrame>) -> u64 {
+    queue.iter().map(pending_audio_frame_duration_ms).sum()
+}
+
+fn pending_audio_frame_duration_ms(frame: &PendingAudioFrame) -> u64 {
+    let channels = frame.channels.max(1) as usize;
+    let sample_rate = frame.sample_rate.max(1) as u64;
+    let frames = frame.bytes.len() / 2 / channels;
+    ((frames as u64 * 1000) / sample_rate).max(1)
+}
+
+fn audio_source_key(source: &AudioSource) -> u8 {
+    match source {
+        AudioSource::AudioListen => 1,
+        AudioSource::VoiceChat => 2,
+    }
+}
+
 fn client_status_text(ui: &mut egui::Ui, status: ClientStatus) {
     let (text, color) = match status {
         ClientStatus::Online => ("Online", COLOR_GOOD),
@@ -235,6 +282,7 @@ impl AdminApp {
         let mut latest_camera_frames = HashMap::<String, String>::new();
         let mut latest_desktop_video_frames = HashMap::<String, PendingVideoFrame>::new();
         let mut latest_camera_video_frames = HashMap::<String, PendingVideoFrame>::new();
+        let mut pending_audio_frames = HashMap::<(String, u8), VecDeque<PendingAudioFrame>>::new();
         let mut processed_events = 0usize;
         while processed_events < MAX_GUI_EVENTS_PER_FRAME {
             let Ok(event) = self.event_rx.try_recv() else {
@@ -340,48 +388,18 @@ impl AdminApp {
                     channels,
                     format,
                     bytes,
-                } => match source {
-                    AudioSource::AudioListen => {
-                        match live_control::audio_listen::decode_audio_frame(
-                            seq,
-                            sample_rate,
-                            channels,
-                            format,
-                            bytes,
-                        ) {
-                            Ok(frame) => live_control::audio_listen::handle_audio_frame(
-                                &mut self.audio_windows,
-                                &client_id,
-                                frame,
-                            ),
-                            Err(message) => self.handle_audio_ack(
-                                &client_id,
-                                true,
-                                format!("audio_listen_error\nmessage={message}"),
-                            ),
-                        }
-                    }
-                    AudioSource::VoiceChat => {
-                        match user_interaction::voice_chat::decode_audio_frame(
-                            seq,
-                            sample_rate,
-                            channels,
-                            format,
-                            bytes,
-                        ) {
-                            Ok(frame) => user_interaction::voice_chat::handle_audio_frame(
-                                &mut self.voice_chat_windows,
-                                &client_id,
-                                frame,
-                            ),
-                            Err(message) => self.handle_voice_chat_ack(
-                                &client_id,
-                                true,
-                                format!("voice_chat_error\nmessage={message}"),
-                            ),
-                        }
-                    }
-                },
+                } => push_pending_audio_frame(
+                    &mut pending_audio_frames,
+                    client_id,
+                    PendingAudioFrame {
+                        source,
+                        seq,
+                        sample_rate,
+                        channels,
+                        format,
+                        bytes,
+                    },
+                ),
                 AdminEvent::CommandOutput {
                     client_id,
                     command,
@@ -473,7 +491,57 @@ impl AdminApp {
         for (client_id, frame) in latest_camera_video_frames {
             self.spawn_video_frame_decode(client_id, VideoSource::Camera, frame);
         }
+        for ((client_id, _), frames) in pending_audio_frames {
+            for frame in frames {
+                self.handle_pending_audio_frame(&client_id, frame);
+            }
+        }
         changed
+    }
+
+    fn handle_pending_audio_frame(&mut self, client_id: &str, frame: PendingAudioFrame) {
+        match frame.source {
+            AudioSource::AudioListen => match live_control::audio_listen::decode_audio_frame(
+                frame.seq,
+                frame.sample_rate,
+                frame.channels,
+                frame.format,
+                frame.bytes,
+            ) {
+                Ok(frame) => {
+                    live_control::audio_listen::handle_audio_frame(
+                        &mut self.audio_windows,
+                        client_id,
+                        frame,
+                    );
+                }
+                Err(message) => self.handle_audio_ack(
+                    client_id,
+                    true,
+                    format!("audio_listen_error\nmessage={message}"),
+                ),
+            },
+            AudioSource::VoiceChat => match user_interaction::voice_chat::decode_audio_frame(
+                frame.seq,
+                frame.sample_rate,
+                frame.channels,
+                frame.format,
+                frame.bytes,
+            ) {
+                Ok(frame) => {
+                    user_interaction::voice_chat::handle_audio_frame(
+                        &mut self.voice_chat_windows,
+                        client_id,
+                        frame,
+                    );
+                }
+                Err(message) => self.handle_voice_chat_ack(
+                    client_id,
+                    true,
+                    format!("voice_chat_error\nmessage={message}"),
+                ),
+            },
+        }
     }
 
     fn ignore_file_transfer(&self, client_id: &str, transfer_id: u64) {

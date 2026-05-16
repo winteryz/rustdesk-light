@@ -12,6 +12,7 @@ const INITIAL_RECONNECT_DELAY_MS: u64 = 500;
 const MAX_RECONNECT_DELAY_MS: u64 = 8_000;
 const NETWORK_POLL_INTERVAL_MS: u64 = 16;
 const NETWORK_IDLE_SLEEP_MS: u64 = 4;
+const MAX_INPUTS_PER_NETWORK_POLL: usize = 64;
 
 pub(super) fn admin_network_loop(
     config: Config,
@@ -77,7 +78,12 @@ fn admin_connection_once(
     let mut decoder = EnvelopeDecoder::new();
 
     loop {
-        while let Ok(input) = input_rx.try_recv() {
+        let mut processed_inputs = 0usize;
+        while processed_inputs < MAX_INPUTS_PER_NETWORK_POLL {
+            let Ok(input) = input_rx.try_recv() else {
+                break;
+            };
+            processed_inputs += 1;
             let result = match input {
                 AdminInput::List => send(
                     &mut stream,
