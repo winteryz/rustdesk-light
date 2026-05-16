@@ -161,6 +161,16 @@ enum ClientStatus {
     Offline,
 }
 
+struct PendingVideoFrame {
+    seq: u64,
+    source_width: u32,
+    source_height: u32,
+    image_width: u32,
+    image_height: u32,
+    format: String,
+    bytes: Vec<u8>,
+}
+
 fn client_status_text(ui: &mut egui::Ui, status: ClientStatus) {
     let (text, color) = match status {
         ClientStatus::Online => ("Online", COLOR_GOOD),
@@ -222,6 +232,8 @@ impl AdminApp {
         let mut changed = false;
         let mut latest_desktop_frames = HashMap::<String, String>::new();
         let mut latest_camera_frames = HashMap::<String, String>::new();
+        let mut latest_desktop_video_frames = HashMap::<String, PendingVideoFrame>::new();
+        let mut latest_camera_video_frames = HashMap::<String, PendingVideoFrame>::new();
         let mut processed_events = 0usize;
         while processed_events < MAX_GUI_EVENTS_PER_FRAME {
             let Ok(event) = self.event_rx.try_recv() else {
@@ -300,17 +312,25 @@ impl AdminApp {
                     image_height,
                     format,
                     bytes,
-                } => self.spawn_video_frame_decode(
-                    client_id,
-                    source,
-                    seq,
-                    source_width,
-                    source_height,
-                    image_width,
-                    image_height,
-                    format,
-                    bytes,
-                ),
+                } => {
+                    let frame = PendingVideoFrame {
+                        seq,
+                        source_width,
+                        source_height,
+                        image_width,
+                        image_height,
+                        format,
+                        bytes,
+                    };
+                    match source {
+                        VideoSource::RemoteDesktop => {
+                            latest_desktop_video_frames.insert(client_id, frame);
+                        }
+                        VideoSource::Camera => {
+                            latest_camera_video_frames.insert(client_id, frame);
+                        }
+                    }
+                }
                 AdminEvent::AudioFrame {
                     client_id,
                     source,
@@ -446,6 +466,12 @@ impl AdminApp {
         for (client_id, payload) in latest_camera_frames {
             self.spawn_camera_frame_decode(client_id, payload);
         }
+        for (client_id, frame) in latest_desktop_video_frames {
+            self.spawn_video_frame_decode(client_id, VideoSource::RemoteDesktop, frame);
+        }
+        for (client_id, frame) in latest_camera_video_frames {
+            self.spawn_video_frame_decode(client_id, VideoSource::Camera, frame);
+        }
         changed
     }
 
@@ -492,35 +518,29 @@ impl AdminApp {
         &self,
         client_id: String,
         source: VideoSource,
-        seq: u64,
-        source_width: u32,
-        source_height: u32,
-        image_width: u32,
-        image_height: u32,
-        format: String,
-        bytes: Vec<u8>,
+        frame: PendingVideoFrame,
     ) {
         let sink = AdminEventSink::new(self.event_tx.clone(), Some(self.repaint_handle.clone()));
         thread::spawn(move || match source {
             VideoSource::RemoteDesktop => {
                 let result = live_control::remote_desktop::decode_video_frame(
-                    seq,
-                    source_width,
-                    source_height,
-                    image_width,
-                    image_height,
-                    format,
-                    bytes,
+                    frame.seq,
+                    frame.source_width,
+                    frame.source_height,
+                    frame.image_width,
+                    frame.image_height,
+                    frame.format,
+                    frame.bytes,
                 );
                 sink.send(AdminEvent::DecodedDesktopFrame { client_id, result });
             }
             VideoSource::Camera => {
                 let result = live_control::camera::decode_video_frame(
-                    seq,
-                    image_width,
-                    image_height,
-                    format,
-                    bytes,
+                    frame.seq,
+                    frame.image_width,
+                    frame.image_height,
+                    frame.format,
+                    frame.bytes,
                 );
                 sink.send(AdminEvent::DecodedCameraFrame { client_id, result });
             }
@@ -1525,7 +1545,7 @@ impl AdminApp {
                     format,
                     bytes,
                 } => {
-                    let _ = self.input_tx.send(AdminInput::AudioFrame {
+                    let _ = self.input_tx.try_send(AdminInput::AudioFrame {
                         target_id: client_id,
                         source: AudioSource::VoiceChat,
                         seq,

@@ -134,6 +134,14 @@ pub(crate) fn handle_decoded_frame(
     else {
         return;
     };
+    if window
+        .frame
+        .as_ref()
+        .map(|current| frame.seq <= current.seq)
+        .unwrap_or(false)
+    {
+        return;
+    }
     let latency_ms = window
         .pending_since
         .map(|pending_since| pending_since.elapsed().as_millis());

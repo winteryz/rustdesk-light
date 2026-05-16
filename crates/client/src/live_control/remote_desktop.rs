@@ -632,15 +632,15 @@ mod linux_capture {
 #[cfg(target_os = "macos")]
 mod macos_capture {
     use super::RemoteDesktopVideoFrame;
+    use core_graphics::display::{CGDirectDisplayID, CGDisplay};
+    use core_graphics::image::CGImage;
     use image::codecs::jpeg::JpegEncoder;
-    use image::{imageops::FilterType, DynamicImage};
-    use std::fs;
-    use std::path::PathBuf;
-    use std::process::Command;
+    use image::{imageops::FilterType, DynamicImage, RgbaImage};
 
     #[derive(Clone)]
     struct Screen {
         index: usize,
+        display_id: CGDirectDisplayID,
         x: i32,
         y: i32,
         width: u32,
@@ -694,60 +694,50 @@ mod macos_capture {
     }
 
     fn enum_screens() -> Result<Vec<Screen>, String> {
-        let script = r#"tell application "Finder" to get bounds of window of desktop"#;
-        let output = Command::new("osascript")
-            .args(["-e", script])
-            .output()
-            .map_err(|error| format!("osascript failed: {error}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        let displays = CGDisplay::active_displays()
+            .map_err(|error| format!("CGGetActiveDisplayList failed: {error}"))?;
+        let mut screens = Vec::new();
+        for display_id in displays {
+            let display = CGDisplay::new(display_id);
+            if !display.is_active() || display.is_asleep() {
+                continue;
+            }
+            let bounds = display.bounds();
+            let width = bounds.size.width.round().max(1.0) as u32;
+            let height = bounds.size.height.round().max(1.0) as u32;
+            screens.push(Screen {
+                index: screens.len(),
+                display_id,
+                x: bounds.origin.x.round() as i32,
+                y: bounds.origin.y.round() as i32,
+                width,
+                height,
+                primary: display.is_main(),
+                name: format!(
+                    "Display {} ({}x{})",
+                    display.unit_number(),
+                    display.pixels_wide(),
+                    display.pixels_high()
+                ),
+            });
         }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let values = text
-            .split(',')
-            .filter_map(|item| item.trim().parse::<i32>().ok())
-            .collect::<Vec<_>>();
-        if values.len() != 4 {
-            return Err("could not read macOS desktop bounds".to_string());
+        if screens.is_empty() {
+            Err("no active macOS displays found".to_string())
+        } else {
+            Ok(screens)
         }
-        let width = values[2].saturating_sub(values[0]).max(1) as u32;
-        let height = values[3].saturating_sub(values[1]).max(1) as u32;
-        Ok(vec![Screen {
-            index: 0,
-            x: values[0],
-            y: values[1],
-            width,
-            height,
-            primary: true,
-            name: "Main Display".to_string(),
-        }])
     }
 
     fn capture_screen(
         screen: Screen,
         quality: QualityProfile,
     ) -> Result<RemoteDesktopVideoFrame, String> {
-        let path = temp_path("rdl-macos-screen", "jpg");
-        let rect = format!(
-            "{},{},{},{}",
-            screen.x, screen.y, screen.width, screen.height
-        );
-        let path_text = path.to_string_lossy().to_string();
-        let output = Command::new("screencapture")
-            .args(["-x", "-t", "jpg", "-R", &rect, &path_text])
-            .output()
-            .map_err(|error| format!("screencapture failed: {error}"))?;
-        if !output.status.success() {
-            let _ = fs::remove_file(&path);
-            return Err(format!(
-                "screencapture failed; grant Screen Recording permission: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        let bytes = fs::read(&path).map_err(|error| format!("read screenshot failed: {error}"))?;
-        let _ = fs::remove_file(&path);
-        let image = image::load_from_memory(&bytes)
-            .map_err(|error| format!("load captured image failed: {error}"))?;
+        let display = CGDisplay::new(screen.display_id);
+        let capture = display.image().ok_or_else(|| {
+            "CoreGraphics capture failed; grant Screen Recording permission to the client"
+                .to_string()
+        })?;
+        let image = DynamicImage::ImageRgba8(cg_image_to_rgba(&capture)?);
         let scale = (quality.max_width as f32 / image.width() as f32).min(1.0);
         let (image_width, image_height, image) = if scale < 1.0 {
             let width = ((image.width() as f32 * scale).round() as u32).max(1);
@@ -771,6 +761,46 @@ mod macos_capture {
         })
     }
 
+    fn cg_image_to_rgba(image: &CGImage) -> Result<RgbaImage, String> {
+        let width = image.width() as u32;
+        let height = image.height() as u32;
+        if width == 0 || height == 0 {
+            return Err("captured display image is empty".to_string());
+        }
+        if image.bits_per_component() != 8 || image.bits_per_pixel() != 32 {
+            return Err(format!(
+                "unsupported macOS screen pixel format: {} bpc, {} bpp",
+                image.bits_per_component(),
+                image.bits_per_pixel()
+            ));
+        }
+
+        let bytes_per_row = image.bytes_per_row();
+        let row_len = width as usize * 4;
+        let required = bytes_per_row
+            .checked_mul(height as usize)
+            .ok_or_else(|| "captured display buffer is too large".to_string())?;
+        let data = image.data();
+        let bytes = data.bytes();
+        if bytes_per_row < row_len || bytes.len() < required {
+            return Err("captured display buffer has invalid stride".to_string());
+        }
+
+        let mut rgba = Vec::with_capacity(row_len * height as usize);
+        for y in 0..height as usize {
+            let offset = y * bytes_per_row;
+            let row = &bytes[offset..offset + row_len];
+            for pixel in row.chunks_exact(4) {
+                rgba.push(pixel[2]);
+                rgba.push(pixel[1]);
+                rgba.push(pixel[0]);
+                rgba.push(pixel[3]);
+            }
+        }
+        RgbaImage::from_raw(width, height, rgba)
+            .ok_or_else(|| "captured display buffer has invalid size".to_string())
+    }
+
     fn format_screens(screens: &[Screen]) -> String {
         let mut output = String::from("remote_desktop_screens");
         for screen in screens {
@@ -786,15 +816,6 @@ mod macos_capture {
             ));
         }
         output
-    }
-
-    fn temp_path(prefix: &str, ext: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "{prefix}-{}-{}.{}",
-            std::process::id(),
-            rdl_protocol::now_epoch_ms(),
-            ext
-        ))
     }
 
     fn sanitize(value: &str) -> String {

@@ -109,6 +109,14 @@ pub(crate) fn handle_decoded_frame(
     if !window.running.load(Ordering::Relaxed) {
         return;
     }
+    if window
+        .frame
+        .as_ref()
+        .map(|current| frame.seq <= current.seq)
+        .unwrap_or(false)
+    {
+        return;
+    }
     handle_frame(window, frame, None);
 }
 

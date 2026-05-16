@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::process::{Command, Stdio};
 use std::sync::{mpsc::SyncSender, Arc, Mutex};
 
-const MAX_AUDIO_BUFFER_SECONDS: usize = 2;
+const MAX_AUDIO_BUFFER_MS: usize = 500;
 
 pub(crate) struct CapturedAudioFrame {
     pub(crate) sample_rate: u32,
@@ -163,9 +163,9 @@ impl AudioOutputPlayer {
             self.output_sample_rate,
             self.output_channels,
         );
-        let max_samples = self.output_sample_rate as usize
-            * self.output_channels as usize
-            * MAX_AUDIO_BUFFER_SECONDS;
+        let max_samples =
+            self.output_sample_rate as usize * self.output_channels as usize * MAX_AUDIO_BUFFER_MS
+                / 1000;
         if let Ok(mut buffer) = self.buffer.lock() {
             for sample in converted {
                 buffer.push_back(sample);

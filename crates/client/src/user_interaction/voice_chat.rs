@@ -310,16 +310,16 @@ fn render_controls(
 }
 
 fn call_button(ui: &mut egui::Ui, label: &str, color: egui::Color32) -> egui::Response {
-    ui.scope(|ui| {
-        ui.visuals_mut().widgets.inactive.bg_fill = color;
-        ui.visuals_mut().widgets.hovered.bg_fill = color.gamma_multiply(0.88);
-        ui.visuals_mut().widgets.active.bg_fill = color.gamma_multiply(0.75);
-        ui.visuals_mut().widgets.inactive.fg_stroke.color = egui::Color32::WHITE;
-        ui.visuals_mut().widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
-        ui.visuals_mut().widgets.active.fg_stroke.color = egui::Color32::WHITE;
-        ui.add_sized([112.0, 42.0], egui::Button::new(label))
-    })
-    .inner
+    let fill = color.gamma_multiply(0.92);
+    let text = egui::RichText::new(label)
+        .color(egui::Color32::WHITE)
+        .strong();
+    ui.add_sized(
+        [112.0, 42.0],
+        egui::Button::new(text)
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.65))),
+    )
 }
 
 fn status_title(status: VoiceChatStatus) -> &'static str {

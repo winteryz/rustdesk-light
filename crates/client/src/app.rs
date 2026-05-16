@@ -253,6 +253,7 @@ fn client_connection_once(
                             );
                             event_sink.send(ClientEvent::VoiceChatConnected);
                             let worker_tx = out_tx.clone();
+                            let worker_realtime_tx = bulk_out_tx.clone();
                             let worker_token = session_token.clone();
                             let stream_state = voice_chat_stream.clone();
                             let mic_muted = voice_chat_mic_muted.clone();
@@ -260,6 +261,7 @@ fn client_connection_once(
                             thread::spawn(move || {
                                 voice_chat_capture_loop(
                                     client_id,
+                                    worker_realtime_tx,
                                     worker_tx,
                                     worker_token,
                                     stream_state,
@@ -602,12 +604,14 @@ fn client_connection_once(
                     thread::sleep(Duration::from_millis(5));
                     stream_state.running.store(true, Ordering::Relaxed);
                     let worker_tx = out_tx.clone();
+                    let worker_realtime_tx = bulk_out_tx.clone();
                     let worker_token = session_token.clone();
                     thread::spawn(move || {
                         video_stream_loop(
                             target_id,
                             source,
                             payload,
+                            worker_realtime_tx,
                             worker_tx,
                             worker_token,
                             stream_state,
@@ -658,12 +662,14 @@ fn client_connection_once(
                         thread::sleep(Duration::from_millis(5));
                         audio_stream.running.store(true, Ordering::Relaxed);
                         let worker_tx = out_tx.clone();
+                        let worker_realtime_tx = bulk_out_tx.clone();
                         let worker_token = session_token.clone();
                         let stream_state = audio_stream.clone();
                         thread::spawn(move || {
                             audio_stream_loop(
                                 target_id,
                                 payload,
+                                worker_realtime_tx,
                                 worker_tx,
                                 worker_token,
                                 stream_state,
@@ -1353,6 +1359,7 @@ fn video_stream_loop(
     client_id: String,
     source: VideoSource,
     start_payload: String,
+    realtime_tx: SyncSender<ClientOutbound>,
     out_tx: SyncSender<ClientOutbound>,
     session_token: String,
     stream_state: Arc<DesktopStreamState>,
@@ -1363,7 +1370,7 @@ fn video_stream_loop(
         .unwrap_or_else(|| "medium".to_string());
     let fps = quality_fps(&quality);
     let interval = Duration::from_millis((1000 / fps).max(1));
-    let mut seq = 1u64;
+    let mut seq = stream_sequence_base(generation);
     while stream_state.running.load(Ordering::Relaxed)
         && stream_state.generation.load(Ordering::Relaxed) == generation
     {
@@ -1408,7 +1415,7 @@ fn video_stream_loop(
         };
         match frame {
             Ok(message) => {
-                if queue_message(&out_tx, &session_token, message).is_err() {
+                if try_queue_realtime_message(&realtime_tx, &session_token, message).is_err() {
                     stream_state.running.store(false, Ordering::Relaxed);
                     break;
                 }
@@ -1439,6 +1446,7 @@ fn video_stream_loop(
 fn audio_stream_loop(
     client_id: String,
     start_payload: String,
+    realtime_tx: SyncSender<ClientOutbound>,
     out_tx: SyncSender<ClientOutbound>,
     session_token: String,
     stream_state: Arc<DesktopStreamState>,
@@ -1494,7 +1502,7 @@ fn audio_stream_loop(
         },
     );
 
-    let mut seq = 1u64;
+    let mut seq = stream_sequence_base(generation);
     while stream_state.running.load(Ordering::Relaxed)
         && stream_state.generation.load(Ordering::Relaxed) == generation
     {
@@ -1517,8 +1525,8 @@ fn audio_stream_loop(
                 break;
             }
         };
-        if queue_message(
-            &out_tx,
+        if try_queue_realtime_message(
+            &realtime_tx,
             &session_token,
             Message::AudioFrame {
                 client_id: client_id.clone(),
@@ -1542,6 +1550,7 @@ fn audio_stream_loop(
 
 fn voice_chat_capture_loop(
     client_id: String,
+    realtime_tx: SyncSender<ClientOutbound>,
     out_tx: SyncSender<ClientOutbound>,
     session_token: String,
     stream_state: Arc<DesktopStreamState>,
@@ -1567,7 +1576,7 @@ fn voice_chat_capture_loop(
         }
     };
 
-    let mut seq = 1u64;
+    let mut seq = stream_sequence_base(generation);
     while stream_state.running.load(Ordering::Relaxed)
         && stream_state.generation.load(Ordering::Relaxed) == generation
     {
@@ -1592,8 +1601,8 @@ fn voice_chat_capture_loop(
         if mic_muted.load(Ordering::Relaxed) {
             continue;
         }
-        if queue_message(
-            &out_tx,
+        if try_queue_realtime_message(
+            &realtime_tx,
             &session_token,
             Message::AudioFrame {
                 client_id: client_id.clone(),
@@ -1641,6 +1650,10 @@ fn video_source_command(source: &VideoSource) -> CommandKind {
     }
 }
 
+fn stream_sequence_base(generation: u64) -> u64 {
+    generation.saturating_mul(1_u64 << 32).max(1)
+}
+
 fn queue_message(
     out_tx: &SyncSender<ClientOutbound>,
     session_token: &str,
@@ -1652,6 +1665,23 @@ fn queue_message(
             message,
         })
         .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))
+}
+
+fn try_queue_realtime_message(
+    out_tx: &SyncSender<ClientOutbound>,
+    session_token: &str,
+    message: Message,
+) -> io::Result<()> {
+    match out_tx.try_send(ClientOutbound {
+        session_token: session_token.to_string(),
+        message,
+    }) {
+        Ok(()) | Err(mpsc::TrySendError::Full(_)) => Ok(()),
+        Err(mpsc::TrySendError::Disconnected(_)) => Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "outbound queue disconnected",
+        )),
+    }
 }
 
 fn queue_file_transfer_reply(

@@ -5,7 +5,7 @@ use rdl_protocol::{
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::thread;
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ const HEARTBEAT_INTERVAL_MS: u128 = 10_000;
 const STALE_PEER_MS: u128 = 45_000;
 const MAINTENANCE_TICK_MS: u64 = 100;
 const WRITER_BULK_POLL_MS: u64 = 2;
+const WRITER_REALTIME_QUEUE_CAPACITY: usize = 4;
 
 #[derive(Debug)]
 enum ServerEvent {
@@ -41,12 +42,18 @@ enum ServerEvent {
 #[derive(Clone, Debug)]
 struct PeerSender {
     high: Sender<Message>,
+    realtime: SyncSender<Message>,
     bulk: Sender<Message>,
 }
 
 impl PeerSender {
     fn send(&self, message: Message) -> Result<(), mpsc::SendError<Message>> {
-        if server_message_is_bulk(&message) {
+        if server_message_is_realtime(&message) {
+            match self.realtime.try_send(message) {
+                Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
+                Err(TrySendError::Disconnected(message)) => Err(mpsc::SendError(message)),
+            }
+        } else if server_message_is_bulk(&message) {
             self.bulk.send(message)
         } else {
             self.high.send(message)
@@ -109,12 +116,14 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
         eprintln!("peer {peer_id} set TCP_NODELAY failed: {error}");
     }
     let (high_tx, high_rx) = mpsc::channel::<Message>();
+    let (realtime_tx, realtime_rx) = mpsc::sync_channel::<Message>(WRITER_REALTIME_QUEUE_CAPACITY);
     let (bulk_tx, bulk_rx) = mpsc::channel::<Message>();
     if events_tx
         .send(ServerEvent::Connected {
             peer_id,
             sender: PeerSender {
                 high: high_tx,
+                realtime: realtime_tx,
                 bulk: bulk_tx,
             },
             peer_addr,
@@ -132,7 +141,7 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
         }
     };
 
-    thread::spawn(move || writer_loop(peer_id, writer, high_rx, bulk_rx));
+    thread::spawn(move || writer_loop(peer_id, writer, high_rx, realtime_rx, bulk_rx));
 
     let mut reader = stream;
     loop {
@@ -194,12 +203,14 @@ fn writer_loop(
     peer_id: usize,
     mut writer: TcpStream,
     high_rx: Receiver<Message>,
+    realtime_rx: Receiver<Message>,
     bulk_rx: Receiver<Message>,
 ) {
     let mut next_message_id = 1u64;
     let mut high_open = true;
+    let mut realtime_open = true;
     let mut bulk_open = true;
-    while high_open || bulk_open {
+    while high_open || realtime_open || bulk_open {
         loop {
             match high_rx.try_recv() {
                 Ok(message) => {
@@ -215,17 +226,23 @@ fn writer_loop(
             }
         }
 
-        if !bulk_open {
-            match high_rx.recv_timeout(Duration::from_millis(WRITER_BULK_POLL_MS)) {
+        loop {
+            match realtime_rx.try_recv() {
                 Ok(message) => {
-                    high_open = true;
                     if !write_server_message(peer_id, &mut writer, &mut next_message_id, message) {
                         return;
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => high_open = false,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    realtime_open = false;
+                    break;
+                }
             }
+        }
+
+        if !bulk_open {
+            thread::sleep(Duration::from_millis(WRITER_BULK_POLL_MS));
             continue;
         }
 
@@ -236,7 +253,7 @@ fn writer_loop(
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                if !high_open && !bulk_open {
+                if !high_open && !realtime_open && !bulk_open {
                     break;
                 }
             }
@@ -260,6 +277,13 @@ fn write_server_message(
     true
 }
 
+fn server_message_is_realtime(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::VideoFrame { .. } | Message::AudioFrame { .. }
+    )
+}
+
 fn server_message_is_bulk(message: &Message) -> bool {
     matches!(
         message,
@@ -268,7 +292,7 @@ fn server_message_is_bulk(message: &Message) -> bool {
                 | FileTransferAction::Chunk
                 | FileTransferAction::Progress,
             ..
-        } | Message::AudioFrame { .. }
+        }
     )
 }
 
