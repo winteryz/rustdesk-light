@@ -22,6 +22,9 @@ const MIN_AUDIO_PREBUFFER_MS: usize = 40;
 const MAX_AUDIO_PREBUFFER_MS: usize = 120;
 const PREBUFFER_ADJUST_STEP_MS: usize = 10;
 const PREBUFFER_DECAY_AFTER_MS: usize = 2_000;
+const PLAYBACK_TARGET_EXTRA_MS: usize = 20;
+const PLAYBACK_DRIFT_WINDOW_MS: usize = 60;
+const MAX_PLAYBACK_STRETCH: f64 = 0.010;
 const AUDIO_STREAM_RELEASE_SETTLE_MS: u64 = 40;
 
 pub(crate) struct AudioListenWindow {
@@ -86,6 +89,7 @@ struct AudioStats {
     underflows: u64,
     dropped_ms: u64,
     prebuffer_ms: u64,
+    stretch_ppm: i32,
     output_misses: u64,
     last_frame_at: Option<Instant>,
 }
@@ -163,6 +167,7 @@ pub(crate) fn handle_audio_frame(
         window.stats.underflows = playback.underflows;
         window.stats.dropped_ms = playback.dropped_ms;
         window.stats.prebuffer_ms = playback.prebuffer_ms;
+        window.stats.stretch_ppm = playback.stretch_ppm;
         window.stats.output_misses = playback.output_misses;
     }
     handle_frame(window, frame);
@@ -566,17 +571,21 @@ fn render_status_bar(ui: &mut egui::Ui, status: AudioStatus, notice: &str, stats
                 "no audio".to_string()
             } else {
                 format!(
-                    "{} Hz | {} ch | {} | {} bytes",
-                    stats.sample_rate, stats.channels, stats.format, stats.encoded_bytes
+                    "{}Hz {}ch {} {}B",
+                    stats.sample_rate,
+                    stats.channels,
+                    compact_audio_format(&stats.format),
+                    stats.encoded_bytes
                 )
             };
             let meta = if stats.sample_rate == 0 {
                 meta
             } else {
                 format!(
-                    "{meta} | buf {} ms | pb {} ms | drop {} ms | gaps {} | uf {} | miss {}",
+                    "{meta} | buf{}ms pb{}ms drift{} drop{}ms gaps{} uf{} miss{}",
                     stats.buffered_ms,
                     stats.prebuffer_ms,
+                    format_drift(stats.stretch_ppm),
                     stats.dropped_ms,
                     stats.missing_frames,
                     stats.underflows,
@@ -603,6 +612,21 @@ fn status_pill(ui: &mut egui::Ui, status: AudioStatus) {
         .show(ui, |ui| {
             ui.label(egui::RichText::new(label).size(12.0).color(color).strong());
         });
+}
+
+fn format_drift(stretch_ppm: i32) -> String {
+    if stretch_ppm == 0 {
+        "0.0%".to_string()
+    } else {
+        format!("{:+.1}%", stretch_ppm as f32 / 10_000.0)
+    }
+}
+
+fn compact_audio_format(format: &str) -> &str {
+    match format {
+        "pcm_s16le" => "pcm16",
+        other => other,
+    }
 }
 
 fn handle_frame(window: &mut AudioListenWindow, frame: AudioFrame) {
@@ -656,6 +680,7 @@ struct AudioPlaybackState {
     channels: u16,
     underflows: u64,
     dropped_samples: u64,
+    stretch_ppm: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -664,6 +689,7 @@ struct AudioPlaybackSnapshot {
     underflows: u64,
     dropped_ms: u64,
     prebuffer_ms: u64,
+    stretch_ppm: i32,
     output_misses: u64,
 }
 
@@ -684,12 +710,18 @@ impl AudioPlaybackRegistry {
             return;
         };
         let samples = pcm_s16le_to_f32(bytes);
+        let stretch_ratio = sink
+            .buffer
+            .lock()
+            .map(|mut buffer| buffer.playback_stretch_ratio())
+            .unwrap_or(1.0);
         let converted = resample_and_map_channels(
             &samples,
             sample_rate,
             channels,
             sink.output_sample_rate,
             sink.output_channels,
+            stretch_ratio,
         );
         let buffer_arc = sink.buffer.clone();
         if let Ok(mut buffer) = buffer_arc.lock() {
@@ -820,7 +852,22 @@ impl AudioPlaybackState {
             channels,
             underflows: 0,
             dropped_samples: 0,
+            stretch_ppm: 0,
         }
+    }
+
+    fn playback_stretch_ratio(&mut self) -> f64 {
+        let channels = self.channels.max(1) as usize;
+        let target_extra_samples =
+            (self.sample_rate as usize * channels * PLAYBACK_TARGET_EXTRA_MS / 1000).max(1);
+        let drift_window_samples =
+            (self.sample_rate as usize * channels * PLAYBACK_DRIFT_WINDOW_MS / 1000).max(1);
+        let target_samples = self.prebuffer_samples.saturating_add(target_extra_samples);
+        let error_samples = target_samples as isize - self.samples.len() as isize;
+        let correction = (error_samples as f64 / drift_window_samples as f64).clamp(-1.0, 1.0)
+            * MAX_PLAYBACK_STRETCH;
+        self.stretch_ppm = (correction * 1_000_000.0).round() as i32;
+        1.0 + correction
     }
 
     fn push_samples(&mut self, samples: Vec<f32>) {
@@ -879,6 +926,7 @@ impl AudioPlaybackState {
             underflows: self.underflows,
             dropped_ms: self.dropped_ms(),
             prebuffer_ms: self.prebuffer_ms(),
+            stretch_ppm: self.stretch_ppm,
             output_misses,
         }
     }
@@ -1011,6 +1059,7 @@ fn resample_and_map_channels(
     input_channels: u16,
     output_rate: u32,
     output_channels: u16,
+    stretch_ratio: f64,
 ) -> Vec<f32> {
     let input_channels = input_channels.max(1) as usize;
     let output_channels = output_channels.max(1) as usize;
@@ -1018,10 +1067,12 @@ fn resample_and_map_channels(
     if input_frames == 0 || input_rate == 0 || output_rate == 0 {
         return Vec::new();
     }
-    let output_frames =
-        ((input_frames as f64 * output_rate as f64) / input_rate as f64).ceil() as usize;
+    let base_output_frames = (input_frames as f64 * output_rate as f64) / input_rate as f64;
+    let output_frames = (base_output_frames * stretch_ratio.clamp(0.98, 1.02))
+        .round()
+        .max(1.0) as usize;
     let mut output = Vec::with_capacity(output_frames * output_channels);
-    let rate_ratio = input_rate as f64 / output_rate as f64;
+    let rate_ratio = input_frames as f64 / output_frames as f64;
     for output_frame in 0..output_frames {
         let source_pos = output_frame as f64 * rate_ratio;
         let input_frame = (source_pos.floor() as usize).min(input_frames - 1);
