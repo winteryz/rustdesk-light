@@ -1,11 +1,18 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
 use std::process::{Command, Stdio};
-use std::sync::{mpsc::SyncSender, Arc, Mutex};
+use std::sync::{mpsc::SyncSender, Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 
 const MAX_AUDIO_BUFFER_MS: usize = 300;
 const MIN_AUDIO_PREBUFFER_MS: usize = 60;
 const CAPTURE_OUTPUT_CHANNELS: u16 = 1;
+const AUDIO_DEVICE_ENUM_RETRIES: usize = 3;
+const AUDIO_DEVICE_ENUM_RETRY_MS: u64 = 120;
+const AUDIO_STREAM_RELEASE_SETTLE_MS: u64 = 40;
+
+static AUDIO_DEVICE_LIFECYCLE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(crate) struct CapturedAudioFrame {
     pub(crate) sample_rate: u32,
@@ -101,6 +108,9 @@ pub(crate) fn start_input_stream(
     device_index: usize,
     frame_tx: SyncSender<CapturedAudioFrame>,
 ) -> Result<AudioInputStream, String> {
+    let _guard = audio_device_lifecycle_lock()
+        .lock()
+        .map_err(|_| "audio device lifecycle lock is poisoned".to_string())?;
     let device = input_device(device_index)?;
     let supported_config = device
         .default_input_config()
@@ -124,6 +134,12 @@ pub(crate) fn start_input_stream(
         format,
         _stream: stream,
     })
+}
+
+impl Drop for AudioInputStream {
+    fn drop(&mut self) {
+        pause_stream_for_release(&self._stream);
+    }
 }
 
 impl AudioOutputPlayer {
@@ -182,6 +198,12 @@ impl AudioOutputPlayer {
             buffer.push_samples(converted);
         }
         Ok(())
+    }
+}
+
+impl Drop for AudioOutputPlayer {
+    fn drop(&mut self) {
+        pause_stream_for_release(&self._stream);
     }
 }
 
@@ -378,9 +400,11 @@ fn send_frame(
 }
 
 fn f32_to_mono_pcm_s16(data: &[f32], channels: usize) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity((data.len() / channels.max(1)) * 2);
-    for frame in data.chunks_exact(channels.max(1)) {
-        let sample = frame.iter().copied().sum::<f32>() / channels.max(1) as f32;
+    let channels = channels.max(1);
+    let channel = dominant_f32_channel(data, channels);
+    let mut bytes = Vec::with_capacity((data.len() / channels) * 2);
+    for frame in data.chunks_exact(channels) {
+        let sample = frame[channel];
         let sample = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
@@ -388,23 +412,66 @@ fn f32_to_mono_pcm_s16(data: &[f32], channels: usize) -> Vec<u8> {
 }
 
 fn i16_to_mono_pcm_s16(data: &[i16], channels: usize) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity((data.len() / channels.max(1)) * 2);
-    for frame in data.chunks_exact(channels.max(1)) {
-        let sum: i64 = frame.iter().map(|sample| *sample as i64).sum();
-        let sample = (sum / channels.max(1) as i64).clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+    let channels = channels.max(1);
+    let channel = dominant_i16_channel(data, channels);
+    let mut bytes = Vec::with_capacity((data.len() / channels) * 2);
+    for frame in data.chunks_exact(channels) {
+        let sample = frame[channel];
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
     bytes
 }
 
 fn u16_to_mono_pcm_s16(data: &[u16], channels: usize) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity((data.len() / channels.max(1)) * 2);
-    for frame in data.chunks_exact(channels.max(1)) {
-        let sum: i64 = frame.iter().map(|sample| *sample as i64 - 32768).sum();
-        let sample = (sum / channels.max(1) as i64).clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+    let channels = channels.max(1);
+    let channel = dominant_u16_channel(data, channels);
+    let mut bytes = Vec::with_capacity((data.len() / channels) * 2);
+    for frame in data.chunks_exact(channels) {
+        let sample = (frame[channel] as i32 - 32768).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
     bytes
+}
+
+fn dominant_f32_channel(data: &[f32], channels: usize) -> usize {
+    dominant_channel(channels, data.chunks_exact(channels), |frame, channel| {
+        frame[channel].abs() as f64
+    })
+}
+
+fn dominant_i16_channel(data: &[i16], channels: usize) -> usize {
+    dominant_channel(channels, data.chunks_exact(channels), |frame, channel| {
+        frame[channel].unsigned_abs() as f64
+    })
+}
+
+fn dominant_u16_channel(data: &[u16], channels: usize) -> usize {
+    dominant_channel(channels, data.chunks_exact(channels), |frame, channel| {
+        (frame[channel] as i32 - 32768).unsigned_abs() as f64
+    })
+}
+
+fn dominant_channel<'a, T: 'a>(
+    channels: usize,
+    frames: impl Iterator<Item = &'a [T]>,
+    sample_energy: impl Fn(&[T], usize) -> f64,
+) -> usize {
+    if channels <= 1 {
+        return 0;
+    }
+    let mut energies = vec![0.0_f64; channels];
+    for frame in frames {
+        for (channel, energy) in energies.iter_mut().enumerate() {
+            *energy += sample_energy(frame, channel);
+        }
+    }
+    let mut best_channel = 0;
+    for channel in 1..channels {
+        if energies[channel] > energies[best_channel] {
+            best_channel = channel;
+        }
+    }
+    best_channel
 }
 
 fn pcm_s16le_to_f32(bytes: &[u8]) -> Vec<f32> {
@@ -470,6 +537,25 @@ struct AudioDeviceInfo {
 }
 
 fn enumerate_input_devices(scan_full: bool) -> Result<Vec<AudioDeviceInfo>, String> {
+    let _guard = audio_device_lifecycle_lock()
+        .lock()
+        .map_err(|_| "audio device lifecycle lock is poisoned".to_string())?;
+    let mut last_error = None;
+    for attempt in 0..=AUDIO_DEVICE_ENUM_RETRIES {
+        match enumerate_input_devices_once(scan_full) {
+            Ok(devices) => return Ok(devices),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < AUDIO_DEVICE_ENUM_RETRIES {
+                    thread::sleep(Duration::from_millis(AUDIO_DEVICE_ENUM_RETRY_MS));
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "no audio input devices found".to_string()))
+}
+
+fn enumerate_input_devices_once(scan_full: bool) -> Result<Vec<AudioDeviceInfo>, String> {
     let host = cpal::default_host();
     let default_device = host.default_input_device();
     let default_name = default_device
@@ -509,6 +595,19 @@ fn enumerate_input_devices(scan_full: bool) -> Result<Vec<AudioDeviceInfo>, Stri
         return Err("no audio input devices found".to_string());
     }
     Ok(output)
+}
+
+fn audio_device_lifecycle_lock() -> &'static Mutex<()> {
+    AUDIO_DEVICE_LIFECYCLE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn pause_stream_for_release(stream: &cpal::Stream) {
+    if let Ok(_guard) = audio_device_lifecycle_lock().try_lock() {
+        let _ = stream.pause();
+        thread::sleep(Duration::from_millis(AUDIO_STREAM_RELEASE_SETTLE_MS));
+    } else {
+        let _ = stream.pause();
+    }
 }
 
 #[cfg(target_os = "macos")]

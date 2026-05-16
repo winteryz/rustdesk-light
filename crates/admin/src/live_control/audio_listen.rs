@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
+use std::thread;
 use std::time::{Duration, Instant};
 
 const COLOR_BG: egui::Color32 = egui::Color32::from_rgb(246, 248, 251);
@@ -18,6 +19,7 @@ const COLOR_WARN: egui::Color32 = egui::Color32::from_rgb(179, 116, 28);
 const TOOLBAR_CONTROL_HEIGHT: f32 = 24.0;
 const MAX_AUDIO_BUFFER_MS: usize = 500;
 const MIN_AUDIO_PREBUFFER_MS: usize = 80;
+const AUDIO_STREAM_RELEASE_SETTLE_MS: u64 = 40;
 
 pub(crate) struct AudioListenWindow {
     pub(crate) client_id: String,
@@ -626,6 +628,13 @@ impl AudioPlayer {
         if let Ok(mut buffer) = self.buffer.lock() {
             buffer.push_samples(converted);
         }
+    }
+}
+
+impl Drop for AudioPlayer {
+    fn drop(&mut self) {
+        let _ = self._stream.pause();
+        thread::sleep(Duration::from_millis(AUDIO_STREAM_RELEASE_SETTLE_MS));
     }
 }
 

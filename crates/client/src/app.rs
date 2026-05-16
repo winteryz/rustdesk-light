@@ -30,6 +30,8 @@ const CLIENT_OUTBOUND_QUEUE_CAPACITY: usize = 32;
 const CLIENT_BULK_OUTBOUND_QUEUE_CAPACITY: usize = 2;
 const CLIENT_BULK_POLL_MS: u64 = 2;
 const AUDIO_CAPTURE_FRAME_MS: u32 = 10;
+const AUDIO_CAPTURE_RECV_TIMEOUT_MS: u64 = 20;
+const AUDIO_STREAM_STOP_SETTLE_MS: u64 = 180;
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env();
@@ -672,7 +674,7 @@ fn client_connection_once(
                             .generation
                             .fetch_add(1, Ordering::Relaxed)
                             .saturating_add(1);
-                        thread::sleep(Duration::from_millis(5));
+                        thread::sleep(Duration::from_millis(AUDIO_STREAM_STOP_SETTLE_MS));
                         audio_stream.running.store(true, Ordering::Relaxed);
                         let worker_tx = out_tx.clone();
                         let worker_realtime_tx = out_tx.clone();
@@ -693,6 +695,7 @@ fn client_connection_once(
                     Some("stop") => {
                         audio_stream.running.store(false, Ordering::Relaxed);
                         audio_stream.generation.fetch_add(1, Ordering::Relaxed);
+                        thread::sleep(Duration::from_millis(AUDIO_STREAM_STOP_SETTLE_MS));
                         let _ = queue_message(
                             &out_tx,
                             &session_token,
@@ -1590,11 +1593,12 @@ fn audio_stream_loop(
     while stream_state.running.load(Ordering::Relaxed)
         && stream_state.generation.load(Ordering::Relaxed) == generation
     {
-        let frame = match frame_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(frame) => frame,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = queue_message(
+        let frame =
+            match frame_rx.recv_timeout(Duration::from_millis(AUDIO_CAPTURE_RECV_TIMEOUT_MS)) {
+                Ok(frame) => frame,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = queue_message(
                     &out_tx,
                     &session_token,
                     Message::CommandAck {
@@ -1606,9 +1610,9 @@ fn audio_stream_loop(
                                 .to_string(),
                     },
                 );
-                break;
-            }
-        };
+                    break;
+                }
+            };
         for frame in packetizer.push(frame) {
             if try_queue_realtime_message(
                 &realtime_tx,
@@ -1667,7 +1671,9 @@ fn voice_chat_capture_loop(
     while stream_state.running.load(Ordering::Relaxed)
         && stream_state.generation.load(Ordering::Relaxed) == generation
     {
-        let frame = match frame_rx.recv_timeout(Duration::from_millis(100)) {
+        let frame = match frame_rx
+            .recv_timeout(Duration::from_millis(AUDIO_CAPTURE_RECV_TIMEOUT_MS))
+        {
             Ok(frame) => frame,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
