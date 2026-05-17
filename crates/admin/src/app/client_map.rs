@@ -199,18 +199,11 @@ fn render_map_contents(
                 draw_map_cluster_label(&painter, map_rect, cluster, selected);
             }
 
-            for (index, cluster) in clusters.iter().enumerate() {
-                let response = ui.interact(
-                    cluster_hit_rect(map_rect, cluster),
-                    ui.id().with(("client-map-cluster", index)),
-                    egui::Sense::click(),
-                );
-                if response.hovered() {
-                    response
-                        .clone()
-                        .on_hover_text(format!("{}\n\n{}", cluster.title, cluster.detail));
-                }
-                if response.clicked() {
+            let pointer_pos = ui.ctx().input(|input| input.pointer.hover_pos());
+            if let Some((cluster, pointer)) = hovered_cluster(&clusters, map_rect, pointer_pos) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                draw_cluster_hover_card(&painter, map_rect, pointer, cluster);
+                if ui.ctx().input(|input| input.pointer.primary_clicked()) {
                     if let Some(client_id) = cluster.client_ids.first() {
                         if let Ok(mut target) = selected_sink.lock() {
                             *target = Some(client_id.clone());
@@ -593,6 +586,106 @@ fn cluster_hit_rect(map_rect: egui::Rect, cluster: &MapCluster) -> egui::Rect {
         .union(cluster_label_rect(map_rect, cluster))
         .expand(6.0)
         .intersect(map_rect)
+}
+
+fn hovered_cluster(
+    clusters: &[MapCluster],
+    map_rect: egui::Rect,
+    pointer: Option<egui::Pos2>,
+) -> Option<(&MapCluster, egui::Pos2)> {
+    let pointer = pointer?;
+    clusters
+        .iter()
+        .filter(|cluster| cluster_hit_rect(map_rect, cluster).contains(pointer))
+        .min_by(|left, right| {
+            left.pos
+                .distance(pointer)
+                .partial_cmp(&right.pos.distance(pointer))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|cluster| (cluster, pointer))
+}
+
+fn draw_cluster_hover_card(
+    painter: &egui::Painter,
+    map_rect: egui::Rect,
+    pointer: egui::Pos2,
+    cluster: &MapCluster,
+) {
+    let detail_lines = cluster.detail.lines().collect::<Vec<_>>();
+    let max_chars = detail_lines
+        .iter()
+        .map(|line| line.chars().count())
+        .chain(std::iter::once(cluster.title.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let width = (max_chars as f32 * 7.2 + 28.0)
+        .clamp(250.0, 440.0)
+        .min(map_rect.width() - 16.0);
+    let mut height: f32 = 42.0;
+    for line in &detail_lines {
+        height += if line.is_empty() { 8.0 } else { 17.0 };
+    }
+    height = height.min(map_rect.height() - 16.0);
+
+    let size = egui::vec2(width.max(120.0), height.max(74.0));
+    let mut min = pointer + egui::vec2(16.0, 16.0);
+    if min.x + size.x > map_rect.right() - 8.0 {
+        min.x = pointer.x - size.x - 16.0;
+    }
+    if min.y + size.y > map_rect.bottom() - 8.0 {
+        min.y = pointer.y - size.y - 16.0;
+    }
+    min.x = min
+        .x
+        .clamp(map_rect.left() + 8.0, map_rect.right() - size.x - 8.0);
+    min.y = min
+        .y
+        .clamp(map_rect.top() + 8.0, map_rect.bottom() - size.y - 8.0);
+
+    let rect = egui::Rect::from_min_size(min, size);
+    painter.rect_filled(
+        rect.translate(egui::vec2(0.0, 1.5)),
+        9.0,
+        egui::Color32::from_rgba_unmultiplied(19, 30, 42, 45),
+    );
+    painter.rect_filled(
+        rect,
+        9.0,
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 242),
+    );
+    painter.rect_stroke(
+        rect,
+        9.0,
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(172, 190, 208, 210),
+        ),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(13.0, 11.0),
+        egui::Align2::LEFT_TOP,
+        &cluster.title,
+        egui::FontId::proportional(12.0),
+        ui::COLOR_TEXT,
+    );
+
+    let mut y = rect.top() + 34.0;
+    for line in detail_lines {
+        if line.is_empty() {
+            y += 8.0;
+            continue;
+        }
+        painter.text(
+            egui::pos2(rect.left() + 13.0, y),
+            egui::Align2::LEFT_TOP,
+            line,
+            egui::FontId::monospace(11.0),
+            ui::COLOR_MUTED,
+        );
+        y += 17.0;
+    }
 }
 
 fn cluster_label_rect(map_rect: egui::Rect, cluster: &MapCluster) -> egui::Rect {
