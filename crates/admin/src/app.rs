@@ -631,6 +631,42 @@ fn client_location_label(client: &ClientInfo) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn client_os_label(os: &str) -> String {
+    let os = os.trim();
+    if os.is_empty() {
+        "💻 Unknown".to_string()
+    } else {
+        format!("{} {os}", client_os_emoji(os))
+    }
+}
+
+fn client_os_emoji(os: &str) -> &'static str {
+    let os = os.to_ascii_lowercase();
+    if os.contains("android") {
+        "🤖"
+    } else if os.contains("iphone") || os.contains("ipad") || os.contains("ios") {
+        "📱"
+    } else if os.contains("macos") || os.contains("darwin") || os.contains("os x") {
+        "🍎"
+    } else if os.contains("windows") || os.starts_with("win") {
+        "🪟"
+    } else if os.contains("linux")
+        || os.contains("ubuntu")
+        || os.contains("debian")
+        || os.contains("fedora")
+        || os.contains("centos")
+        || os.contains("red hat")
+        || os.contains("arch")
+        || os.contains("alpine")
+        || os.contains("nixos")
+        || os.contains("mint")
+    {
+        "🐧"
+    } else {
+        "💻"
+    }
+}
+
 fn client_identity_label(client: &ClientInfo) -> String {
     match (client.hostname.trim(), client.username.trim()) {
         ("", "") => client.id.clone(),
@@ -2197,7 +2233,7 @@ impl AdminApp {
                         });
                         row.col(|ui| {
                             centered_cell(ui, |ui| {
-                                cell_label(ui, &client.os);
+                                cell_label(ui, client_os_label(&client.os));
                             });
                         });
                         let response = row.response();
