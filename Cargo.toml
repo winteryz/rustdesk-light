@@ -13,6 +13,6 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 version = "0.2.0"
-authors = ["rust-desk-light contributors"]
+authors = ["marlkiller <marlkiller369@gmail.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/marlkiller/rust-desk-light"
