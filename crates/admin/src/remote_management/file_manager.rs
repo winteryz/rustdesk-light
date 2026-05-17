@@ -26,6 +26,12 @@ const TRANSFER_COLUMN_WIDTH: f32 = 100.0;
 const TRANSFER_BUTTON_WIDTH: f32 = 84.0;
 const TRANSFER_TABLE_HEIGHT: f32 = 150.0;
 const TRANSFER_REQUEST_MARKER: &str = "file_transfer_request";
+const QUICK_JUMPS: [(&str, &str); 4] = [
+    ("User", "~"),
+    ("Desktop", "~/Desktop"),
+    ("Downloads", "~/Downloads"),
+    ("Documents", "~/Documents"),
+];
 
 static NEXT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -36,9 +42,9 @@ pub(crate) struct FileManagerWindow {
     current_path: Arc<Mutex<String>>,
     path_input: Arc<Mutex<String>>,
     entries: Arc<Mutex<Vec<FileEntry>>>,
-    selected_name: Arc<Mutex<Option<String>>>,
+    selected_name: FileSelection,
     local_entries: Arc<Mutex<Vec<FileEntry>>>,
-    selected_local_name: Arc<Mutex<Option<String>>>,
+    selected_local_name: FileSelection,
     status: Arc<Mutex<FileStatus>>,
     notice: Arc<Mutex<String>>,
     local_path: Arc<Mutex<String>>,
@@ -65,6 +71,13 @@ struct FileEntry {
     name: String,
     size: String,
     modified: String,
+}
+
+type FileSelection = Arc<Mutex<FileSelectionState>>;
+
+#[derive(Clone, Default)]
+struct FileSelectionState {
+    names: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -153,9 +166,9 @@ pub(crate) fn open_window(
         current_path: Arc::new(Mutex::new(String::new())),
         path_input: Arc::new(Mutex::new(String::new())),
         entries: Arc::new(Mutex::new(Vec::new())),
-        selected_name: Arc::new(Mutex::new(None)),
+        selected_name: Arc::new(Mutex::new(FileSelectionState::default())),
         local_entries: Arc::new(Mutex::new(read_local_entries(&local_dir))),
-        selected_local_name: Arc::new(Mutex::new(None)),
+        selected_local_name: Arc::new(Mutex::new(FileSelectionState::default())),
         status: Arc::new(Mutex::new(FileStatus::Ready)),
         notice: Arc::new(Mutex::new("Ready".to_string())),
         local_path: Arc::new(Mutex::new(local_dir)),
@@ -233,9 +246,7 @@ pub(crate) fn handle_ack(
     if let Ok(mut entries) = window.entries.lock() {
         *entries = response.entries;
     }
-    if let Ok(mut selected) = window.selected_name.lock() {
-        *selected = None;
-    }
+    clear_selection(&window.selected_name);
     set_status(window, FileStatus::Done, "Directory loaded");
 }
 
@@ -616,7 +627,7 @@ fn render_remote_panel(
     current_path: &Arc<Mutex<String>>,
     path_input: &Arc<Mutex<String>>,
     entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_name: &Arc<Mutex<Option<String>>>,
+    selected_name: &FileSelection,
     rename_to: &Arc<Mutex<String>>,
     new_folder_name: &Arc<Mutex<String>>,
     pending_delete: &Arc<Mutex<Option<String>>>,
@@ -670,7 +681,7 @@ fn render_local_panel(
     entries_id: &str,
     local_path: &Arc<Mutex<String>>,
     local_entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_local_name: &Arc<Mutex<Option<String>>>,
+    selected_local_name: &FileSelection,
     local_rename_to: &Arc<Mutex<String>>,
     local_new_folder_name: &Arc<Mutex<String>>,
     pending_local_delete: &Arc<Mutex<Option<String>>>,
@@ -723,10 +734,10 @@ fn render_transfer_buttons(
     ui: &mut egui::Ui,
     current_path: &Arc<Mutex<String>>,
     remote_entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_remote: &Arc<Mutex<Option<String>>>,
+    selected_remote: &FileSelection,
     local_path: &Arc<Mutex<String>>,
     local_entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_local: &Arc<Mutex<Option<String>>>,
+    selected_local: &FileSelection,
     outbound: &Arc<Mutex<Vec<String>>>,
     status: &Arc<Mutex<FileStatus>>,
     notice: &Arc<Mutex<String>>,
@@ -744,16 +755,26 @@ fn render_transfer_buttons(
             .on_hover_text("Download selected remote file or folder")
             .clicked()
         {
-            if let Some(entry) = selected_remote_entry(remote_entries, selected_remote) {
-                queue_download_remote(current_path, local_path, outbound, transfers, &entry);
-                ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
-            } else {
+            let entries = selected_remote_entries(remote_entries, selected_remote);
+            if entries.is_empty() {
                 set_status_arc(
                     status,
                     notice,
                     FileStatus::Failed,
                     "Select a remote file or folder",
                 );
+            } else {
+                let count = entries.len();
+                for entry in &entries {
+                    queue_download_remote(current_path, local_path, outbound, transfers, entry);
+                }
+                set_status_arc(
+                    status,
+                    notice,
+                    FileStatus::Done,
+                    &format!("{count} download{} queued", plural_suffix(count)),
+                );
+                ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
             }
         }
         ui.add_space(8.0);
@@ -810,6 +831,17 @@ fn render_remote_toolbar(
             queue_payload(outbound, &request("list", &path, ""));
             ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
         }
+        ui.add_enabled_ui(!busy, |ui| {
+            ui.menu_button("Jump", |ui| {
+                for (label, path) in QUICK_JUMPS {
+                    if ui.button(label).clicked() {
+                        queue_payload(outbound, &request("list", path, ""));
+                        ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                        ui.close();
+                    }
+                }
+            });
+        });
         let mut path = path_input
             .lock()
             .map(|value| value.clone())
@@ -843,7 +875,7 @@ fn render_local_toolbar(
     ui: &mut egui::Ui,
     local_path: &Arc<Mutex<String>>,
     local_entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_local_name: &Arc<Mutex<Option<String>>>,
+    selected_local_name: &FileSelection,
 ) {
     ui.horizontal(|ui| {
         ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
@@ -876,6 +908,20 @@ fn render_local_toolbar(
                 );
             }
         }
+        ui.menu_button("Jump", |ui| {
+            for (label, path) in local_quick_jump_paths() {
+                let enabled = path.is_dir();
+                let path_text = path.display().to_string();
+                if ui
+                    .add_enabled(enabled, egui::Button::new(label))
+                    .on_hover_text(&path_text)
+                    .clicked()
+                {
+                    set_local_dir(local_path, local_entries, selected_local_name, &path_text);
+                    ui.close();
+                }
+            }
+        });
         let mut path = local_path
             .lock()
             .map(|value| value.clone())
@@ -907,7 +953,7 @@ fn render_entries_table(
     entries_id: &str,
     current_path: &Arc<Mutex<String>>,
     entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_name: &Arc<Mutex<Option<String>>>,
+    selected_name: &FileSelection,
     rename_to: &Arc<Mutex<String>>,
     pending_delete: &Arc<Mutex<Option<String>>>,
     pending_rename: &Arc<Mutex<Option<String>>>,
@@ -923,18 +969,19 @@ fn render_entries_table(
         .lock()
         .map(|value| value.clone())
         .unwrap_or_default();
-    let selected = selected_name
-        .lock()
-        .map(|value| value.clone())
-        .unwrap_or(None);
+    let selected = selected_names(selected_name);
     let ctx = ui.ctx().clone();
     file_table(
         ui,
         ("remote_file_table_resizable", entries_id),
         &entries,
-        selected.as_deref(),
-        |row_response, entry| {
-            if row_response.clicked() || row_response.secondary_clicked() {
+        &selected,
+        |row_response, entry, checked| {
+            if let Some(checked) = checked {
+                set_entry_checked(selected_name, entry, checked);
+            } else if row_response.clicked() {
+                select_entry(selected_name, entry);
+            } else if row_response.secondary_clicked() {
                 select_entry(selected_name, entry);
             }
             if row_response.double_clicked() && entry.kind == "dir" && !is_pending(status) {
@@ -1029,7 +1076,7 @@ fn render_local_entries_table(
     entries_id: &str,
     local_path: &Arc<Mutex<String>>,
     entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_name: &Arc<Mutex<Option<String>>>,
+    selected_name: &FileSelection,
     local_rename_to: &Arc<Mutex<String>>,
     local_new_folder_name: &Arc<Mutex<String>>,
     pending_local_delete: &Arc<Mutex<Option<String>>>,
@@ -1045,17 +1092,18 @@ fn render_local_entries_table(
         .lock()
         .map(|value| value.clone())
         .unwrap_or_default();
-    let selected = selected_name
-        .lock()
-        .map(|value| value.clone())
-        .unwrap_or(None);
+    let selected = selected_names(selected_name);
     file_table(
         ui,
         ("local_file_table_resizable", entries_id),
         &entries_snapshot,
-        selected.as_deref(),
-        |row_response, entry| {
-            if row_response.clicked() || row_response.secondary_clicked() {
+        &selected,
+        |row_response, entry, checked| {
+            if let Some(checked) = checked {
+                set_entry_checked(selected_name, entry, checked);
+            } else if row_response.clicked() {
+                select_entry(selected_name, entry);
+            } else if row_response.secondary_clicked() {
                 select_entry(selected_name, entry);
             }
             if row_response.double_clicked() && entry.kind == "dir" {
@@ -1119,7 +1167,7 @@ fn render_local_entries_table(
 #[allow(clippy::too_many_arguments)]
 fn render_remote_blank_context_menu(
     ui: &mut egui::Ui,
-    selected_name: &Arc<Mutex<Option<String>>>,
+    selected_name: &FileSelection,
     current_path: &Arc<Mutex<String>>,
     local_path: &Arc<Mutex<String>>,
     pending_new_folder: &Arc<Mutex<bool>>,
@@ -1177,7 +1225,7 @@ fn render_remote_blank_context_menu(
 
 fn render_local_blank_context_menu(
     ui: &mut egui::Ui,
-    selected_name: &Arc<Mutex<Option<String>>>,
+    selected_name: &FileSelection,
     local_path: &Arc<Mutex<String>>,
     pending_local_new_folder: &Arc<Mutex<bool>>,
     local_new_folder_name: &Arc<Mutex<String>>,
@@ -1213,26 +1261,31 @@ fn file_table<R>(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash,
     entries: &[FileEntry],
-    selected: Option<&str>,
-    mut row_handler: impl FnMut(&egui::Response, &FileEntry) -> R,
+    selected: &[String],
+    mut row_handler: impl FnMut(&egui::Response, &FileEntry, Option<bool>) -> R,
 ) {
     let available_width = ui.available_width().max(360.0);
+    let select_width = 28.0;
     let type_width = 44.0;
     let size_width = 88.0;
     let modified_width = 132.0;
-    let name_width = (available_width - type_width - size_width - modified_width - 24.0).max(140.0);
+    let name_width =
+        (available_width - select_width - type_width - size_width - modified_width - 24.0)
+            .max(140.0);
     let table = TableBuilder::new(ui)
         .id_salt(id)
         .striped(true)
         .resizable(true)
         .sense(egui::Sense::click())
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .column(Column::exact(select_width))
         .column(Column::initial(type_width).at_least(38.0).clip(true))
         .column(Column::initial(name_width).at_least(140.0).clip(true))
         .column(Column::initial(size_width).at_least(72.0).clip(true))
         .column(Column::initial(modified_width).at_least(108.0).clip(true));
     table
         .header(24.0, |mut header| {
+            header.col(|ui| table_header_label(ui, ""));
             header.col(|ui| table_header_label(ui, "Type"));
             header.col(|ui| table_header_label(ui, "Name"));
             header.col(|ui| table_header_label(ui, "Size"));
@@ -1240,9 +1293,16 @@ fn file_table<R>(
         })
         .body(|mut body| {
             for entry in entries {
-                let is_selected = selected == Some(entry.name.as_str());
+                let is_selected = selected.iter().any(|name| name == &entry.name);
                 body.row(24.0, |mut row| {
                     row.set_selected(is_selected);
+                    let mut checked_change = None;
+                    row.col(|ui| {
+                        let mut checked = is_selected;
+                        if ui.checkbox(&mut checked, "").changed() {
+                            checked_change = Some(checked);
+                        }
+                    });
                     row.col(|ui| table_text(ui, &entry.kind));
                     row.col(|ui| table_text(ui, &entry.name));
                     row.col(|ui| table_text(ui, &format_file_size(&entry.size)));
@@ -1253,7 +1313,7 @@ fn file_table<R>(
                             .ctx
                             .set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                    row_handler(&row_response, entry);
+                    row_handler(&row_response, entry, checked_change);
                 });
             }
         });
@@ -1611,7 +1671,7 @@ fn render_pending_dialogs(
     new_folder_name: &Arc<Mutex<String>>,
     local_path: &Arc<Mutex<String>>,
     local_entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_local_name: &Arc<Mutex<Option<String>>>,
+    selected_local_name: &FileSelection,
     pending_local_delete: &Arc<Mutex<Option<String>>>,
     pending_local_rename: &Arc<Mutex<Option<String>>>,
     pending_local_new_folder: &Arc<Mutex<bool>>,
@@ -1952,6 +2012,54 @@ fn local_file_dialog(current_dir: &str, title: &str) -> FileDialog {
     dialog
 }
 
+fn local_quick_jump_paths() -> Vec<(&'static str, PathBuf)> {
+    let Some(home) = user_home_dir() else {
+        return Vec::new();
+    };
+    vec![
+        ("User", home.clone()),
+        ("Desktop", home.join("Desktop")),
+        ("Downloads", home.join("Downloads")),
+        ("Documents", home.join("Documents")),
+    ]
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        return std::env::var_os("USERPROFILE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                let drive = std::env::var_os("HOMEDRIVE")?;
+                let path = std::env::var_os("HOMEPATH")?;
+                if drive.is_empty() || path.is_empty() {
+                    return None;
+                }
+                let mut combined = drive;
+                combined.push(path);
+                Some(PathBuf::from(combined))
+            })
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            });
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            })
+    }
+}
+
 #[derive(Clone, Copy)]
 enum LocalPickMode {
     File,
@@ -2234,7 +2342,7 @@ fn create_folder(
 fn create_local_folder(
     local_path: &Arc<Mutex<String>>,
     local_entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_local_name: &Arc<Mutex<Option<String>>>,
+    selected_local_name: &FileSelection,
     local_new_folder_name: &Arc<Mutex<String>>,
     status: &Arc<Mutex<FileStatus>>,
     notice: &Arc<Mutex<String>>,
@@ -2286,7 +2394,7 @@ fn delete_local_path(
     path: &str,
     local_path: &Arc<Mutex<String>>,
     local_entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_local_name: &Arc<Mutex<Option<String>>>,
+    selected_local_name: &FileSelection,
     status: &Arc<Mutex<FileStatus>>,
     notice: &Arc<Mutex<String>>,
 ) {
@@ -2315,7 +2423,7 @@ fn rename_local_path(
     new_name: &str,
     local_path: &Arc<Mutex<String>>,
     local_entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_local_name: &Arc<Mutex<Option<String>>>,
+    selected_local_name: &FileSelection,
     status: &Arc<Mutex<FileStatus>>,
     notice: &Arc<Mutex<String>>,
 ) {
@@ -2377,13 +2485,14 @@ fn upload_selected_local(
     current_path: &Arc<Mutex<String>>,
     local_path: &Arc<Mutex<String>>,
     local_entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_local: &Arc<Mutex<Option<String>>>,
+    selected_local: &FileSelection,
     outbound: &Arc<Mutex<Vec<String>>>,
     status: &Arc<Mutex<FileStatus>>,
     notice: &Arc<Mutex<String>>,
     transfers: &Arc<Mutex<Vec<FileTransferRow>>>,
 ) {
-    let Some(name) = selected_local.lock().ok().and_then(|value| value.clone()) else {
+    let entries = selected_entries(local_entries, selected_local);
+    if entries.is_empty() {
         set_status_arc(
             status,
             notice,
@@ -2391,34 +2500,25 @@ fn upload_selected_local(
             "Select a local file or folder",
         );
         return;
-    };
-    let entry = local_entries
-        .lock()
-        .map(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry.name == name && matches!(entry.kind.as_str(), "file" | "dir"))
-                .cloned()
-        })
-        .unwrap_or(None);
-    let Some(_entry) = entry else {
-        set_status_arc(
-            status,
-            notice,
-            FileStatus::Failed,
-            "Select a local file or folder",
-        );
-        return;
-    };
+    }
 
-    let local_file = join_local(local_path, &name);
-    queue_upload_local_path(
-        current_path,
-        &PathBuf::from(local_file),
-        outbound,
+    let count = entries.len();
+    for entry in entries {
+        let local_file = join_local(local_path, &entry.name);
+        queue_upload_local_path(
+            current_path,
+            &PathBuf::from(local_file),
+            outbound,
+            status,
+            notice,
+            transfers,
+        );
+    }
+    set_status_arc(
         status,
         notice,
-        transfers,
+        FileStatus::Done,
+        &format!("{count} upload{} queued", plural_suffix(count)),
     );
 }
 
@@ -2493,17 +2593,11 @@ fn queue_upload_local_path(
     set_status_arc(status, notice, FileStatus::Done, "Upload queued");
 }
 
-fn selected_remote_entry(
+fn selected_remote_entries(
     entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_name: &Arc<Mutex<Option<String>>>,
-) -> Option<FileEntry> {
-    let name = selected_name.lock().ok().and_then(|value| value.clone())?;
-    entries.lock().ok().and_then(|entries| {
-        entries
-            .iter()
-            .find(|entry| entry.name == name && matches!(entry.kind.as_str(), "file" | "dir"))
-            .cloned()
-    })
+    selected_name: &FileSelection,
+) -> Vec<FileEntry> {
+    selected_entries(entries, selected_name)
 }
 
 fn is_pending(status: &Arc<Mutex<FileStatus>>) -> bool {
@@ -2513,15 +2607,66 @@ fn is_pending(status: &Arc<Mutex<FileStatus>>) -> bool {
         .unwrap_or(false)
 }
 
-fn select_entry(selected_name: &Arc<Mutex<Option<String>>>, entry: &FileEntry) {
+fn select_entry(selected_name: &FileSelection, entry: &FileEntry) {
     if let Ok(mut selected) = selected_name.lock() {
-        *selected = Some(entry.name.clone());
+        selected.names.clear();
+        selected.names.push(entry.name.clone());
     }
 }
 
-fn clear_selection(selected_name: &Arc<Mutex<Option<String>>>) {
+fn clear_selection(selected_name: &FileSelection) {
     if let Ok(mut selected) = selected_name.lock() {
-        *selected = None;
+        selected.names.clear();
+    }
+}
+
+fn selected_names(selected_name: &FileSelection) -> Vec<String> {
+    selected_name
+        .lock()
+        .map(|selected| selected.names.clone())
+        .unwrap_or_default()
+}
+
+fn set_entry_checked(selected_name: &FileSelection, entry: &FileEntry, checked: bool) {
+    if let Ok(mut selected) = selected_name.lock() {
+        if checked {
+            if !selected.names.iter().any(|name| name == &entry.name) {
+                selected.names.push(entry.name.clone());
+            }
+        } else {
+            selected.names.retain(|name| name != &entry.name);
+        }
+    }
+}
+
+fn selected_entries(
+    entries: &Arc<Mutex<Vec<FileEntry>>>,
+    selected_name: &FileSelection,
+) -> Vec<FileEntry> {
+    let names = selected_names(selected_name);
+    if names.is_empty() {
+        return Vec::new();
+    }
+    entries
+        .lock()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    names.iter().any(|name| name == &entry.name)
+                        && matches!(entry.kind.as_str(), "file" | "dir")
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn plural_suffix(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
     }
 }
 
@@ -2558,7 +2703,7 @@ fn same_local_dir(left: &Path, right: &Path) -> bool {
 fn refresh_local_entries_arc(
     local_path: &Arc<Mutex<String>>,
     local_entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_local_name: &Arc<Mutex<Option<String>>>,
+    selected_local_name: &FileSelection,
 ) {
     let path = local_path
         .lock()
@@ -2568,9 +2713,7 @@ fn refresh_local_entries_arc(
     if let Ok(mut value) = local_entries.lock() {
         *value = entries;
     }
-    if let Ok(mut value) = selected_local_name.lock() {
-        *value = None;
-    }
+    clear_selection(selected_local_name);
 }
 
 fn create_download_directory(
@@ -2658,7 +2801,7 @@ fn safe_local_join(root: &Path, relative_path: &str) -> Option<PathBuf> {
 fn set_local_dir(
     local_path: &Arc<Mutex<String>>,
     local_entries: &Arc<Mutex<Vec<FileEntry>>>,
-    selected_local_name: &Arc<Mutex<Option<String>>>,
+    selected_local_name: &FileSelection,
     path: &str,
 ) {
     let dir = PathBuf::from(path.trim());
@@ -2672,9 +2815,7 @@ fn set_local_dir(
     if let Ok(mut value) = local_entries.lock() {
         *value = read_local_entries(&display);
     }
-    if let Ok(mut value) = selected_local_name.lock() {
-        *value = None;
-    }
+    clear_selection(selected_local_name);
 }
 
 fn read_local_entries(path: &str) -> Vec<FileEntry> {

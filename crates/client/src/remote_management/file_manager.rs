@@ -311,6 +311,9 @@ fn resolve_path(path: &str) -> PathBuf {
     if path.is_empty() {
         return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     }
+    if let Some(path) = expand_home_path(path) {
+        return path;
+    }
     let path = PathBuf::from(path);
     if path.is_absolute() {
         path
@@ -318,6 +321,57 @@ fn resolve_path(path: &str) -> PathBuf {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
+    }
+}
+
+fn expand_home_path(path: &str) -> Option<PathBuf> {
+    if path != "~" && !path.starts_with("~/") && !path.starts_with("~\\") {
+        return None;
+    }
+    let mut home = user_home_dir()?;
+    let rest = path
+        .strip_prefix("~/")
+        .or_else(|| path.strip_prefix("~\\"))
+        .unwrap_or("");
+    for part in rest.split(['/', '\\']).filter(|part| !part.is_empty()) {
+        home.push(part);
+    }
+    Some(home)
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        return std::env::var_os("USERPROFILE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                let drive = std::env::var_os("HOMEDRIVE")?;
+                let path = std::env::var_os("HOMEPATH")?;
+                if drive.is_empty() || path.is_empty() {
+                    return None;
+                }
+                let mut combined = drive;
+                combined.push(path);
+                Some(PathBuf::from(combined))
+            })
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            });
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            })
     }
 }
 
