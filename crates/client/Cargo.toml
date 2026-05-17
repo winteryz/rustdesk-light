@@ -4,31 +4,54 @@ edition.workspace = true
 version.workspace = true
 authors.workspace = true
 license.workspace = true
+default-run = "rdl-client-gui"
 
 [[bin]]
-name = "rdl-client"
+name = "rdl-client-gui"
 path = "src/main.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "rdl-client-cli"
+path = "src/cli_main.rs"
+required-features = ["cli"]
 
 [dependencies]
 base64 = "0.22.1"
-cpal = "0.15.3"
-eframe = "0.34.2"
+cpal = { version = "0.15.3", optional = true }
+eframe = { version = "0.34.2", optional = true }
 fs2 = "0.4.3"
-rust-desk-light-assets = { path = "../assets" }
+rust-desk-light-assets = { path = "../assets", optional = true }
 rust-desk-light-config = { path = "../config" }
 rust-desk-light-protocol = { path = "../protocol" }
 rust-desk-light-version = { path = "../version" }
 
+[features]
+default = ["gui"]
+cli = []
+gui = [
+    "dep:cpal",
+    "dep:eframe",
+    "dep:rust-desk-light-assets",
+    "dep:image",
+    "dep:nokhwa",
+    "dep:windows-sys",
+    "dep:core-foundation",
+    "dep:core-graphics",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+]
+
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
-image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-nokhwa = { version = "0.10.10", default-features = true, features = ["input-msmf"] }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+nokhwa = { version = "0.10.10", default-features = true, features = ["input-msmf"], optional = true }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.9.4"
-core-graphics = "0.23.2"
-nokhwa = { version = "0.10.10", default-features = true, features = ["input-avfoundation"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+core-foundation = { version = "0.9.4", optional = true }
+core-graphics = { version = "0.23.2", optional = true }
+nokhwa = { version = "0.10.10", default-features = true, features = ["input-avfoundation"], optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow"], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"], optional = true }

@@ -23,14 +23,14 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 
-set "SERVER_EXE=%ROOT_DIR%\target\debug\rdl-server.exe"
-set "CLIENT_EXE=%ROOT_DIR%\target\debug\rdl-client.exe"
-set "ADMIN_EXE=%ROOT_DIR%\target\debug\rdl-admin.exe"
+set "SERVER_EXE=%ROOT_DIR%\target\debug\rdl-server-cli.exe"
+set "CLIENT_EXE=%ROOT_DIR%\target\debug\rdl-client-gui.exe"
+set "ADMIN_EXE=%ROOT_DIR%\target\debug\rdl-admin-gui.exe"
 
 :: Check if files exist, try without .exe if not found (though on Windows .exe is standard)
-if not exist "%SERVER_EXE%" set "SERVER_EXE=%ROOT_DIR%\target\debug\rdl-server"
-if not exist "%CLIENT_EXE%" set "CLIENT_EXE=%ROOT_DIR%\target\debug\rdl-client"
-if not exist "%ADMIN_EXE%" set "ADMIN_EXE=%ROOT_DIR%\target\debug\rdl-admin"
+if not exist "%SERVER_EXE%" set "SERVER_EXE=%ROOT_DIR%\target\debug\rdl-server-cli"
+if not exist "%CLIENT_EXE%" set "CLIENT_EXE=%ROOT_DIR%\target\debug\rdl-client-gui"
+if not exist "%ADMIN_EXE%" set "ADMIN_EXE=%ROOT_DIR%\target\debug\rdl-admin-gui"
 
 echo [2/5] Starting server on %IP%:%PORT%
 start /b "" "%SERVER_EXE%" --ip %IP% --port %PORT% > "%LOG_DIR%\server.log" 2> "%LOG_DIR%\server.err.log"
@@ -108,6 +108,6 @@ exit /b 0
 
 :stop_processes
 :: Force kill the processes we started. Using image name as taskkill /pid is hard in pure Batch.
-taskkill /f /im rdl-client.exe /t >nul 2>&1
-taskkill /f /im rdl-server.exe /t >nul 2>&1
+taskkill /f /im rdl-client-gui.exe /t >nul 2>&1
+taskkill /f /im rdl-server-cli.exe /t >nul 2>&1
 exit /b

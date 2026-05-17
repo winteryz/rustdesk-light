@@ -24,16 +24,16 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 
-set "SERVER_EXE=%ROOT_DIR%\target\debug\rdl-server.exe"
-set "CLIENT_EXE=%ROOT_DIR%\target\debug\rdl-client.exe"
-set "ADMIN_EXE=%ROOT_DIR%\target\debug\rdl-admin.exe"
+set "SERVER_EXE=%ROOT_DIR%\target\debug\rdl-server-cli.exe"
+set "CLIENT_EXE=%ROOT_DIR%\target\debug\rdl-client-gui.exe"
+set "ADMIN_EXE=%ROOT_DIR%\target\debug\rdl-admin-gui.exe"
 
-if not exist "%SERVER_EXE%" set "SERVER_EXE=%ROOT_DIR%\target\debug\rdl-server"
-if not exist "%CLIENT_EXE%" set "CLIENT_EXE=%ROOT_DIR%\target\debug\rdl-client"
-if not exist "%ADMIN_EXE%" set "ADMIN_EXE=%ROOT_DIR%\target\debug\rdl-admin"
+if not exist "%SERVER_EXE%" set "SERVER_EXE=%ROOT_DIR%\target\debug\rdl-server-cli"
+if not exist "%CLIENT_EXE%" set "CLIENT_EXE=%ROOT_DIR%\target\debug\rdl-client-gui"
+if not exist "%ADMIN_EXE%" set "ADMIN_EXE=%ROOT_DIR%\target\debug\rdl-admin-gui"
 
 :: Start server in a new window, keeps open on exit
-start "rdl-server" cmd /k "cd /d "%ROOT_DIR%" && "%SERVER_EXE%" --ip %IP% --port %PORT%"
+start "rdl-server-cli" cmd /k "cd /d "%ROOT_DIR%" && "%SERVER_EXE%" --ip %IP% --port %PORT%"
 
 timeout /t 1 /nobreak >nul
 

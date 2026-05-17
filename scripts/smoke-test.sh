@@ -47,12 +47,12 @@ echo "[1/5] Building workspace"
 cargo build --workspace
 
 echo "[2/5] Starting server on $IP:$PORT"
-"$ROOT_DIR/target/debug/rdl-server" --ip "$IP" --port "$PORT" >"$LOG_DIR/server.log" 2>&1 &
+"$ROOT_DIR/target/debug/rdl-server-cli" --ip "$IP" --port "$PORT" >"$LOG_DIR/server.log" 2>&1 &
 SERVER_PID="$!"
 wait_for_log "$LOG_DIR/server.log" "server listening" "server startup"
 
 echo "[3/5] Starting client"
-RDL_FORCE_TERMINAL=1 "$ROOT_DIR/target/debug/rdl-client" --ip "$IP" --port "$PORT" >"$LOG_DIR/client.log" 2>&1 &
+RDL_FORCE_TERMINAL=1 "$ROOT_DIR/target/debug/rdl-client-gui" --ip "$IP" --port "$PORT" >"$LOG_DIR/client.log" 2>&1 &
 CLIENT_PID="$!"
 wait_for_log "$LOG_DIR/client.log" "client id:" "client registration"
 
@@ -70,7 +70,7 @@ echo "[4/5] Running admin command flow for client: $CLIENT_ID"
   printf 'cmd %s computer_info\n' "$CLIENT_ID"
   sleep 0.8
   printf 'quit\n'
-} | RDL_FORCE_TERMINAL=1 "$ROOT_DIR/target/debug/rdl-admin" --ip "$IP" --port "$PORT" >"$LOG_DIR/admin.log" 2>&1
+} | RDL_FORCE_TERMINAL=1 "$ROOT_DIR/target/debug/rdl-admin-gui" --ip "$IP" --port "$PORT" >"$LOG_DIR/admin.log" 2>&1
 
 echo "[5/5] Verifying output"
 grep -q "online clients: 1" "$LOG_DIR/admin.log"
@@ -79,4 +79,3 @@ grep -q "hostname=" "$LOG_DIR/admin.log"
 
 echo "Smoke test passed."
 echo "Logs: $LOG_DIR"
-

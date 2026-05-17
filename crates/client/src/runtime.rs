@@ -41,7 +41,7 @@ pub(crate) fn acquire_client_process_lock() -> io::Result<ClientProcessLock> {
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!(
-                "another rdl-client process is already running (lock: {})",
+                "another rdl-client-gui/rdl-client-cli process is already running (lock: {})",
                 path.display()
             ),
         )),
@@ -63,13 +63,13 @@ impl Config {
     pub(crate) fn from_env() -> Result<Self, rdl_config::ConfigError> {
         let parsed = rdl_config::parse_endpoint_args(std::env::args().skip(1))?;
         if parsed.version {
-            println!("{}", rdl_version::app_version("rdl-client"));
+            println!("{}", rdl_version::app_version(client_binary_name()));
             std::process::exit(0);
         }
         if parsed.help {
             println!(
                 "{}",
-                rdl_config::help_text("rdl-client", ConfigKind::Client)
+                rdl_config::help_text(client_binary_name(), ConfigKind::Client)
             );
             std::process::exit(0);
         }
@@ -103,6 +103,14 @@ impl Config {
 
     pub(crate) fn cli_port_overridden(&self) -> bool {
         self.cli_port.is_some()
+    }
+}
+
+fn client_binary_name() -> &'static str {
+    if cfg!(feature = "gui") {
+        "rdl-client-gui"
+    } else {
+        "rdl-client-cli"
     }
 }
 
@@ -300,6 +308,7 @@ pub(crate) struct LocalIdentity {
     pub(crate) fingerprint: String,
 }
 
+#[cfg(feature = "gui")]
 pub(crate) fn gui_available() -> bool {
     if std::env::var_os("RDL_FORCE_TERMINAL").is_some() {
         return false;
@@ -312,6 +321,11 @@ pub(crate) fn gui_available() -> bool {
     {
         true
     }
+}
+
+#[cfg(not(feature = "gui"))]
+pub(crate) fn gui_available() -> bool {
+    false
 }
 
 pub(crate) fn hostname() -> String {

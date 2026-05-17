@@ -22,7 +22,7 @@ impl CommandReply {
 }
 
 pub fn handle_command(command: &CommandKind, payload: &str, gui_mode: bool) -> CommandReply {
-    if command.requires_client_gui() && !gui_mode {
+    if command.requires_client_gui() && (!gui_mode || !cfg!(feature = "gui")) {
         return CommandReply::rejected(gui_disabled_detail(command));
     }
 
@@ -113,11 +113,24 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "gui")]
     #[test]
     fn gui_mode_still_allows_user_interaction_commands() {
         let reply = handle_command(&CommandKind::TextChat, "", true);
 
         assert!(reply.accepted);
         assert_eq!(reply.detail, "chat_delivered");
+    }
+
+    #[cfg(not(feature = "gui"))]
+    #[test]
+    fn no_gui_build_rejects_user_interaction_commands_even_if_flag_is_true() {
+        let reply = handle_command(&CommandKind::TextChat, "", true);
+
+        assert!(!reply.accepted);
+        assert_eq!(
+            reply.detail,
+            "text_chat_disabled\nmessage=client GUI is not available"
+        );
     }
 }

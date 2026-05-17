@@ -12,7 +12,11 @@ fn configure_macos_build() {
         return;
     }
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
-    spawn_macos_adhoc_signer("rdl-admin", "local.rust-desk-light.admin", &manifest_dir);
+    spawn_macos_adhoc_signer(
+        "rdl-admin-gui",
+        "local.rust-desk-light.admin.gui",
+        &manifest_dir,
+    );
 }
 
 fn spawn_macos_adhoc_signer(binary_name: &str, default_identifier: &str, manifest_dir: &str) {

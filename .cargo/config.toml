@@ -1,0 +1,5 @@
+[alias]
+build-admin-gui = "build -p rust-desk-light-admin --bin rdl-admin-gui"
+build-client-cli = "build -p rust-desk-light-client --no-default-features --features cli --bin rdl-client-cli"
+build-client-gui = "build -p rust-desk-light-client --bin rdl-client-gui"
+build-server-cli = "build -p rust-desk-light-server --bin rdl-server-cli"

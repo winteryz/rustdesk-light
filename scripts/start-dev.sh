@@ -19,13 +19,13 @@ echo "Building rust-desk-light"
 cargo build --workspace --manifest-path "$ROOT_DIR/Cargo.toml"
 
 GEOIP_DB_PATH="$(rdl_find_geoip_db "$ROOT_DIR" || true)"
-SERVER_CMD="cd $(shell_quote "$ROOT_DIR") && ./target/debug/rdl-server --ip $(shell_quote "$IP") --port $(shell_quote "$PORT")"
+SERVER_CMD="cd $(shell_quote "$ROOT_DIR") && ./target/debug/rdl-server-cli --ip $(shell_quote "$IP") --port $(shell_quote "$PORT")"
 if [[ -n "$GEOIP_DB_PATH" ]]; then
   SERVER_CMD="$SERVER_CMD --geoip-db $(shell_quote "$GEOIP_DB_PATH")"
 fi
 SERVER_CMD="$SERVER_CMD 2>&1 | tee $(shell_quote "$LOG_DIR/server.log")"
-CLIENT_BIN="$ROOT_DIR/target/debug/rdl-client"
-ADMIN_BIN="$ROOT_DIR/target/debug/rdl-admin"
+CLIENT_BIN="$ROOT_DIR/target/debug/rdl-client-gui"
+ADMIN_BIN="$ROOT_DIR/target/debug/rdl-admin-gui"
 
 echo "Starting rust-desk-light dev stack"
 echo "server: $IP:$PORT"
@@ -52,11 +52,11 @@ EOF
     ;;
   Linux)
     if command -v gnome-terminal >/dev/null 2>&1; then
-      gnome-terminal --title="rdl-server" -- bash -lc "$SERVER_CMD; exec bash"
+      gnome-terminal --title="rdl-server-cli" -- bash -lc "$SERVER_CMD; exec bash"
     elif command -v konsole >/dev/null 2>&1; then
-      konsole --new-tab -p tabtitle="rdl-server" -e bash -lc "$SERVER_CMD; exec bash"
+      konsole --new-tab -p tabtitle="rdl-server-cli" -e bash -lc "$SERVER_CMD; exec bash"
     elif command -v xterm >/dev/null 2>&1; then
-      xterm -T "rdl-server" -e bash -lc "$SERVER_CMD; exec bash" &
+      xterm -T "rdl-server-cli" -e bash -lc "$SERVER_CMD; exec bash" &
     else
       echo "No supported terminal emulator found."
       echo "Run the server command manually, then start client/admin binaries:"

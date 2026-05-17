@@ -112,13 +112,13 @@ The dev stack launcher uses the same lookup:
 You can still pass the `.mmdb` file manually:
 
 ```bash
-./rdl-server --ip 0.0.0.0 --port 5169 --geoip-db /path/to/GeoLite2-City.mmdb
+./rdl-server-cli --ip 0.0.0.0 --port 5169 --geoip-db /path/to/GeoLite2-City.mmdb
 ```
 
 Or set the environment variable:
 
 ```bash
-RDL_GEOIP_DB=/path/to/GeoLite2-City.mmdb ./rdl-server --ip 0.0.0.0 --port 5169
+RDL_GEOIP_DB=/path/to/GeoLite2-City.mmdb ./rdl-server-cli --ip 0.0.0.0 --port 5169
 ```
 
 The server startup log includes the GeoIP status:

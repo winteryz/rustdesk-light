@@ -169,7 +169,7 @@ fn render_map_contents(
                 );
                 ui.label(
                     egui::RichText::new(
-                        "If this is a public client, restart rdl-server with --geoip-db /path/GeoLite2-City.mmdb.",
+                        "If this is a public client, restart rdl-server-cli with --geoip-db /path/GeoLite2-City.mmdb.",
                     )
                         .size(12.0)
                         .color(ui::COLOR_MUTED),

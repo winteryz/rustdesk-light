@@ -15,11 +15,14 @@ impl Config {
     pub(crate) fn from_env() -> Result<Self, rdl_config::ConfigError> {
         let parsed = rdl_config::parse_endpoint_args(std::env::args().skip(1))?;
         if parsed.version {
-            println!("{}", rdl_version::app_version("rdl-admin"));
+            println!("{}", rdl_version::app_version("rdl-admin-gui"));
             std::process::exit(0);
         }
         if parsed.help {
-            println!("{}", rdl_config::help_text("rdl-admin", ConfigKind::Admin));
+            println!(
+                "{}",
+                rdl_config::help_text("rdl-admin-gui", ConfigKind::Admin)
+            );
             std::process::exit(0);
         }
 

@@ -4,9 +4,9 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 IP="${RDL_IP:-0.0.0.0}"
 PORT="${RDL_PORT:-5169}"
-LOG_DIR="${RDL_LOG_DIR:-$ROOT_DIR/target/rdl-server}"
-PID_FILE="$LOG_DIR/rdl-server.pid"
-LOG_FILE="$LOG_DIR/rdl-server.log"
+LOG_DIR="${RDL_LOG_DIR:-$ROOT_DIR/target/rdl-server-cli}"
+PID_FILE="$LOG_DIR/rdl-server-cli.pid"
+LOG_FILE="$LOG_DIR/rdl-server-cli.log"
 
 . "$ROOT_DIR/scripts/geoip-db.sh"
 
@@ -21,9 +21,9 @@ else
   echo "Skipping git pull because RDL_SKIP_PULL=1"
 fi
 
-echo "Building rdl-server (release)"
+echo "Building rdl-server-cli (release)"
 cargo build -p rust-desk-light-server --release
-SERVER_BIN="$ROOT_DIR/target/release/rdl-server"
+SERVER_BIN="$ROOT_DIR/target/release/rdl-server-cli"
 GEOIP_DB_PATH="$(rdl_find_geoip_db "$ROOT_DIR" || true)"
 
 stop_existing() {
@@ -42,7 +42,7 @@ stop_existing() {
     return 0
   fi
 
-  echo "Stopping existing rdl-server pid=$old_pid"
+  echo "Stopping existing rdl-server-cli pid=$old_pid"
   kill "$old_pid" 2>/dev/null || true
 
   count=0
@@ -63,11 +63,11 @@ stop_existing
 
 if [ -n "$GEOIP_DB_PATH" ]; then
   echo "Using GeoIP database: $GEOIP_DB_PATH"
-  echo "Starting rdl-server on $IP:$PORT"
+  echo "Starting rdl-server-cli on $IP:$PORT"
   nohup "$SERVER_BIN" --ip "$IP" --port "$PORT" --geoip-db "$GEOIP_DB_PATH" >>"$LOG_FILE" 2>&1 &
 else
   echo "No GeoIP database found; starting without client map locations"
-  echo "Starting rdl-server on $IP:$PORT"
+  echo "Starting rdl-server-cli on $IP:$PORT"
   nohup "$SERVER_BIN" --ip "$IP" --port "$PORT" >>"$LOG_FILE" 2>&1 &
 fi
 new_pid="$!"
@@ -75,10 +75,10 @@ echo "$new_pid" >"$PID_FILE"
 
 sleep 1
 if kill -0 "$new_pid" 2>/dev/null; then
-  echo "rdl-server started pid=$new_pid"
+  echo "rdl-server-cli started pid=$new_pid"
   echo "log: $LOG_FILE"
 else
-  echo "rdl-server failed to start. Last log lines:"
+  echo "rdl-server-cli failed to start. Last log lines:"
   tail -n 40 "$LOG_FILE" 2>/dev/null || true
   exit 1
 fi

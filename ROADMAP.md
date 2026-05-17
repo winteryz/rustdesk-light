@@ -1,10 +1,11 @@
 # ROADMAP
 
-This project is a lightweight Rust remote assistance tool with three small binaries plus shared crates:
+This project is a lightweight Rust remote assistance tool with release binaries plus shared crates:
 
-- `rdl-server`: presence, routing, TCP message relay, and UDP audio relay.
-- `rdl-client`: endpoint agent with GUI status and terminal fallback.
-- `rdl-admin`: operator GUI for listing clients and sending commands.
+- `rdl-server-cli`: presence, routing, TCP message relay, and UDP audio relay.
+- `rdl-client-gui`: endpoint agent with GUI status and terminal fallback.
+- `rdl-client-cli`: terminal-only endpoint agent built without GUI dependencies.
+- `rdl-admin-gui`: operator GUI for listing clients and sending commands.
 - `rdl_protocol`: shared wire protocol and command model.
 - `rust-desk-light-config`: shared startup config loading and persistence.
 - `rust-desk-light-assets`: shared embedded GUI resources.
@@ -182,7 +183,7 @@ This should only be implemented after screen view and protocol reliability are g
 
 macOS note:
 
-- Remote mouse input requires Accessibility permission for the app that launches `rdl-client` (for example Terminal, iTerm, Warp, or the Codex host), not only the bare `rdl-client` file. Screen capture still requires Screen Recording permission for the running client process.
+- Remote mouse input requires Accessibility permission for the app that launches `rdl-client-gui` (for example Terminal, iTerm, Warp, or the Codex host), not only the bare `rdl-client-gui` file. Screen capture still requires Screen Recording permission for the running client process.
 
 ## Milestone 8.5: Camera Capture
 
@@ -224,7 +225,7 @@ Notes:
 - [x] Allow admin to remotely update a client's server config and reconnect it when effective settings change.
 - [x] Add client process single-instance lock.
 - [x] Avoid repeated macOS hostname `scutil` calls by caching hostname and using `gethostname` first.
-- [x] Automatically ad-hoc sign macOS debug builds for `rdl-client`, `rdl-admin`, and `rdl-server`.
+- [x] Automatically ad-hoc sign macOS debug builds for `rdl-client-gui`, `rdl-admin-gui`, and `rdl-server-cli`.
 - [x] Embed shared app icon assets for the admin and client GUI windows.
 - [x] Windows build artifact.
 - [x] Linux build artifact.

@@ -2844,7 +2844,7 @@ mod tests {
 
     #[test]
     fn completed_download_chunk_marks_transfer_done_without_complete_event() {
-        let local_root = test_dir("rdl-admin-download-complete-chunk");
+        let local_root = test_dir("rdl-admin-gui-download-complete-chunk");
         let local_root_text = local_root.display().to_string();
         let destination = local_root.join("hello.txt");
         let mut windows = Vec::new();
@@ -2973,8 +2973,8 @@ mod tests {
 
     #[test]
     fn completed_download_refreshes_local_list_only_for_visible_target() {
-        let visible_root = test_dir("rdl-admin-visible-download-target");
-        let hidden_root = test_dir("rdl-admin-hidden-download-target");
+        let visible_root = test_dir("rdl-admin-gui-visible-download-target");
+        let hidden_root = test_dir("rdl-admin-gui-hidden-download-target");
         fs::write(visible_root.join("visible.txt"), b"visible").unwrap();
         fs::write(hidden_root.join("hidden.txt"), b"hidden").unwrap();
 

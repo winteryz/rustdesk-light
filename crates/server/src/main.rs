@@ -1379,7 +1379,7 @@ impl Config {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
         let parsed = rdl_config::parse_endpoint_args(args.clone())?;
         if parsed.version {
-            println!("{}", rdl_version::app_version("rdl-server"));
+            println!("{}", rdl_version::app_version("rdl-server-cli"));
             std::process::exit(0);
         }
         if parsed.help {
@@ -1423,7 +1423,7 @@ fn parse_geoip_db_path(args: &[String]) -> Result<Option<PathBuf>, rdl_config::C
 fn server_help_text() -> String {
     format!(
         "{}\n\nGeoIP:\n  --geoip-db PATH     Optional MaxMind GeoLite2/GeoIP2 City .mmdb used to place clients on the admin map.\n  RDL_GEOIP_DB=PATH   Environment variable fallback for --geoip-db.",
-        rdl_config::help_text("rdl-server", rdl_config::ConfigKind::Server)
+        rdl_config::help_text("rdl-server-cli", rdl_config::ConfigKind::Server)
     )
 }
 

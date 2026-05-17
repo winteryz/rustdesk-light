@@ -1,5 +1,7 @@
 fn main() {
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+        && std::env::var_os("CARGO_FEATURE_GUI").is_some()
+    {
         configure_macos_build();
     }
 }
@@ -8,7 +10,7 @@ fn configure_macos_build() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
     let plist = std::path::Path::new(&manifest_dir).join("macos/Info.plist");
     println!(
-        "cargo:rustc-link-arg-bin=rdl-client=-Wl,-sectcreate,__TEXT,__info_plist,{}",
+        "cargo:rustc-link-arg-bin=rdl-client-gui=-Wl,-sectcreate,__TEXT,__info_plist,{}",
         plist.display()
     );
     println!("cargo:rerun-if-changed={}", plist.display());
@@ -18,7 +20,11 @@ fn configure_macos_build() {
     if std::env::var_os("RDL_SKIP_MACOS_ADHOC_SIGN").is_some() {
         return;
     }
-    spawn_macos_adhoc_signer("rdl-client", "local.rust-desk-light.client", &manifest_dir);
+    spawn_macos_adhoc_signer(
+        "rdl-client-gui",
+        "local.rust-desk-light.client",
+        &manifest_dir,
+    );
 }
 
 fn spawn_macos_adhoc_signer(binary_name: &str, default_identifier: &str, manifest_dir: &str) {

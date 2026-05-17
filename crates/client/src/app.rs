@@ -1,10 +1,12 @@
+#[cfg(feature = "gui")]
+use crate::user_interaction;
 use crate::{
     commands,
     runtime::{
         gui_available, hostname, load_client_identity, os_label, username, Config, LocalIdentity,
     },
-    user_interaction,
 };
+#[cfg(feature = "gui")]
 use eframe::egui;
 use rdl_protocol::{
     audio_udp, now_epoch_ms, write_envelope_with_token, AudioSource, CommandKind, EnvelopeDecoder,
@@ -12,10 +14,12 @@ use rdl_protocol::{
 };
 use std::io;
 use std::net::{TcpStream, UdpSocket};
+#[cfg(feature = "gui")]
+use std::sync::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, Sender, SyncSender},
-    Arc, Mutex,
+    Arc,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,6 +27,7 @@ use std::time::{Duration, Instant};
 const INITIAL_RECONNECT_DELAY_MS: u64 = 500;
 const MAX_RECONNECT_DELAY_MS: u64 = 8_000;
 const NETWORK_POLL_INTERVAL_MS: u64 = 16;
+#[cfg(feature = "gui")]
 const GUI_FRAME_INTERVAL_MS: u64 = 16;
 const NETWORK_IDLE_SLEEP_MS: u64 = 4;
 const CLIENT_OUTBOUND_QUEUE_CAPACITY: usize = 32;
@@ -37,20 +42,24 @@ const AUDIO_UDP_RECV_TIMEOUT_MS: u64 = 20;
 const AUDIO_UDP_MAX_PAYLOAD_BYTES: usize = 1_200;
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::from_env()?;
     let process_lock = crate::runtime::acquire_client_process_lock()?;
     debug_log!(
         "debug event=client_process_lock path={}",
         process_lock.path().display()
     );
-    let config = Config::from_env()?;
     if gui_available() {
-        run_gui(config)?;
-    } else {
-        run_terminal(config)?;
+        #[cfg(feature = "gui")]
+        {
+            run_gui(config)?;
+            return Ok(());
+        }
     }
+    run_terminal(config)?;
     Ok(())
 }
 
+#[cfg(feature = "gui")]
 fn run_gui(config: Config) -> eframe::Result {
     disable_macos_automatic_window_tabbing();
 
@@ -104,14 +113,14 @@ fn run_gui(config: Config) -> eframe::Result {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "gui", target_os = "macos"))]
 fn disable_macos_automatic_window_tabbing() {
     if let Some(main_thread) = objc2_foundation::MainThreadMarker::new() {
         objc2_app_kit::NSWindow::setAllowsAutomaticWindowTabbing(false, main_thread);
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(feature = "gui", not(target_os = "macos")))]
 fn disable_macos_automatic_window_tabbing() {}
 
 fn run_terminal(config: Config) -> io::Result<()> {
@@ -930,6 +939,7 @@ fn client_connection_once(
     Ok(())
 }
 
+#[cfg(feature = "gui")]
 struct ClientApp {
     config: Config,
     identity: LocalIdentity,
@@ -941,6 +951,7 @@ struct ClientApp {
     voice_chat_window: Option<user_interaction::voice_chat::VoiceChatWindow>,
 }
 
+#[cfg(feature = "gui")]
 impl ClientApp {
     fn new(
         cc: &eframe::CreationContext<'_>,
@@ -1108,6 +1119,7 @@ impl ClientApp {
     }
 }
 
+#[cfg(feature = "gui")]
 impl eframe::App for ClientApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let changed = self.drain_events();
@@ -1159,15 +1171,24 @@ impl eframe::App for ClientApp {
     }
 }
 
+#[cfg(feature = "gui")]
 const COLOR_BG: egui::Color32 = egui::Color32::from_rgb(246, 248, 251);
+#[cfg(feature = "gui")]
 const COLOR_PANEL: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
+#[cfg(feature = "gui")]
 const COLOR_BORDER: egui::Color32 = egui::Color32::from_rgb(222, 228, 236);
+#[cfg(feature = "gui")]
 const COLOR_TEXT: egui::Color32 = egui::Color32::from_rgb(24, 33, 47);
+#[cfg(feature = "gui")]
 const COLOR_MUTED: egui::Color32 = egui::Color32::from_rgb(96, 108, 124);
+#[cfg(feature = "gui")]
 const COLOR_GOOD: egui::Color32 = egui::Color32::from_rgb(24, 135, 84);
+#[cfg(feature = "gui")]
 const COLOR_BAD: egui::Color32 = egui::Color32::from_rgb(190, 58, 58);
+#[cfg(feature = "gui")]
 const ACTIVITY_LOG_LIMIT: usize = 300;
 
+#[cfg(feature = "gui")]
 fn apply_client_theme(ctx: &egui::Context) {
     let mut style = (*ctx.global_style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
@@ -1183,6 +1204,7 @@ fn apply_client_theme(ctx: &egui::Context) {
     ctx.set_global_style(style);
 }
 
+#[cfg(feature = "gui")]
 fn panel(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::default()
         .fill(COLOR_PANEL)
@@ -1192,6 +1214,7 @@ fn panel(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
         .show(ui, add_contents);
 }
 
+#[cfg(feature = "gui")]
 fn section_title(ui: &mut egui::Ui, title: &str) {
     ui.label(
         egui::RichText::new(title)
@@ -1201,22 +1224,26 @@ fn section_title(ui: &mut egui::Ui, title: &str) {
     );
 }
 
+#[cfg(feature = "gui")]
 fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.label(egui::RichText::new(label).color(COLOR_MUTED));
     ui.label(egui::RichText::new(value).color(COLOR_TEXT).strong());
     ui.end_row();
 }
 
+#[cfg(feature = "gui")]
 fn timestamped_log(line: impl Into<String>) -> String {
     format!("[{}] {}", activity_time_label(), line.into())
 }
 
+#[cfg(feature = "gui")]
 fn prune_activity_logs(log_lines: &mut Vec<String>) {
     if log_lines.len() > ACTIVITY_LOG_LIMIT {
         log_lines.drain(0..log_lines.len() - ACTIVITY_LOG_LIMIT);
     }
 }
 
+#[cfg(feature = "gui")]
 fn activity_context_menu(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -1236,6 +1263,7 @@ fn activity_context_menu(
         });
 }
 
+#[cfg(feature = "gui")]
 fn activity_time_label() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1249,6 +1277,7 @@ fn activity_time_label() -> String {
     format!("{hour:02}:{minute:02}:{second:02}")
 }
 
+#[cfg(feature = "gui")]
 fn status_pill(ui: &mut egui::Ui, connected: bool) {
     let (text, color) = if connected {
         ("Online", COLOR_GOOD)
@@ -1290,10 +1319,12 @@ enum ClientEvent {
 #[derive(Clone)]
 struct ClientEventSink {
     tx: Sender<ClientEvent>,
+    #[cfg(feature = "gui")]
     repaint_handle: Option<Arc<Mutex<Option<egui::Context>>>>,
 }
 
 impl ClientEventSink {
+    #[cfg(feature = "gui")]
     fn new(
         tx: Sender<ClientEvent>,
         repaint_handle: Option<Arc<Mutex<Option<egui::Context>>>>,
@@ -1301,8 +1332,14 @@ impl ClientEventSink {
         Self { tx, repaint_handle }
     }
 
+    #[cfg(not(feature = "gui"))]
+    fn new(tx: Sender<ClientEvent>, _repaint_handle: Option<()>) -> Self {
+        Self { tx }
+    }
+
     fn send(&self, event: ClientEvent) {
         let _ = self.tx.send(event);
+        #[cfg(feature = "gui")]
         if let Some(ctx) = self
             .repaint_handle
             .as_ref()
@@ -1313,6 +1350,7 @@ impl ClientEventSink {
     }
 }
 
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 enum ClientInput {
     ChatReply { text: String },
     VoiceChatAccept,

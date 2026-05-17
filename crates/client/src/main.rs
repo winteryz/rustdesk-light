@@ -26,6 +26,7 @@ mod session;
 mod support;
 mod system_info;
 mod user_interaction;
+#[cfg(feature = "gui")]
 mod windowing;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
