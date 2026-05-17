@@ -1,5 +1,5 @@
 use fs2::FileExt;
-use rdl_config::{ConfigKind, EndpointConfig, EndpointOverrides};
+use rdl_config::{ConfigKind, EmbeddedEndpointConfig, EndpointConfig, EndpointOverrides};
 use std::fs;
 use std::fs::File;
 use std::io;
@@ -7,6 +7,16 @@ use std::os::raw::{c_char, c_int};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
+
+#[used]
+#[cfg_attr(
+    all(unix, not(target_os = "macos")),
+    link_section = ".rodata.rdl_client_config"
+)]
+#[cfg_attr(target_os = "macos", link_section = "__TEXT,__rdlcfg")]
+#[cfg_attr(target_os = "windows", link_section = ".rdata$RDL")]
+static RDL_CLIENT_EMBEDDED_CONFIG_SLOT: [u8; rdl_config::CLIENT_EMBEDDED_CONFIG_SLOT_BYTES] =
+    rdl_config::empty_client_embedded_config_slot();
 
 static HOSTNAME_CACHE: OnceLock<String> = OnceLock::new();
 
@@ -57,11 +67,13 @@ pub(crate) struct Config {
     pub(crate) config_path: PathBuf,
     cli_ip: Option<String>,
     cli_port: Option<u16>,
+    embedded_config: Option<EmbeddedEndpointConfig>,
     overrides: EndpointOverrides,
 }
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self, rdl_config::ConfigError> {
+        keep_embedded_config_slot_linked();
         let parsed = rdl_config::parse_endpoint_args(std::env::args().skip(1))?;
         if parsed.version {
             println!("{}", rdl_version::app_version(client_binary_name()));
@@ -87,6 +99,7 @@ impl Config {
             config_path: loaded.config_path,
             cli_ip: loaded.cli_ip,
             cli_port: loaded.cli_port,
+            embedded_config: loaded.embedded_config,
             overrides,
         })
     }
@@ -106,6 +119,48 @@ impl Config {
     pub(crate) fn cli_port_overridden(&self) -> bool {
         self.cli_port.is_some()
     }
+
+    pub(crate) fn embedded_config_enabled(&self) -> bool {
+        self.embedded_config.is_some()
+    }
+
+    pub(crate) fn config_mode_label(&self) -> &'static str {
+        if self.embedded_config_enabled() {
+            "Embedded read-only"
+        } else {
+            "User config file"
+        }
+    }
+
+    #[cfg(feature = "gui")]
+    pub(crate) fn config_mode_detail(&self) -> String {
+        if self.embedded_config_enabled() {
+            "embedded read-only config; client.toml is not loaded or saved".to_string()
+        } else {
+            format!("client.toml: {}", self.config_path.display())
+        }
+    }
+
+    pub(crate) fn startup_config_notice(&self) -> String {
+        if self.embedded_config_enabled() {
+            format!(
+                "config mode=embedded-read-only server={}:{} client_toml=not_loaded_or_saved",
+                self.ip, self.port
+            )
+        } else {
+            format!(
+                "config mode=file server={}:{} path={}",
+                self.ip,
+                self.port,
+                self.config_path.display()
+            )
+        }
+    }
+}
+
+#[inline(never)]
+fn keep_embedded_config_slot_linked() {
+    std::hint::black_box(&RDL_CLIENT_EMBEDDED_CONFIG_SLOT);
 }
 
 fn client_binary_name() -> &'static str {
@@ -144,6 +199,20 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
             detail: format!(
                 "client_config\nstatus=error\nmessage=invalid port: {}",
                 clean_value(port)
+            ),
+            reconnect: false,
+        };
+    }
+    if config.embedded_config_enabled() {
+        return ClientConfigUpdate {
+            accepted: false,
+            detail: client_config_detail(
+                "refused",
+                config,
+                config,
+                None,
+                false,
+                "embedded read-only config is active; client.toml is not loaded or saved",
             ),
             reconnect: false,
         };
@@ -299,6 +368,8 @@ fn client_config_detail(
         format!("effective_port={}", effective.port),
         format!("cli_ip_override={}", current.cli_ip_overridden()),
         format!("cli_port_override={}", current.cli_port_overridden()),
+        format!("embedded_config={}", current.embedded_config_enabled()),
+        format!("config_mode={}", clean_value(current.config_mode_label())),
         format!("reconnect={reconnect}"),
     ]
     .join("\n")
@@ -567,6 +638,41 @@ mod tests {
         assert_eq!(reloaded.ip, "192.0.2.10");
         assert_eq!(reloaded.port, 6000);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn embedded_config_refuses_file_updates() {
+        let path = temp_config_path("client-embedded-readonly");
+        let config = Config {
+            ip: "203.0.113.10".to_string(),
+            port: 7777,
+            auth_token: String::new(),
+            config_path: path.clone(),
+            cli_ip: None,
+            cli_port: None,
+            embedded_config: Some(EmbeddedEndpointConfig {
+                ip: Some("203.0.113.10".to_string()),
+                port: Some(7777),
+                auth_token: None,
+                require_client_auth: None,
+                raw_toml: String::new(),
+            }),
+            overrides: EndpointOverrides {
+                config_path: Some(path.clone()),
+                ..Default::default()
+            },
+        };
+
+        let update = update_client_config(
+            &config,
+            "confirm=true\nip=10.0.0.9\nport=7000\nreconnect=true",
+        );
+
+        assert!(!update.accepted);
+        assert!(!update.reconnect);
+        assert!(update.detail.contains("status=refused"));
+        assert!(update.detail.contains("embedded_config=true"));
+        assert!(!path.exists());
     }
 
     fn temp_config_path(prefix: &str) -> PathBuf {

@@ -1,5 +1,6 @@
 # Example rdl-client-gui/rdl-client-cli config.
-# Startup arguments override this file.
+# Priority:
+# built-in defaults < this file < environment < startup arguments < embedded client config.
 
 [server]
 ip = "127.0.0.1"

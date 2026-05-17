@@ -1,3 +1,4 @@
+mod client_builder;
 mod client_map;
 mod command_result;
 mod event;
@@ -7,6 +8,7 @@ mod payload;
 mod ui;
 
 use self::{
+    client_builder::ClientBuilderState,
     client_map::ClientMapWindow,
     command_result::{
         command_status_notice, command_title, command_window_identity_title, detail_status,
@@ -344,6 +346,8 @@ struct AdminApp {
     connected: bool,
     clients: Vec<ClientRow>,
     client_filter: String,
+    client_builder_open: bool,
+    client_builder: ClientBuilderState,
     client_map_window: ClientMapWindow,
     selected_client_id: Option<String>,
     command_windows: Vec<CommandResultWindow>,
@@ -707,6 +711,7 @@ impl AdminApp {
         }
         let initial_auth_token = config.auth_token.clone();
         let auth_token_prompt_open = initial_auth_token.trim().is_empty();
+        let client_builder = ClientBuilderState::new(&config);
         Self {
             config,
             input_tx,
@@ -717,6 +722,8 @@ impl AdminApp {
             connected: false,
             clients: Vec::new(),
             client_filter: String::new(),
+            client_builder_open: false,
+            client_builder,
             client_map_window: ClientMapWindow::new(),
             selected_client_id: None,
             command_windows: Vec::new(),
@@ -2062,6 +2069,9 @@ impl AdminApp {
                 if ui.button("🌐 Client Map").clicked() {
                     self.client_map_window.open();
                 }
+                if ui.button("Client Builder").clicked() {
+                    self.client_builder_open = true;
+                }
                 if let Some(client_id) = self.selected_client_id.clone() {
                     ui.separator();
                     let status = self
@@ -2958,6 +2968,12 @@ impl eframe::App for AdminApp {
         self.render_session_command_windows(ui.ctx());
         self.render_execute_windows(ui.ctx());
         self.render_auth_token_prompt(ui.ctx());
+        if let Some(log_line) =
+            self.client_builder
+                .render(ui.ctx(), &mut self.client_builder_open, &self.config)
+        {
+            self.push_log(log_line);
+        }
         self.client_map_window.render(
             ui.ctx(),
             &self.clients,

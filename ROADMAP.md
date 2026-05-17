@@ -31,7 +31,7 @@
 
 ### Deployment
 
-- [ ] Add an admin-side client builder for embedding server IP/port into a generated client package.
+- [x] Add an admin-side client builder for embedding server IP/port into a generated client package.
 - [ ] Add optional service/daemon install mode.
 - [ ] Add client config for automatic wake and sleep prevention while needed.
 

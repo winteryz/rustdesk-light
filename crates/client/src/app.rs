@@ -48,16 +48,26 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         "debug event=client_process_lock path={}",
         process_lock.path().display()
     );
-    if gui_available() {
+
+    let startup_notice_printed = if gui_available() {
         #[cfg(feature = "gui")]
         {
+            eprintln!("{}", config.startup_config_notice());
             match run_gui(config.clone()) {
                 Ok(()) => return Ok(()),
                 Err(error) => eprintln!("GUI startup failed: {error}; falling back to terminal"),
             }
+            true
         }
-    }
-    run_terminal(config)?;
+        #[cfg(not(feature = "gui"))]
+        {
+            false
+        }
+    } else {
+        false
+    };
+
+    run_terminal(config, !startup_notice_printed)?;
     Ok(())
 }
 
@@ -125,17 +135,22 @@ fn disable_macos_automatic_window_tabbing() {
 #[cfg(all(feature = "gui", not(target_os = "macos")))]
 fn disable_macos_automatic_window_tabbing() {}
 
-fn run_terminal(config: Config) -> io::Result<()> {
+fn run_terminal(config: Config, print_startup_notice: bool) -> io::Result<()> {
     let identity = load_client_identity();
     let (event_tx, event_rx) = mpsc::channel();
     let (_input_tx, input_rx) = mpsc::channel();
+    #[cfg(feature = "gui")]
+    let terminal_mode = "terminal fallback";
+    #[cfg(not(feature = "gui"))]
+    let terminal_mode = "terminal mode";
     println!(
-        "rust-desk-light client {} terminal fallback, server={}:{} config={}",
+        "rust-desk-light client {} {}",
         rdl_version::display_version(),
-        config.ip,
-        config.port,
-        config.config_path.display()
+        terminal_mode
     );
+    if print_startup_notice {
+        println!("{}", config.startup_config_notice());
+    }
     println!("client id: {}", identity.id);
     println!("fingerprint: {}", identity.fingerprint);
     println!("waiting for admin commands; press Ctrl+C to exit");
@@ -973,15 +988,18 @@ impl ClientApp {
             *handle = Some(cc.egui_ctx.clone());
         }
         Self {
+            log_lines: vec![
+                timestamped_log(format!(
+                    "client gui started version={}",
+                    rdl_version::display_version()
+                )),
+                timestamped_log(config.startup_config_notice()),
+            ],
             config,
             identity,
             input_tx,
             event_rx,
             connected: false,
-            log_lines: vec![timestamped_log(format!(
-                "client gui started version={}",
-                rdl_version::display_version()
-            ))],
             chat_window: None,
             voice_chat_window: None,
         }
@@ -1093,6 +1111,8 @@ impl ClientApp {
                         "Server",
                         &format!("{}:{}", self.config.ip, self.config.port),
                     );
+                    detail_row(ui, "Config Mode", self.config.config_mode_label());
+                    detail_row(ui, "Config Detail", &self.config.config_mode_detail());
                     detail_row(ui, "Version", &rdl_version::display_version());
                     detail_row(ui, "Host", &hostname());
                     detail_row(
