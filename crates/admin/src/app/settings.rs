@@ -6,30 +6,24 @@ use super::{form_label, COLOR_BAD, COLOR_GOOD, TOOLBAR_CONTROL_HEIGHT};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SettingsLanguage {
     English,
-    ChineseSimplified,
 }
 
 impl SettingsLanguage {
-    const ALL: [Self; 2] = [Self::English, Self::ChineseSimplified];
+    const ALL: [Self; 1] = [Self::English];
 
-    fn from_config(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "zh-cn" | "zh_cn" | "zh" => Self::ChineseSimplified,
-            _ => Self::English,
-        }
+    fn from_config(_value: &str) -> Self {
+        Self::English
     }
 
     fn as_config(self) -> &'static str {
         match self {
             Self::English => "en",
-            Self::ChineseSimplified => "zh-CN",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::English => "English",
-            Self::ChineseSimplified => "Chinese (Simplified)",
         }
     }
 }
@@ -263,7 +257,7 @@ fn render_preference_settings(
     if ui
         .add_sized(
             [ui.available_width(), TOOLBAR_CONTROL_HEIGHT],
-            egui::Button::new("Save theme and language"),
+            egui::Button::new("Save theme"),
         )
         .clicked()
     {

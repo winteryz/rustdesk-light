@@ -44,7 +44,7 @@
 
 ### Admin UI
 
-- [ ] Wire saved admin theme config into runtime UI styling.
+- [x] Wire saved admin theme config into runtime UI styling.
 - [ ] Add admin i18n resources and apply the saved language config.
 
 ### File Transfer
