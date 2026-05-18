@@ -4,6 +4,7 @@ use rdl_protocol::CommandKind;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod client_autostart;
 mod file_manager;
 mod registry_manager;
 mod remote_terminal;
@@ -65,10 +66,21 @@ fn startup_manager(payload: &str) -> String {
     let request = StartupRequest::parse(payload);
     let output = match request.action.as_str() {
         "list" => startup_manager_list(),
-        "add" | "enable" | "disable" => match apply_startup_action(&request) {
+        "add" | "enable" | "disable" | "delete" => match apply_startup_action(&request) {
             Ok(()) => startup_manager_list(),
             Err(error) => startup_action_error_table(&error),
         },
+        "enable_client_autostart" => match client_autostart::apply_startup_manager_action("enable")
+        {
+            Ok(()) => startup_manager_list(),
+            Err(error) => startup_action_error_table(&error),
+        },
+        "disable_client_autostart" => {
+            match client_autostart::apply_startup_manager_action("disable") {
+                Ok(()) => startup_manager_list(),
+                Err(error) => startup_action_error_table(&error),
+            }
+        }
         action => {
             startup_action_error_table(&format!("unsupported startup_manager action: {action}"))
         }
@@ -135,6 +147,7 @@ fn apply_startup_action(request: &StartupRequest) -> Result<(), String> {
     match request.action.as_str() {
         "add" => add_startup_item(request),
         "enable" | "disable" => set_startup_item_enabled(request),
+        "delete" => delete_startup_item(request),
         action => Err(format!("unsupported startup_manager action: {action}")),
     }
 }
@@ -161,6 +174,18 @@ fn set_startup_item_enabled(request: &StartupRequest) -> Result<(), String> {
         macos_set_startup_item_enabled(source, name, enabled)
     } else {
         linux_set_startup_item_enabled(source, name, enabled)
+    }
+}
+
+fn delete_startup_item(request: &StartupRequest) -> Result<(), String> {
+    let source = required_startup_value(request.source.as_deref(), "source")?;
+    let name = required_startup_value(request.name.as_deref(), "name")?;
+    if cfg!(target_os = "windows") {
+        windows_delete_startup_item(source, name)
+    } else if cfg!(target_os = "macos") {
+        delete_startup_file(source, name)
+    } else {
+        linux_delete_startup_item(source, name)
     }
 }
 
@@ -418,6 +443,39 @@ Write-Output "ok"
     startup_command_result(run_powershell(&script, 40), "update Windows startup item")
 }
 
+fn windows_delete_startup_item(source: &str, name: &str) -> Result<(), String> {
+    let script = r#"
+$ErrorActionPreference = "Stop"
+function Decode($value) {
+  [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($value))
+}
+$source = Decode "__SOURCE_B64__"
+$name = Decode "__NAME_B64__"
+if ([string]::IsNullOrWhiteSpace($source)) { throw "startup item source is required" }
+if ([string]::IsNullOrWhiteSpace($name)) { throw "startup item name is required" }
+if ($source -match "^HK(CU|LM):\\") {
+  if (!(Test-Path $source)) { throw "startup registry source does not exist: $source" }
+  $property = (Get-ItemProperty -Path $source).PSObject.Properties | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+  if ($null -eq $property) { throw "startup registry value not found: $name" }
+  Remove-ItemProperty -Path $source -Name $name -ErrorAction Stop
+  Write-Output "ok"
+  exit 0
+}
+if (!(Test-Path -LiteralPath $source -PathType Container)) {
+  throw "unsupported startup source: $source"
+}
+$path = Join-Path $source $name
+if (!(Test-Path -LiteralPath $path -PathType Leaf)) {
+  throw "startup file not found: $path"
+}
+Remove-Item -LiteralPath $path -Force
+Write-Output "ok"
+"#
+    .replace("__SOURCE_B64__", &STANDARD.encode(source))
+    .replace("__NAME_B64__", &STANDARD.encode(name));
+    startup_command_result(run_powershell(&script, 40), "delete Windows startup item")
+}
+
 fn macos_startup_manager() -> String {
     run_command(
         "sh",
@@ -590,6 +648,19 @@ fn linux_set_startup_item_enabled(source: &str, name: &str, enabled: bool) -> Re
             } else {
                 set_desktop_entry_enabled(source_path, name, enabled)
             }
+        }
+        _ => Err(format!("unsupported Linux startup source: {source}")),
+    }
+}
+
+fn linux_delete_startup_item(source: &str, name: &str) -> Result<(), String> {
+    match source {
+        "systemd" | "systemd-user" => Err(format!("delete is unsupported for {source} units")),
+        _ if name.ends_with(".desktop")
+            || name.ends_with(".desktop.disabled")
+            || source.ends_with("/autostart") =>
+        {
+            delete_startup_file(source, name)
         }
         _ => Err(format!("unsupported Linux startup source: {source}")),
     }
@@ -938,6 +1009,14 @@ fn rename_disabled_startup_file(source: &Path, name: &str, enabled: bool) -> Res
         ));
     }
     fs::rename(&path, &target).map_err(|error| format!("rename startup file failed: {error}"))
+}
+
+fn delete_startup_file(source: &str, name: &str) -> Result<(), String> {
+    let path = startup_entry_path(Path::new(source), name)?;
+    if !path.is_file() {
+        return Err(format!("startup file not found: {}", path.display()));
+    }
+    fs::remove_file(&path).map_err(|error| format!("delete startup file failed: {error}"))
 }
 
 fn set_desktop_entry_enabled(source: &Path, name: &str, enabled: bool) -> Result<(), String> {

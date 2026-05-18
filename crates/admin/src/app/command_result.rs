@@ -293,6 +293,17 @@ pub(super) fn render_command_result(
     state: CommandResultRenderState<'_>,
 ) {
     if command_expects_result_table(command) {
+        let table = parse_result_table(detail);
+        let startup_client_status = if matches!(command, CommandKind::StartupManager) {
+            Some(
+                table
+                    .as_ref()
+                    .map(startup_client_autostart_status)
+                    .unwrap_or(StartupClientAutostartStatus::Unknown),
+            )
+        } else {
+            None
+        };
         render_table_toolbar(
             ui,
             command,
@@ -300,6 +311,8 @@ pub(super) fn render_command_result(
             state.refresh_requested,
             state.refresh_in_flight,
             state.startup_add_form,
+            state.startup_action_requested,
+            startup_client_status,
         );
         if matches!(command, CommandKind::StartupManager) {
             render_startup_add_form(
@@ -310,7 +323,7 @@ pub(super) fn render_command_result(
             );
         }
         ui.add_space(8.0);
-        if let Some(table) = parse_result_table(detail) {
+        if let Some(table) = table.as_ref() {
             if matches!(command, CommandKind::RegistryManager) {
                 registry::render_result(
                     ui,
@@ -684,13 +697,15 @@ fn render_table_toolbar(
     refresh_requested: &Arc<AtomicBool>,
     refresh_in_flight: bool,
     startup_add_form: &Arc<Mutex<StartupAddForm>>,
+    startup_action_requested: &Arc<Mutex<Option<String>>>,
+    startup_client_status: Option<StartupClientAutostartStatus>,
 ) {
     let mut filter = table_filter
         .lock()
         .map(|value| value.clone())
         .unwrap_or_default();
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
         ui.allocate_ui_with_layout(
             egui::vec2(38.0, TOOLBAR_CONTROL_HEIGHT),
@@ -721,17 +736,58 @@ fn render_table_toolbar(
         {
             refresh_requested.store(true, Ordering::Relaxed);
         }
-        if matches!(command, CommandKind::StartupManager)
-            && ui
+        if matches!(command, CommandKind::StartupManager) {
+            if ui
                 .add_enabled(!refresh_in_flight, egui::Button::new("Add Item"))
                 .clicked()
-        {
-            if let Ok(mut form) = startup_add_form.lock() {
-                form.open = true;
-                form.error.clear();
+            {
+                if let Ok(mut form) = startup_add_form.lock() {
+                    form.open = true;
+                    form.error.clear();
+                }
             }
+            ui.add_enabled_ui(!refresh_in_flight, |ui| {
+                render_client_autostart_menu(
+                    ui,
+                    startup_client_status.unwrap_or(StartupClientAutostartStatus::Unknown),
+                    startup_action_requested,
+                );
+            });
         }
     });
+}
+
+fn render_client_autostart_menu(
+    ui: &mut egui::Ui,
+    status: StartupClientAutostartStatus,
+    startup_action_requested: &Arc<Mutex<Option<String>>>,
+) {
+    let style = startup_client_autostart_style(status);
+    let button = egui::Button::new(
+        egui::RichText::new(style.label)
+            .size(12.0)
+            .color(style.text),
+    )
+    .fill(style.fill)
+    .stroke(egui::Stroke::new(1.0, style.stroke));
+
+    let (response, _) = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+        if ui.button("Enable").clicked() {
+            queue_startup_action(startup_action_requested, "enable_client_autostart");
+            ui.close();
+        }
+        if ui.button("Disable").clicked() {
+            queue_startup_action(startup_action_requested, "disable_client_autostart");
+            ui.close();
+        }
+    });
+    response.on_hover_text("Configure login autostart for this client");
+}
+
+fn queue_startup_action(startup_action_requested: &Arc<Mutex<Option<String>>>, action: &str) {
+    if let Ok(mut value) = startup_action_requested.lock() {
+        *value = Some(format!("action={action}"));
+    }
 }
 
 fn render_startup_add_form(
@@ -1000,16 +1056,26 @@ fn render_result_table(
                     body.rows(TABLE_BODY_CELL_HEIGHT + 7.0, rows.len(), |mut row| {
                         let row_data = &rows[row.index()];
                         let row_key = table_row_key(row_data);
-                        row.set_selected(selected_row.as_deref() == Some(row_key.as_str()));
+                        let is_selected = selected_row.as_deref() == Some(row_key.as_str());
+                        row.set_selected(is_selected);
                         let row_text = row_data.cells.join("\t");
                         let process_id = process_row_pid(command, &table.headers, &row_data.cells);
                         let startup_action =
                             startup_row_action(command, &table.headers, &row_data.cells);
+                        let startup_delete_payload =
+                            startup_row_delete_payload(command, &table.headers, &row_data.cells);
+                        let startup_row_fill =
+                            startup_client_row_fill(command, &table.headers, &row_data.cells);
 
                         for (index, _header) in table.headers.iter().enumerate() {
                             let cell = row_data.cells.get(index).map(String::as_str).unwrap_or("");
                             let align = alignments.get(index).copied().unwrap_or(egui::Align::Min);
                             let (_, cell_response) = row.col(|ui| {
+                                if !is_selected {
+                                    if let Some(fill) = startup_row_fill {
+                                        paint_table_cell_background(ui, fill);
+                                    }
+                                }
                                 let _ = table_cell_label(
                                     ui,
                                     cell,
@@ -1024,6 +1090,7 @@ fn render_result_table(
                             let row_key = row_key.clone();
                             let process_id = process_id.clone();
                             let startup_action = startup_action.clone();
+                            let startup_delete_payload = startup_delete_payload.clone();
                             cell_response.context_menu(|ui| {
                                 if ui.button("Copy Cell").clicked() {
                                     ui.ctx().copy_text(cell_text.clone());
@@ -1058,6 +1125,20 @@ fn render_result_table(
                                         ui.close();
                                     }
                                 }
+                                if let Some(startup_delete_payload) = startup_delete_payload.clone()
+                                {
+                                    ui.separator();
+                                    if ui.button("Delete Startup Item").clicked() {
+                                        if let Ok(mut selected) = state.table_selected_row.lock() {
+                                            *selected = Some(row_key.clone());
+                                        }
+                                        if let Ok(mut value) = state.startup_action_requested.lock()
+                                        {
+                                            *value = Some(startup_delete_payload);
+                                        }
+                                        ui.close();
+                                    }
+                                }
                             });
                         }
 
@@ -1085,6 +1166,130 @@ fn render_result_table(
                 .color(COLOR_MUTED),
         );
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupClientAutostartStatus {
+    Enabled,
+    Disabled,
+    Unknown,
+}
+
+struct StartupClientAutostartStyle {
+    label: &'static str,
+    fill: egui::Color32,
+    stroke: egui::Color32,
+    text: egui::Color32,
+}
+
+fn startup_client_autostart_style(
+    status: StartupClientAutostartStatus,
+) -> StartupClientAutostartStyle {
+    match status {
+        StartupClientAutostartStatus::Enabled => StartupClientAutostartStyle {
+            label: "Client Autostart: On",
+            fill: egui::Color32::from_rgb(224, 246, 235),
+            stroke: egui::Color32::from_rgb(151, 213, 181),
+            text: COLOR_GOOD,
+        },
+        StartupClientAutostartStatus::Disabled => StartupClientAutostartStyle {
+            label: "Client Autostart: Off",
+            fill: egui::Color32::from_rgb(255, 238, 238),
+            stroke: egui::Color32::from_rgb(235, 178, 178),
+            text: COLOR_BAD,
+        },
+        StartupClientAutostartStatus::Unknown => StartupClientAutostartStyle {
+            label: "Client Autostart: Unknown",
+            fill: egui::Color32::from_rgb(243, 246, 250),
+            stroke: COLOR_BORDER,
+            text: COLOR_MUTED,
+        },
+    }
+}
+
+fn startup_client_autostart_status(table: &ResultTable) -> StartupClientAutostartStatus {
+    let mut saw_disabled = false;
+    for row in &table.rows {
+        if !startup_row_is_client_autostart(&table.headers, row) {
+            continue;
+        }
+        match startup_row_status(&table.headers, row) {
+            Some(StartupClientAutostartStatus::Enabled) => {
+                return StartupClientAutostartStatus::Enabled;
+            }
+            Some(StartupClientAutostartStatus::Disabled) => saw_disabled = true,
+            _ => {}
+        }
+    }
+
+    if saw_disabled {
+        StartupClientAutostartStatus::Disabled
+    } else if table.rows.iter().any(|row| {
+        startup_row_status(&table.headers, row) == Some(StartupClientAutostartStatus::Unknown)
+    }) {
+        StartupClientAutostartStatus::Unknown
+    } else {
+        StartupClientAutostartStatus::Disabled
+    }
+}
+
+fn startup_client_row_fill(
+    command: &CommandKind,
+    headers: &[String],
+    row: &[String],
+) -> Option<egui::Color32> {
+    if !matches!(command, CommandKind::StartupManager)
+        || !startup_row_is_client_autostart(headers, row)
+    {
+        return None;
+    }
+    let status = startup_row_status(headers, row)?;
+    if status == StartupClientAutostartStatus::Unknown {
+        return None;
+    }
+    Some(startup_client_autostart_style(status).fill)
+}
+
+fn paint_table_cell_background(ui: &mut egui::Ui, fill: egui::Color32) {
+    let rect = ui.max_rect().intersect(ui.clip_rect());
+    if rect.is_positive() {
+        ui.painter().rect_filled(rect, 0.0, fill);
+    }
+}
+
+fn startup_row_status(headers: &[String], row: &[String]) -> Option<StartupClientAutostartStatus> {
+    let status = table_value(headers, row, "status")?;
+    match status.trim().to_ascii_lowercase().as_str() {
+        "enabled" | "registry" | "file" | "present" | "desktopentry" => {
+            Some(StartupClientAutostartStatus::Enabled)
+        }
+        "disabled" => Some(StartupClientAutostartStatus::Disabled),
+        "error" => Some(StartupClientAutostartStatus::Unknown),
+        _ => None,
+    }
+}
+
+fn startup_row_is_client_autostart(headers: &[String], row: &[String]) -> bool {
+    let Some(name) = table_value(headers, row, "name") else {
+        return false;
+    };
+    matches!(
+        compact_startup_identity(name).as_str(),
+        "rustdesklightclient"
+            | "rustdesklightclientdesktop"
+            | "rustdesklightclientdesktopdisabled"
+            | "comrustdesklightclientplist"
+            | "comrustdesklightclientplistdisabled"
+    )
+}
+
+fn compact_startup_identity(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
 }
 
 #[derive(Clone)]
@@ -1128,6 +1333,50 @@ fn startup_row_action(
         label,
         payload: startup_action_payload(action, scope, source, name, startup_command),
     })
+}
+
+fn startup_row_delete_payload(
+    command: &CommandKind,
+    headers: &[String],
+    row: &[String],
+) -> Option<String> {
+    if !matches!(command, CommandKind::StartupManager) {
+        return None;
+    }
+
+    let status = table_value(headers, row, "status")?;
+    let status_key = status.trim().to_ascii_lowercase();
+    if status_key == "info" || status_key == "error" {
+        return None;
+    }
+
+    let source = table_value(headers, row, "source")?;
+    let name = table_value(headers, row, "name")?;
+    if !startup_cell_is_actionable(source)
+        || !startup_cell_is_actionable(name)
+        || !startup_row_is_deleteable(source, name)
+    {
+        return None;
+    }
+
+    let scope = table_value(headers, row, "scope").unwrap_or_default();
+    let startup_command = table_value(headers, row, "command").unwrap_or_default();
+    Some(startup_action_payload(
+        "delete",
+        scope,
+        source,
+        name,
+        startup_command,
+    ))
+}
+
+fn startup_row_is_deleteable(source: &str, name: &str) -> bool {
+    let source = source.trim();
+    let name = name.trim();
+    if matches!(source, "systemd" | "systemd-user") {
+        return false;
+    }
+    !source.is_empty() && source != "-" && !name.is_empty() && name != "-"
 }
 
 fn table_value<'a>(headers: &[String], row: &'a [String], name: &str) -> Option<&'a str> {
@@ -1651,6 +1900,44 @@ mod tests {
 
         assert_eq!(action.label, "Enable Startup Item");
         assert!(action.payload.contains("action=enable"));
+    }
+
+    #[test]
+    fn startup_client_autostart_status_detects_enabled_run_value() {
+        let table = ResultTable {
+            headers: strings(["Scope", "Source", "Name", "Command", "Status"]),
+            rows: vec![strings([
+                "CurrentUser",
+                "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                "RustDeskLightClient",
+                "C:\\Users\\me\\AppData\\Local\\rust-desk-light\\rdl-client.exe",
+                "Enabled",
+            ])],
+        };
+
+        assert_eq!(
+            startup_client_autostart_status(&table),
+            StartupClientAutostartStatus::Enabled
+        );
+    }
+
+    #[test]
+    fn startup_client_autostart_status_treats_missing_row_as_disabled() {
+        let table = ResultTable {
+            headers: strings(["Scope", "Source", "Name", "Command", "Status"]),
+            rows: vec![strings([
+                "CurrentUser",
+                "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                "OtherApp",
+                "C:\\App\\app.exe",
+                "Enabled",
+            ])],
+        };
+
+        assert_eq!(
+            startup_client_autostart_status(&table),
+            StartupClientAutostartStatus::Disabled
+        );
     }
 
     #[test]
