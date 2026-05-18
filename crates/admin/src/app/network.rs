@@ -3,17 +3,21 @@ use crate::runtime::{hostname, load_admin_identity, os_label, username, Config};
 use rdl_protocol::{write_envelope_with_token, EnvelopeDecoder, FileTransferAction, Message, Role};
 use std::collections::HashSet;
 use std::io;
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::sync::{mpsc::Receiver, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-const INITIAL_RECONNECT_DELAY_MS: u64 = 500;
-const MAX_RECONNECT_DELAY_MS: u64 = 8_000;
 const NETWORK_POLL_INTERVAL_MS: u64 = 16;
 const NETWORK_IDLE_SLEEP_MS: u64 = 4;
+const CONNECT_TIMEOUT_MS: u64 = 5_000;
+const HANDSHAKE_TIMEOUT_MS: u64 = 8_000;
 const MAX_INPUTS_PER_NETWORK_POLL: usize = 64;
 const MAX_MESSAGES_PER_NETWORK_POLL: usize = 512;
+
+enum ConnectionEnd {
+    ReconnectRequested,
+}
 
 pub(super) fn admin_network_loop(
     mut config: Config,
@@ -21,32 +25,51 @@ pub(super) fn admin_network_loop(
     event_sink: AdminEventSink,
     ignored_file_transfers: Arc<Mutex<HashSet<(String, u64)>>>,
 ) -> io::Result<()> {
-    let mut delay = INITIAL_RECONNECT_DELAY_MS;
+    let mut first_attempt = true;
+    let mut wait_for_user = false;
     loop {
+        if wait_for_user {
+            wait_for_reconnect_request(&input_rx);
+        }
+        if first_attempt {
+            first_attempt = false;
+        } else if let Ok(reloaded) = config.reload() {
+            config = reloaded;
+        }
+
         if config.auth_token.trim().is_empty() {
             event_sink.send(AdminEvent::AuthTokenRequired);
             event_sink.send(AdminEvent::Disconnected);
-            thread::sleep(Duration::from_millis(delay));
-            if let Ok(reloaded) = config.reload() {
-                config = reloaded;
-            }
-            delay = (delay * 2).min(MAX_RECONNECT_DELAY_MS);
+            wait_for_user = true;
             continue;
         }
         match admin_connection_once(&config, &input_rx, &event_sink, &ignored_file_transfers) {
-            Ok(()) => delay = INITIAL_RECONNECT_DELAY_MS,
+            Ok(ConnectionEnd::ReconnectRequested) => {
+                event_sink.send(AdminEvent::Disconnected);
+                wait_for_user = false;
+            }
             Err(error) => {
-                event_sink.send(AdminEvent::Log(format!(
-                    "connect failed: {error}; retrying in {delay}ms"
-                )));
+                let detail = connection_error_detail(&error);
+                event_sink.send(AdminEvent::ConnectionFailed {
+                    ip: config.ip.clone(),
+                    port: config.port,
+                    auth_token: config.auth_token.clone(),
+                    detail: detail.clone(),
+                });
+                event_sink.send(AdminEvent::Log(format!("connect failed: {detail}")));
+                event_sink.send(AdminEvent::Disconnected);
+                wait_for_user = true;
             }
         }
-        event_sink.send(AdminEvent::Disconnected);
-        thread::sleep(Duration::from_millis(delay));
-        if let Ok(reloaded) = config.reload() {
-            config = reloaded;
+    }
+}
+
+fn wait_for_reconnect_request(input_rx: &Receiver<AdminInput>) {
+    while let Ok(input) = input_rx.recv() {
+        if let AdminInput::Reconnect { reason } = input {
+            debug_log!("debug event=admin_reconnect_request reason={reason}");
+            break;
         }
-        delay = (delay * 2).min(MAX_RECONNECT_DELAY_MS);
     }
 }
 
@@ -55,9 +78,9 @@ fn admin_connection_once(
     input_rx: &Receiver<AdminInput>,
     event_sink: &AdminEventSink,
     ignored_file_transfers: &Arc<Mutex<HashSet<(String, u64)>>>,
-) -> io::Result<()> {
+) -> io::Result<ConnectionEnd> {
     let identity = load_admin_identity();
-    let mut stream = TcpStream::connect(format!("{}:{}", config.ip, config.port))?;
+    let mut stream = connect_to_server(&config.ip, config.port)?;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_millis(NETWORK_POLL_INTERVAL_MS)))?;
     let mut next_message_id = 1u64;
@@ -154,11 +177,11 @@ fn admin_connection_once(
                 AdminInput::Reconnect { reason } => {
                     debug_log!("debug event=admin_reconnect_request reason={reason}");
                     let _ = stream.shutdown(Shutdown::Both);
-                    return Ok(());
+                    return Ok(ConnectionEnd::ReconnectRequested);
                 }
             };
-            if result.is_err() {
-                return Ok(());
+            if let Err(error) = result {
+                return Err(error);
             }
         }
 
@@ -174,7 +197,7 @@ fn admin_connection_once(
                 }
                 Err(error) => {
                     event_sink.send(AdminEvent::Log(format!("network read failed: {error}")));
-                    return Ok(());
+                    return Err(error);
                 }
             };
             processed_messages += 1;
@@ -280,7 +303,14 @@ fn admin_connection_once(
 
 fn wait_for_session(stream: &mut TcpStream, event_sink: &AdminEventSink) -> io::Result<String> {
     let mut decoder = EnvelopeDecoder::new();
+    let started_at = Instant::now();
     loop {
+        if started_at.elapsed() >= Duration::from_millis(HANDSHAKE_TIMEOUT_MS) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "server handshake timed out",
+            ));
+        }
         let message = match decoder.read_next(stream) {
             Ok(Some(envelope)) => envelope.message,
             Ok(None) => {
@@ -300,6 +330,48 @@ fn wait_for_session(stream: &mut TcpStream, event_sink: &AdminEventSink) -> io::
                 event_sink.send(AdminEvent::Log(format!("server before session: {other:?}")));
             }
         }
+    }
+}
+
+fn connect_to_server(ip: &str, port: u16) -> io::Result<TcpStream> {
+    let addr = format!("{ip}:{port}");
+    let timeout = Duration::from_millis(CONNECT_TIMEOUT_MS);
+    let addrs: Vec<_> = addr.to_socket_addrs()?.collect();
+    if addrs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("server address resolved to no socket addresses: {addr}"),
+        ));
+    }
+
+    let mut last_error = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotConnected,
+            format!("could not connect to server: {addr}"),
+        )
+    }))
+}
+
+fn connection_error_detail(error: &io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::ConnectionRefused => format!("Connection refused: {error}"),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => {
+            format!("Connection closed by server: {error}")
+        }
+        io::ErrorKind::NotFound | io::ErrorKind::AddrNotAvailable => {
+            format!("Server address is not reachable: {error}")
+        }
+        io::ErrorKind::TimedOut => format!("Connection timed out: {error}"),
+        io::ErrorKind::PermissionDenied => format!("Token rejected: {error}"),
+        io::ErrorKind::InvalidInput => format!("Invalid server address: {error}"),
+        _ => format!("{error}"),
     }
 }
 

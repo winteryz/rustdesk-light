@@ -227,17 +227,12 @@ fn main() -> io::Result<()> {
     let (events_tx, events_rx) = mpsc::channel();
 
     println!(
-        "rust-desk-light server listening on {bind_addr} version={} config={} geoip={} client_auth={}",
+        "rust-desk-light server listening on {bind_addr} version={} geoip={}",
         rdl_version::display_version(),
-        config.config_path.display(),
-        geoip.status_label(),
-        if config.auth.require_client_auth {
-            "required"
-        } else {
-            "optional"
-        }
+        geoip.status_label()
     );
-    println!("auth token: {}", config.auth.token);
+    println!("{}", config.startup_notice);
+    println!("auth token: {} ({})", config.auth.token, config.auth_source);
     if config.auth.generated {
         println!(
             "saved generated auth token to config: {}",
@@ -1426,6 +1421,8 @@ struct Config {
     ip: String,
     port: u16,
     config_path: PathBuf,
+    startup_notice: String,
+    auth_source: &'static str,
     geoip_db_path: Option<PathBuf>,
     auth: AuthConfig,
 }
@@ -1459,10 +1456,14 @@ impl Config {
                 &auth_token,
             )?;
         }
+        let startup_notice = server_startup_config_notice(&loaded);
+        let auth_source = auth_source_label(&loaded, generated);
         Ok(Self {
             ip: loaded.endpoint.ip,
             port: loaded.endpoint.port,
             config_path: loaded.config_path,
+            startup_notice,
+            auth_source,
             geoip_db_path,
             auth: AuthConfig {
                 token: auth_token,
@@ -1470,6 +1471,67 @@ impl Config {
                 require_client_auth: loaded.require_client_auth,
             },
         })
+    }
+}
+
+fn server_startup_config_notice(loaded: &rdl_config::LoadedEndpointConfig) -> String {
+    format!(
+        "config file: {}\nlisten: {}:{} ({})\nclient auth: {} ({})",
+        loaded.config_path.display(),
+        loaded.endpoint.ip,
+        loaded.endpoint.port,
+        endpoint_source_label(loaded),
+        client_auth_status_label(loaded.require_client_auth),
+        client_auth_source_label(loaded)
+    )
+}
+
+fn endpoint_source_label(loaded: &rdl_config::LoadedEndpointConfig) -> &'static str {
+    if loaded.cli_ip.is_some() || loaded.cli_port.is_some() {
+        "args"
+    } else if loaded.file_ip.is_some() || loaded.file_port.is_some() {
+        "file"
+    } else {
+        "default"
+    }
+}
+
+fn auth_source_label(
+    loaded: &rdl_config::LoadedEndpointConfig,
+    generated: bool,
+) -> &'static str {
+    if loaded.cli_auth_token.is_some() {
+        "args"
+    } else if std::env::var("RDL_AUTH_TOKEN")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        "env"
+    } else if loaded.file_auth_token.is_some() {
+        "file"
+    } else if generated {
+        "generated"
+    } else {
+        "none"
+    }
+}
+
+fn client_auth_source_label(loaded: &rdl_config::LoadedEndpointConfig) -> &'static str {
+    if loaded.cli_require_client_auth.is_some() {
+        "args"
+    } else if loaded.file_require_client_auth.is_some() {
+        "file"
+    } else {
+        "default"
+    }
+}
+
+fn client_auth_status_label(required: bool) -> &'static str {
+    if required {
+        "required"
+    } else {
+        "optional"
     }
 }
 

@@ -62,6 +62,10 @@ const MAX_CLIENT_ONLINE_TOASTS: usize = 4;
 const AUDIO_UDP_REGISTER_INTERVAL_MS: u64 = 250;
 const AUDIO_UDP_RECV_TIMEOUT_MS: u64 = 20;
 const AUDIO_STREAM_REPORT_INTERVAL_MS: u64 = 1_000;
+const STATUS_BAR_HEIGHT: f32 = 44.0;
+const STATUS_BAR_CONTENT_HEIGHT: f32 = 26.0;
+const STATUS_BAR_GAP: f32 = 8.0;
+const ROOT_STATUS_BAR_BOTTOM_MARGIN: f32 = 12.0;
 const PACKAGE_AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
 const PACKAGE_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const PACKAGE_LICENSE: &str = env!("CARGO_PKG_LICENSE");
@@ -69,6 +73,7 @@ const FALLBACK_REPOSITORY: &str = "https://github.com/marlkiller/rust-desk-light
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
+    eprintln!("{}", config.startup_config_notice());
     run_gui(config)?;
     Ok(())
 }
@@ -376,6 +381,8 @@ struct AdminApp {
     client_online_toasts: VecDeque<ClientOnlineToast>,
     client_list_initialized: bool,
     auth_token_prompt_open: bool,
+    server_ip_input: String,
+    server_port_input: String,
     auth_token_input: String,
     auth_token_error: String,
     about_open: bool,
@@ -647,8 +654,20 @@ fn about_row(ui: &mut egui::Ui, label: &str, value: impl Into<String>) {
     });
 }
 
+fn form_label(ui: &mut egui::Ui, label: &str) {
+    ui.label(
+        egui::RichText::new(label)
+            .size(12.0)
+            .color(COLOR_MUTED)
+            .strong(),
+    );
+}
+
 fn info_icon_button(ui: &mut egui::Ui, selected: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(STATUS_BAR_CONTENT_HEIGHT, STATUS_BAR_CONTENT_HEIGHT),
+        egui::Sense::click(),
+    );
     if ui.is_rect_visible(rect) {
         let icon_color = if response.hovered() || selected {
             COLOR_TEXT
@@ -780,6 +799,9 @@ impl AdminApp {
             *handle = Some(cc.egui_ctx.clone());
         }
         let initial_auth_token = config.auth_token.clone();
+        let initial_server_ip = config.ip.clone();
+        let initial_server_port = config.port.to_string();
+        let startup_config_notice = config.startup_config_notice().to_string();
         let auth_token_prompt_open = initial_auth_token.trim().is_empty();
         let client_builder = ClientBuilderState::new(&config);
         Self {
@@ -815,13 +837,18 @@ impl AdminApp {
             voice_udp_endpoints,
             file_transfer_cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             ignored_file_transfers,
-            log_lines: vec![timestamped_log(format!(
-                "admin gui started version={}",
-                rdl_version::display_version()
-            ))],
+            log_lines: vec![
+                timestamped_log(format!(
+                    "admin gui started version={}",
+                    rdl_version::display_version()
+                )),
+                timestamped_log(startup_config_notice),
+            ],
             client_online_toasts: VecDeque::new(),
             client_list_initialized: false,
             auth_token_prompt_open,
+            server_ip_input: initial_server_ip,
+            server_port_input: initial_server_port,
             auth_token_input: initial_auth_token,
             auth_token_error: String::new(),
             about_open: false,
@@ -845,6 +872,8 @@ impl AdminApp {
             match event {
                 AdminEvent::Connected => {
                     self.connected = true;
+                    self.auth_token_prompt_open = false;
+                    self.auth_token_error.clear();
                     self.push_log("connected to server");
                 }
                 AdminEvent::Disconnected => {
@@ -858,15 +887,32 @@ impl AdminApp {
                         client.status = ClientStatus::Offline;
                     }
                 }
+                AdminEvent::ConnectionFailed {
+                    ip,
+                    port,
+                    auth_token,
+                    detail,
+                } => {
+                    self.connected = false;
+                    self.auth_token_prompt_open = true;
+                    self.server_ip_input = ip;
+                    self.server_port_input = port.to_string();
+                    self.auth_token_input = auth_token;
+                    self.auth_token_error = detail;
+                }
                 AdminEvent::AuthTokenRequired => {
                     self.auth_token_prompt_open = true;
+                    self.server_ip_input = self.config.ip.clone();
+                    self.server_port_input = self.config.port.to_string();
+                    self.auth_token_input = self.config.auth_token.clone();
                     self.auth_token_error = "Server requires an auth token.".to_string();
-                    self.auth_token_input.clear();
                 }
                 AdminEvent::AuthTokenRejected(detail) => {
                     self.auth_token_prompt_open = true;
+                    self.server_ip_input = self.config.ip.clone();
+                    self.server_port_input = self.config.port.to_string();
                     self.auth_token_error = detail;
-                    self.auth_token_input.clear();
+                    self.auth_token_input = self.config.auth_token.clone();
                 }
                 AdminEvent::Clients(clients) => {
                     self.merge_clients(clients);
@@ -1070,17 +1116,37 @@ impl AdminApp {
             return;
         }
 
-        egui::Window::new("Auth Token")
+        egui::Window::new("Server Connection")
             .collapsible(false)
             .resizable(false)
-            .default_width(360.0)
+            .default_width(420.0)
             .show(ctx, |ui| {
                 ui.label(
-                    egui::RichText::new("Enter the shared server token to connect.")
+                    egui::RichText::new("Check the server connection settings and reconnect.")
                         .color(COLOR_TEXT),
                 );
                 ui.add_space(8.0);
-                let response = ui.add_sized(
+
+                form_label(ui, "Server IP");
+                let ip_response = ui.add_sized(
+                    [ui.available_width(), TOOLBAR_CONTROL_HEIGHT],
+                    egui::TextEdit::singleline(&mut self.server_ip_input)
+                        .hint_text("127.0.0.1")
+                        .vertical_align(egui::Align::Center),
+                );
+                ui.add_space(6.0);
+
+                form_label(ui, "Server Port");
+                let port_response = ui.add_sized(
+                    [ui.available_width(), TOOLBAR_CONTROL_HEIGHT],
+                    egui::TextEdit::singleline(&mut self.server_port_input)
+                        .hint_text("5169")
+                        .vertical_align(egui::Align::Center),
+                );
+                ui.add_space(6.0);
+
+                form_label(ui, "Token");
+                let token_response = ui.add_sized(
                     [ui.available_width(), TOOLBAR_CONTROL_HEIGHT],
                     egui::TextEdit::singleline(&mut self.auth_token_input)
                         .password(true)
@@ -1096,29 +1162,50 @@ impl AdminApp {
                 }
                 ui.add_space(8.0);
                 let submit = ui.button("Save and reconnect").clicked()
-                    || (response.lost_focus()
+                    || ((ip_response.lost_focus()
+                        || port_response.lost_focus()
+                        || token_response.lost_focus())
                         && ui.input(|input| input.key_pressed(egui::Key::Enter)));
                 if submit {
-                    let token = self.auth_token_input.trim().to_string();
-                    if token.is_empty() {
-                        self.auth_token_error = "Token cannot be empty.".to_string();
-                    } else {
-                        match self.config.save_auth_token(&token) {
-                            Ok(()) => {
-                                self.auth_token_prompt_open = false;
-                                self.auth_token_error.clear();
-                                self.push_log("saved auth token");
-                                let _ = self.input_tx.send(AdminInput::Reconnect {
-                                    reason: "auth token updated".to_string(),
-                                });
-                            }
-                            Err(error) => {
-                                self.auth_token_error = format!("Save failed: {error}");
-                            }
-                        }
-                    }
+                    self.save_connection_and_reconnect();
                 }
             });
+    }
+
+    fn save_connection_and_reconnect(&mut self) {
+        let ip = self.server_ip_input.trim().to_string();
+        let port_text = self.server_port_input.trim().to_string();
+        let token = self.auth_token_input.trim().to_string();
+
+        if ip.is_empty() {
+            self.auth_token_error = "Server IP cannot be empty.".to_string();
+            return;
+        }
+        let port = match port_text.parse::<u16>() {
+            Ok(port) if port > 0 => port,
+            _ => {
+                self.auth_token_error = "Server port must be 1-65535.".to_string();
+                return;
+            }
+        };
+        if token.is_empty() {
+            self.auth_token_error = "Token cannot be empty.".to_string();
+            return;
+        }
+
+        match self.config.save_server_connection(&ip, port, &token) {
+            Ok(()) => {
+                self.auth_token_prompt_open = false;
+                self.auth_token_error.clear();
+                self.push_log(format!("saved server connection {ip}:{port}"));
+                let _ = self.input_tx.send(AdminInput::Reconnect {
+                    reason: "server connection updated".to_string(),
+                });
+            }
+            Err(error) => {
+                self.auth_token_error = format!("Save failed: {error}");
+            }
+        }
     }
 
     fn render_about_window(&mut self, ctx: &egui::Context) {
@@ -2241,7 +2328,7 @@ impl AdminApp {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .corner_radius(egui::CornerRadius::same(6))
             .show(ui, |ui| {
-                ui.set_min_height(26.0);
+                ui.set_min_height(STATUS_BAR_CONTENT_HEIGHT);
                 ui.horizontal(|ui| {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
@@ -2618,9 +2705,8 @@ impl AdminApp {
                     .frame(egui::Frame::default().fill(COLOR_BG).inner_margin(12.0))
                     .show_inside(ui, |ui| {
                         windowing::render_child_window_controls(ui);
-                        let status_bar_height = 44.0;
                         let content_height =
-                            (ui.available_height() - status_bar_height - 8.0).max(0.0);
+                            (ui.available_height() - STATUS_BAR_HEIGHT - STATUS_BAR_GAP).max(0.0);
                         ui.allocate_ui_with_layout(
                             egui::vec2(ui.available_width(), content_height),
                             egui::Layout::top_down(egui::Align::Min),
@@ -2647,7 +2733,7 @@ impl AdminApp {
                                     });
                             },
                         );
-                        ui.add_space(8.0);
+                        ui.add_space(STATUS_BAR_GAP);
                         render_command_window_status_bar(ui, &status, status_notice.as_deref());
                     });
             });
@@ -3082,8 +3168,11 @@ impl eframe::App for AdminApp {
 
         ui.painter().rect_filled(ui.max_rect(), 0.0, COLOR_BG);
         let horizontal_margin = if ui.available_width() < 880.0 { 10 } else { 18 };
-        let status_bar_height = 44.0;
-        let content_height = (ui.available_height() - status_bar_height - 8.0).max(0.0);
+        let content_height = (ui.available_height()
+            - STATUS_BAR_HEIGHT
+            - STATUS_BAR_GAP
+            - ROOT_STATUS_BAR_BOTTOM_MARGIN)
+            .max(0.0);
         ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width(), content_height),
             egui::Layout::top_down(egui::Align::Min),
@@ -3110,12 +3199,13 @@ impl eframe::App for AdminApp {
                     });
             },
         );
-        ui.add_space(8.0);
+        ui.add_space(STATUS_BAR_GAP);
         egui::Frame::default()
             .inner_margin(egui::Margin::symmetric(horizontal_margin, 0))
             .show(ui, |ui| {
                 self.render_status_bar(ui);
             });
+        ui.add_space(ROOT_STATUS_BAR_BOTTOM_MARGIN);
         self.render_command_windows(ui.ctx());
         self.render_file_manager_windows(ui.ctx());
         self.render_desktop_windows(ui.ctx());

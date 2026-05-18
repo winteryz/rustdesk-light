@@ -3,6 +3,7 @@ use rdl_config::{ConfigKind, EmbeddedEndpointConfig, EndpointConfig, EndpointOve
 use std::fs;
 use std::fs::File;
 use std::io;
+#[cfg(target_family = "unix")]
 use std::os::raw::{c_char, c_int};
 use std::path::PathBuf;
 use std::process::Command;

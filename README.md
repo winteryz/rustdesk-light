@@ -217,6 +217,9 @@ Tagged builds use the git tag; local builds use the workspace version unless `RD
 
 ## Client Builder
 
+![Client Builder](docs/screenshots/admin-build-client.png)
+
+
 `rdl-admin-gui` includes a Client Builder button in the top toolbar. Select a
 fresh `rdl-client-gui` template binary, choose an output path, set the server
 IP/port and optional auth token, then generate a configured client. The builder

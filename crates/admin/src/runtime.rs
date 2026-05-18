@@ -1,4 +1,4 @@
-use rdl_config::{ConfigKind, EndpointOverrides};
+use rdl_config::{ConfigKind, EndpointConfig, EndpointOverrides};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -9,6 +9,7 @@ pub(crate) struct Config {
     pub(crate) port: u16,
     pub(crate) auth_token: String,
     pub(crate) config_path: PathBuf,
+    startup_notice: String,
     overrides: EndpointOverrides,
 }
 
@@ -32,11 +33,13 @@ impl Config {
 
     fn load(overrides: EndpointOverrides) -> Result<Self, rdl_config::ConfigError> {
         let loaded = rdl_config::load_endpoint_config(ConfigKind::Admin, &overrides)?;
+        let startup_notice = admin_startup_config_notice(&loaded);
         Ok(Self {
             ip: loaded.endpoint.ip,
             port: loaded.endpoint.port,
             auth_token: loaded.auth_token.unwrap_or_default(),
             config_path: loaded.config_path,
+            startup_notice,
             overrides,
         })
     }
@@ -46,10 +49,71 @@ impl Config {
         Self::load(self.overrides.clone())
     }
 
-    pub(crate) fn save_auth_token(&mut self, token: &str) -> Result<(), rdl_config::ConfigError> {
+    pub(crate) fn startup_config_notice(&self) -> &str {
+        &self.startup_notice
+    }
+
+    pub(crate) fn save_server_connection(
+        &mut self,
+        ip: &str,
+        port: u16,
+        token: &str,
+    ) -> Result<(), rdl_config::ConfigError> {
+        let endpoint = EndpointConfig::new(ip, port);
+        rdl_config::write_endpoint_config(ConfigKind::Admin, &self.config_path, &endpoint)?;
         rdl_config::write_auth_token_config(ConfigKind::Admin, &self.config_path, token)?;
+        self.ip = ip.to_string();
+        self.port = port;
         self.auth_token = token.to_string();
+        self.startup_notice = format!(
+            "config file: {}\nserver: {}:{} (ui)\nauth token: ui",
+            self.config_path.display(),
+            self.ip,
+            self.port
+        );
         Ok(())
+    }
+}
+
+fn admin_startup_config_notice(loaded: &rdl_config::LoadedEndpointConfig) -> String {
+    format!(
+        "config file: {}\nserver: {}:{} ({})\nauth token: {}",
+        loaded.config_path.display(),
+        loaded.endpoint.ip,
+        loaded.endpoint.port,
+        endpoint_source_label(loaded),
+        auth_source_label(loaded, false)
+    )
+}
+
+fn endpoint_source_label(loaded: &rdl_config::LoadedEndpointConfig) -> &'static str {
+    if loaded.cli_ip.is_some() || loaded.cli_port.is_some() {
+        "args"
+    } else if loaded.file_ip.is_some() || loaded.file_port.is_some() {
+        "file"
+    } else {
+        "default"
+    }
+}
+
+fn auth_source_label(
+    loaded: &rdl_config::LoadedEndpointConfig,
+    generated: bool,
+) -> &'static str {
+    if loaded.cli_auth_token.is_some() {
+        "args"
+    } else if std::env::var("RDL_AUTH_TOKEN")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        "env"
+    } else if loaded.file_auth_token.is_some() {
+        "file"
+    } else if generated {
+        "generated"
+    } else {
+        "none"
     }
 }
 

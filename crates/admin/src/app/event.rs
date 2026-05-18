@@ -38,6 +38,12 @@ pub(super) enum AdminInput {
 pub(super) enum AdminEvent {
     Connected,
     Disconnected,
+    ConnectionFailed {
+        ip: String,
+        port: u16,
+        auth_token: String,
+        detail: String,
+    },
     AuthTokenRequired,
     AuthTokenRejected(String),
     Clients(Vec<ClientInfo>),

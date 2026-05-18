@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+#[cfg(target_family = "unix")]
 use std::os::raw::{c_char, c_int};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
