@@ -33,8 +33,8 @@ use self::{
     settings::{SettingsAction, SettingsState},
     ui::{
         activity_context_menu, apply_admin_theme, cell_label, centered_cell, empty_state, panel,
-        prune_activity_logs, section_title, table_header, timestamped_log, COLOR_BAD, COLOR_BG,
-        COLOR_BORDER, COLOR_GOOD, COLOR_MUTED, COLOR_TEXT, COLOR_WARN, TOOLBAR_CONTROL_HEIGHT,
+        prune_activity_logs, section_title, table_header, timestamped_log, COLOR_BAD, COLOR_GOOD,
+        COLOR_WARN, TOOLBAR_CONTROL_HEIGHT,
     },
 };
 use crate::{
@@ -86,6 +86,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_gui(config: Config) -> eframe::Result {
     disable_macos_automatic_window_tabbing();
+    crate::theme::set_theme_kind(crate::theme::ThemeKind::from_config(&config.theme));
 
     let (input_tx, input_rx) = mpsc::sync_channel(ADMIN_INPUT_QUEUE_CAPACITY);
     let (voice_audio_tx, voice_audio_rx) = mpsc::sync_channel(VOICE_AUDIO_OUTBOUND_QUEUE_CAPACITY);
@@ -388,6 +389,7 @@ struct AdminApp {
     client_list_initialized: bool,
     settings: SettingsState,
     about_open: bool,
+    applied_theme: Option<(crate::theme::ThemeKind, crate::theme::ResolvedTheme)>,
 }
 
 #[derive(Clone)]
@@ -608,9 +610,10 @@ fn client_commands_disabled_text(status: ClientStatus) -> &'static str {
 
 fn overview_metric(ui: &mut egui::Ui, label: &str, value: impl Into<String>) {
     let value = value.into();
+    let palette = crate::theme::palette();
     egui::Frame::default()
-        .fill(COLOR_BG)
-        .stroke(egui::Stroke::new(1.0, COLOR_BORDER))
+        .fill(palette.bg)
+        .stroke(egui::Stroke::new(1.0, palette.border))
         .corner_radius(6.0)
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
@@ -680,14 +683,15 @@ fn info_icon_button(ui: &mut egui::Ui, selected: bool) -> egui::Response {
     );
     if ui.is_rect_visible(rect) {
         let icon_color = if response.hovered() || selected {
-            COLOR_TEXT
+            crate::theme::palette().text
         } else {
-            COLOR_MUTED
+            crate::theme::palette().muted
         };
+        let palette = crate::theme::palette();
         let bg_color = if selected {
-            crate::theme::COLOR_WIDGET_ACTIVE
+            palette.widget_active
         } else if response.hovered() {
-            crate::theme::COLOR_WIDGET_IDLE
+            palette.widget_idle
         } else {
             egui::Color32::TRANSPARENT
         };
@@ -804,13 +808,25 @@ impl AdminApp {
         voice_udp_senders: Arc<Mutex<HashMap<String, AudioUdpSender>>>,
         voice_udp_endpoints: Arc<Mutex<HashMap<String, AudioUdpEndpoint>>>,
     ) -> Self {
-        apply_admin_theme(&cc.egui_ctx);
+        apply_admin_theme(
+            &cc.egui_ctx,
+            crate::theme::ThemeKind::from_config(&config.theme),
+        );
         if let Ok(mut handle) = repaint_handle.lock() {
             *handle = Some(cc.egui_ctx.clone());
         }
         let startup_config_notice = config.startup_config_notice().to_string();
         let client_builder = ClientBuilderState::new(&config);
         let settings = SettingsState::new(&config);
+        let log_lines = vec![
+            timestamped_log(format!(
+                "admin gui started version={}",
+                rdl_version::display_version()
+            )),
+            timestamped_log(startup_config_notice),
+            #[cfg(debug_assertions)]
+            timestamped_log("中文日志测试：Activity 中文显示正常。"),
+        ];
         Self {
             config,
             input_tx,
@@ -844,17 +860,12 @@ impl AdminApp {
             voice_udp_endpoints,
             file_transfer_cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             ignored_file_transfers,
-            log_lines: vec![
-                timestamped_log(format!(
-                    "admin gui started version={}",
-                    rdl_version::display_version()
-                )),
-                timestamped_log(startup_config_notice),
-            ],
+            log_lines,
             client_online_toasts: VecDeque::new(),
             client_list_initialized: false,
             settings,
             about_open: false,
+            applied_theme: None,
         }
     }
 
@@ -1156,8 +1167,17 @@ impl AdminApp {
     fn save_settings_preferences(&mut self, theme: String, language: String) {
         match self.config.save_ui_preferences(&theme, &language) {
             Ok(()) => {
+                self.settings.sync_preferences(&self.config);
+                if let Ok(handle) = self.repaint_handle.lock() {
+                    if let Some(ctx) = handle.as_ref() {
+                        let theme = crate::theme::ThemeKind::from_config(&theme);
+                        let resolved_theme = apply_admin_theme(ctx, theme);
+                        self.applied_theme = Some((theme, resolved_theme));
+                        ctx.request_repaint();
+                    }
+                }
                 self.settings
-                    .set_notice("Theme/language saved to config. Runtime support is TODO.");
+                    .set_notice("Theme/language saved. Theme applied.");
                 self.push_log(format!(
                     "saved admin preferences theme={theme} language={language}"
                 ));
@@ -1191,7 +1211,7 @@ impl AdminApp {
                 ui.label(
                     egui::RichText::new("rust-desk-light admin")
                         .size(18.0)
-                        .color(COLOR_TEXT)
+                        .color(crate::theme::palette().text)
                         .strong(),
                 );
                 ui.add_space(6.0);
@@ -2244,7 +2264,7 @@ impl AdminApp {
                         .unwrap_or(ClientStatus::Offline);
                     if status.can_receive_commands() {
                         let gui_available = self.client_gui_available(&client_id);
-                        command_menu::render_context_menu(
+                        command_menu::render_toolbar_actions(
                             ui,
                             &client_id,
                             gui_available,
@@ -2269,30 +2289,15 @@ impl AdminApp {
                     ui.label(
                         egui::RichText::new("Select a client for actions")
                             .size(12.0)
-                            .color(COLOR_MUTED),
+                            .color(crate::theme::palette().muted),
                     );
                 }
-                #[cfg(debug_assertions)]
-                let mut debug_log_requested = false;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    #[cfg(debug_assertions)]
-                    {
-                        ui.menu_button("Debug", |ui| {
-                            if ui.button("输出中文日志").clicked() {
-                                debug_log_requested = true;
-                                ui.close();
-                            }
-                        });
-                        ui.separator();
-                    }
-                    if ui.button("Setting").clicked() {
+                    if ui.button("⚙ Setting").clicked() {
                         self.settings.open();
                     }
+                    ui.separator();
                 });
-                #[cfg(debug_assertions)]
-                if debug_log_requested {
-                    self.push_log("中文日志测试：菜单和日志应正常显示，不应乱码。");
-                }
             });
         });
     }
@@ -2309,7 +2314,11 @@ impl AdminApp {
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         ui.set_width(ui.available_width());
                         for line in &self.log_lines {
-                            ui.label(egui::RichText::new(line).size(12.0).color(COLOR_MUTED));
+                            ui.label(
+                                egui::RichText::new(line)
+                                    .size(12.0)
+                                    .color(crate::theme::palette().muted),
+                            );
                         }
                     });
                 });
@@ -2910,9 +2919,17 @@ impl AdminApp {
 
 impl eframe::App for AdminApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let theme = crate::theme::ThemeKind::from_config(&self.config.theme);
+        let resolved_theme = crate::theme::resolve_theme(ui.ctx(), theme);
+        if self.applied_theme != Some((theme, resolved_theme)) {
+            let resolved_theme = apply_admin_theme(ui.ctx(), theme);
+            self.applied_theme = Some((theme, resolved_theme));
+        }
+
         let changed = self.drain_events();
 
-        ui.painter().rect_filled(ui.max_rect(), 0.0, COLOR_BG);
+        ui.painter()
+            .rect_filled(ui.max_rect(), 0.0, crate::theme::palette().bg);
         let horizontal_margin = if ui.available_width() < 880.0 { 10 } else { 18 };
         let content_height = (ui.available_height()
             - STATUS_BAR_HEIGHT

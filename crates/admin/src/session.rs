@@ -1,7 +1,4 @@
-use crate::{
-    theme::{COLOR_MUTED, COLOR_TEXT},
-    windowing,
-};
+use crate::windowing;
 use eframe::egui;
 use rdl_protocol::CommandKind;
 use std::sync::{
@@ -283,7 +280,7 @@ fn render_command_fields(
             ui.label(
                 egui::RichText::new("The client will disconnect after acknowledging the command.")
                     .size(12.0)
-                    .color(COLOR_MUTED),
+                    .color(crate::theme::palette().muted),
             );
         }
         _ => {}
@@ -305,7 +302,7 @@ fn render_client_config(
     ui.label(
         egui::RichText::new("Server IP")
             .size(12.0)
-            .color(COLOR_MUTED),
+            .color(crate::theme::palette().muted),
     );
     let response = ui.add_sized(
         [ui.available_width(), TOOLBAR_CONTROL_HEIGHT],
@@ -328,7 +325,7 @@ fn render_client_config(
     ui.label(
         egui::RichText::new("Server Port")
             .size(12.0)
-            .color(COLOR_MUTED),
+            .color(crate::theme::palette().muted),
     );
     let response = ui.add_sized(
         [120.0, TOOLBAR_CONTROL_HEIGHT],
@@ -355,7 +352,7 @@ fn render_client_config(
     ui.label(
         egui::RichText::new("Auth Token")
             .size(12.0)
-            .color(COLOR_MUTED),
+            .color(crate::theme::palette().muted),
     );
     ui.horizontal(|ui| {
         let input_width = (ui.available_width() - 132.0).max(180.0);
@@ -393,7 +390,7 @@ fn render_client_config(
     ui.label(
         egui::RichText::new("The client will restart with client.toml only; startup arguments are not carried over.")
             .size(12.0)
-            .color(COLOR_MUTED),
+            .color(crate::theme::palette().muted),
     );
 }
 
@@ -405,7 +402,7 @@ fn render_update_path(ui: &mut egui::Ui, update_path: &Arc<Mutex<String>>) {
     ui.label(
         egui::RichText::new("Replacement Binary Path")
             .size(12.0)
-            .color(COLOR_MUTED),
+            .color(crate::theme::palette().muted),
     );
     let response = ui.add_sized(
         [ui.available_width(), TOOLBAR_CONTROL_HEIGHT],
@@ -428,7 +425,7 @@ fn render_delay(ui: &mut egui::Ui, delay_seconds: &Arc<Mutex<String>>) {
     ui.label(
         egui::RichText::new("Delay Seconds")
             .size(12.0)
-            .color(COLOR_MUTED),
+            .color(crate::theme::palette().muted),
     );
     let response = ui.add_sized(
         [120.0, TOOLBAR_CONTROL_HEIGHT],
@@ -479,7 +476,7 @@ fn render_confirm(
                 ui.label(
                     egui::RichText::new("Confirmation required")
                         .size(12.0)
-                        .color(COLOR_TEXT),
+                        .color(crate::theme::palette().text),
                 );
             }
         });

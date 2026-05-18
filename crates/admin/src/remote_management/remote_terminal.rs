@@ -1,5 +1,5 @@
 use crate::{
-    theme::{COLOR_BAD, COLOR_GOOD, COLOR_MUTED, COLOR_TEXT, COLOR_WARN},
+    theme::{COLOR_BAD, COLOR_GOOD, COLOR_WARN},
     windowing,
 };
 use eframe::egui;
@@ -359,7 +359,7 @@ fn render_toolbar(
         ui.label(
             egui::RichText::new("Terminal")
                 .size(13.0)
-                .color(COLOR_TEXT)
+                .color(crate::theme::palette().text)
                 .strong(),
         );
         ui.separator();
@@ -486,7 +486,7 @@ fn render_input(
             egui::Label::new(
                 egui::RichText::new(prompt)
                     .font(egui::FontId::monospace(13.0))
-                    .color(COLOR_MUTED),
+                    .color(crate::theme::palette().muted),
             )
             .selectable(false)
             .truncate()
@@ -563,7 +563,7 @@ fn render_status_bar(
         .map(|value| value.clone())
         .unwrap_or_default();
     let (label, color) = match status {
-        TerminalStatus::Ready => ("Ready", COLOR_MUTED),
+        TerminalStatus::Ready => ("Ready", crate::theme::palette().muted),
         TerminalStatus::Running => ("Running", COLOR_WARN),
         TerminalStatus::Done => ("Done", COLOR_GOOD),
         TerminalStatus::Failed => ("Failed", COLOR_BAD),

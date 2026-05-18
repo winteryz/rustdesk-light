@@ -70,7 +70,7 @@ pub(super) fn render(ui: &mut egui::Ui, result_detail: &Arc<Mutex<String>>) {
     ui.label(
         egui::RichText::new("Output")
             .size(12.0)
-            .color(ui::COLOR_MUTED),
+            .color(crate::theme::palette().muted),
     );
     ui.add_space(4.0);
     let height = ui.available_height().clamp(96.0, 180.0);

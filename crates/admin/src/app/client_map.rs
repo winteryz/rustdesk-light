@@ -101,7 +101,7 @@ fn render_map_contents(
                 ui.label(
                     egui::RichText::new("IP location is approximate")
                         .size(12.0)
-                        .color(ui::COLOR_MUTED),
+                        .color(crate::theme::palette().muted),
                 );
             });
         });
@@ -135,19 +135,19 @@ fn render_map_contents(
                 ui.label(
                     egui::RichText::new(title)
                         .size(15.0)
-                        .color(ui::COLOR_TEXT),
+                        .color(crate::theme::palette().text),
                 );
                 ui.label(
                     egui::RichText::new(detail)
                         .size(12.0)
-                        .color(ui::COLOR_MUTED),
+                        .color(crate::theme::palette().muted),
                 );
                 ui.label(
                     egui::RichText::new(
                         "If this is a public client, restart rdl-server-cli with --geoip-db /path/GeoLite2-City.mmdb.",
                     )
                         .size(12.0)
-                        .color(ui::COLOR_MUTED),
+                        .color(crate::theme::palette().muted),
                 );
             });
             ui.add_space(18.0);
@@ -272,7 +272,7 @@ fn draw_world_map(painter: &egui::Painter, rect: egui::Rect) {
     painter.rect_stroke(
         rect,
         8.0,
-        egui::Stroke::new(1.0, ui::COLOR_BORDER),
+        egui::Stroke::new(1.0, crate::theme::palette().border),
         egui::StrokeKind::Inside,
     );
     painter.rect_stroke(
@@ -326,14 +326,14 @@ fn draw_stat_chip(painter: &egui::Painter, rect: egui::Rect, label: &str, value:
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(11.0),
-        ui::COLOR_MUTED,
+        crate::theme::palette().muted,
     );
     painter.text(
         rect.right_center() - egui::vec2(12.0, 0.0),
         egui::Align2::RIGHT_CENTER,
         value.to_string(),
         egui::FontId::proportional(12.0),
-        ui::COLOR_TEXT,
+        crate::theme::palette().text,
     );
 }
 
@@ -498,7 +498,7 @@ fn draw_map_summary(
         egui::Align2::CENTER_CENTER,
         summary,
         egui::FontId::proportional(12.0),
-        ui::COLOR_TEXT,
+        crate::theme::palette().text,
     );
 }
 
@@ -524,7 +524,7 @@ fn draw_map_cluster(painter: &egui::Painter, cluster: &MapCluster, selected: boo
     painter.circle_stroke(
         cluster.pos,
         radius,
-        egui::Stroke::new(2.2, ui::COLOR_PANEL.gamma_multiply(0.98)),
+        egui::Stroke::new(2.2, crate::theme::palette().panel.gamma_multiply(0.98)),
     );
     if selected {
         painter.circle_stroke(
@@ -539,7 +539,7 @@ fn draw_map_cluster(painter: &egui::Painter, cluster: &MapCluster, selected: boo
             egui::Align2::CENTER_CENTER,
             count.to_string(),
             egui::FontId::proportional(11.0),
-            ui::COLOR_PANEL,
+            crate::theme::palette().panel,
         );
     }
 }
@@ -569,7 +569,7 @@ fn draw_map_cluster_label(
         egui::Align2::CENTER_CENTER,
         map_cluster_label(cluster),
         egui::FontId::proportional(11.0),
-        ui::COLOR_TEXT,
+        crate::theme::palette().text,
     );
 }
 
@@ -655,7 +655,7 @@ fn draw_cluster_hover_card(
         egui::Align2::LEFT_TOP,
         &cluster.title,
         egui::FontId::proportional(12.0),
-        ui::COLOR_TEXT,
+        crate::theme::palette().text,
     );
 
     let mut y = rect.top() + 34.0;
@@ -669,7 +669,7 @@ fn draw_cluster_hover_card(
             egui::Align2::LEFT_TOP,
             line,
             egui::FontId::monospace(11.0),
-            ui::COLOR_MUTED,
+            crate::theme::palette().muted,
         );
         y += 17.0;
     }

@@ -16,6 +16,51 @@ pub fn render_context_menu(
     render_plugins(ui, client_id, send_command);
 }
 
+pub fn render_toolbar_actions(
+    ui: &mut egui::Ui,
+    client_id: &str,
+    gui_available: bool,
+    send_command: &mut impl FnMut(&str, CommandKind),
+) {
+    ui.label(crate::theme::muted_text("Quick").strong());
+    toolbar_command(
+        ui,
+        client_id,
+        "Remote Desktop",
+        CommandKind::RemoteDesktop,
+        gui_available,
+        "Disabled: selected client has no GUI session",
+        send_command,
+    );
+    toolbar_command(
+        ui,
+        client_id,
+        "Files",
+        CommandKind::FileManager,
+        true,
+        "",
+        send_command,
+    );
+    toolbar_command(
+        ui,
+        client_id,
+        "Terminal",
+        CommandKind::RemoteTerminal,
+        true,
+        "",
+        send_command,
+    );
+    toolbar_command(
+        ui,
+        client_id,
+        "Execute Code",
+        CommandKind::ExecuteCode,
+        true,
+        "",
+        send_command,
+    );
+}
+
 pub fn render_unavailable_client_menu(ui: &mut egui::Ui, client_id: &str, status: &str) {
     ui.label(egui::RichText::new(format!("Client {status}")).strong());
     ui.label("Remote commands are disabled until this client reconnects.");
@@ -348,6 +393,27 @@ fn render_plugins(
             send_command,
         );
     });
+}
+
+fn toolbar_command(
+    ui: &mut egui::Ui,
+    client_id: &str,
+    label: &str,
+    command: CommandKind,
+    enabled: bool,
+    disabled_hover: &str,
+    send_command: &mut impl FnMut(&str, CommandKind),
+) {
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new(format!("{} {}", command_icon(&command), label)),
+    );
+    if response.clicked() {
+        send_command(client_id, command);
+    }
+    if !enabled && !disabled_hover.is_empty() {
+        response.on_hover_text(disabled_hover);
+    }
 }
 
 fn menu_command(

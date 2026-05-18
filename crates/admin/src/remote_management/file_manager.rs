@@ -1,5 +1,5 @@
 use crate::{
-    theme::{COLOR_BAD, COLOR_GOOD, COLOR_MUTED, COLOR_TEXT, COLOR_WARN},
+    theme::{COLOR_BAD, COLOR_GOOD, COLOR_WARN},
     windowing,
 };
 use chrono::{Local, TimeZone};
@@ -640,7 +640,7 @@ fn render_remote_panel(
             ui.label(
                 egui::RichText::new("Remote")
                     .size(13.0)
-                    .color(COLOR_TEXT)
+                    .color(crate::theme::palette().text)
                     .strong(),
             );
             render_remote_toolbar(ui, current_path, path_input, outbound, status);
@@ -690,7 +690,7 @@ fn render_local_panel(
             ui.label(
                 egui::RichText::new("Local")
                     .size(13.0)
-                    .color(COLOR_TEXT)
+                    .color(crate::theme::palette().text)
                     .strong(),
             );
             render_local_toolbar(ui, local_path, local_entries, selected_local_name);
@@ -1312,14 +1312,14 @@ fn render_transfer_table(
             ui.label(
                 egui::RichText::new("Transfers")
                     .size(13.0)
-                    .color(COLOR_TEXT)
+                    .color(crate::theme::palette().text)
                     .strong(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new("Right click a row to delete")
                         .size(12.0)
-                        .color(COLOR_MUTED),
+                        .color(crate::theme::palette().muted),
                 );
             });
         });
@@ -1328,7 +1328,7 @@ fn render_transfer_table(
             ui.label(
                 egui::RichText::new("No file transfers")
                     .size(12.0)
-                    .color(COLOR_MUTED),
+                    .color(crate::theme::palette().muted),
             );
             return;
         }
@@ -1373,7 +1373,7 @@ fn render_transfer_table(
                                 egui::Label::new(
                                     egui::RichText::new(&row_data.name)
                                         .size(12.0)
-                                        .color(COLOR_TEXT),
+                                        .color(crate::theme::palette().text),
                                 )
                                 .selectable(false)
                                 .sense(egui::Sense::hover()),
@@ -1479,7 +1479,7 @@ fn table_header_label(ui: &mut egui::Ui, text: &str) {
         egui::Label::new(
             egui::RichText::new(text)
                 .size(12.0)
-                .color(COLOR_TEXT)
+                .color(crate::theme::palette().text)
                 .strong(),
         )
         .selectable(false)
@@ -1489,9 +1489,13 @@ fn table_header_label(ui: &mut egui::Ui, text: &str) {
 
 fn table_text(ui: &mut egui::Ui, text: &str) {
     ui.add(
-        egui::Label::new(egui::RichText::new(text).size(12.0).color(COLOR_TEXT))
-            .selectable(false)
-            .sense(egui::Sense::hover()),
+        egui::Label::new(
+            egui::RichText::new(text)
+                .size(12.0)
+                .color(crate::theme::palette().text),
+        )
+        .selectable(false)
+        .sense(egui::Sense::hover()),
     );
 }
 
@@ -1547,7 +1551,7 @@ fn transfer_status_color(status: FileTransferStatus) -> egui::Color32 {
         FileTransferStatus::Cancelling => COLOR_WARN,
         FileTransferStatus::Done => COLOR_GOOD,
         FileTransferStatus::Failed => COLOR_BAD,
-        FileTransferStatus::Cancelled => COLOR_MUTED,
+        FileTransferStatus::Cancelled => crate::theme::palette().muted,
     }
 }
 
@@ -1602,7 +1606,7 @@ fn render_status_bar(
         .unwrap_or(FileStatus::Ready);
     let notice = notice.lock().map(|value| value.clone()).unwrap_or_default();
     let (label, color) = match status {
-        FileStatus::Ready => ("Ready", COLOR_MUTED),
+        FileStatus::Ready => ("Ready", crate::theme::palette().muted),
         FileStatus::Pending => ("Pending", COLOR_WARN),
         FileStatus::Done => ("Done", COLOR_GOOD),
         FileStatus::Failed => ("Failed", COLOR_BAD),
@@ -1643,12 +1647,12 @@ fn render_pending_dialogs(
                 ui.label(
                     egui::RichText::new("Delete this remote item?")
                         .size(12.0)
-                        .color(COLOR_MUTED),
+                        .color(crate::theme::palette().muted),
                 );
                 ui.label(
                     egui::RichText::new(&remote_path)
                         .size(12.0)
-                        .color(COLOR_TEXT),
+                        .color(crate::theme::palette().text),
                 );
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -1683,12 +1687,12 @@ fn render_pending_dialogs(
                 ui.label(
                     egui::RichText::new("Rename remote item")
                         .size(12.0)
-                        .color(COLOR_MUTED),
+                        .color(crate::theme::palette().muted),
                 );
                 ui.label(
                     egui::RichText::new(&remote_path)
                         .size(12.0)
-                        .color(COLOR_TEXT),
+                        .color(crate::theme::palette().text),
                 );
                 ui.add_space(8.0);
                 let mut name = rename_to
@@ -1737,7 +1741,7 @@ fn render_pending_dialogs(
                 ui.label(
                     egui::RichText::new("Create folder in current remote directory")
                         .size(12.0)
-                        .color(COLOR_MUTED),
+                        .color(crate::theme::palette().muted),
                 );
                 ui.add_space(8.0);
                 let mut name = new_folder_name
@@ -1789,9 +1793,13 @@ fn render_pending_dialogs(
                 ui.label(
                     egui::RichText::new("Delete this local item?")
                         .size(12.0)
-                        .color(COLOR_MUTED),
+                        .color(crate::theme::palette().muted),
                 );
-                ui.label(egui::RichText::new(&path).size(12.0).color(COLOR_TEXT));
+                ui.label(
+                    egui::RichText::new(&path)
+                        .size(12.0)
+                        .color(crate::theme::palette().text),
+                );
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui
@@ -1834,9 +1842,13 @@ fn render_pending_dialogs(
                 ui.label(
                     egui::RichText::new("Rename local item")
                         .size(12.0)
-                        .color(COLOR_MUTED),
+                        .color(crate::theme::palette().muted),
                 );
-                ui.label(egui::RichText::new(&path).size(12.0).color(COLOR_TEXT));
+                ui.label(
+                    egui::RichText::new(&path)
+                        .size(12.0)
+                        .color(crate::theme::palette().text),
+                );
                 ui.add_space(8.0);
                 let mut name = local_rename_to
                     .lock()
@@ -1891,7 +1903,7 @@ fn render_pending_dialogs(
                 ui.label(
                     egui::RichText::new("Create folder in current local directory")
                         .size(12.0)
-                        .color(COLOR_MUTED),
+                        .color(crate::theme::palette().muted),
                 );
                 ui.add_space(8.0);
                 let mut name = local_new_folder_name

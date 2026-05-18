@@ -277,8 +277,8 @@ fn render_form(
 
     egui::CentralPanel::no_frame().show_inside(ui, |ui| {
         egui::Frame::default()
-            .fill(ui::COLOR_PANEL)
-            .stroke(egui::Stroke::new(1.0, ui::COLOR_BORDER))
+            .fill(crate::theme::palette().panel)
+            .stroke(egui::Stroke::new(1.0, crate::theme::palette().border))
             .corner_radius(8.0)
             .inner_margin(12.0)
             .show(ui, |ui| match command {

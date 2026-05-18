@@ -2,33 +2,45 @@ use eframe::egui;
 use std::sync::Arc;
 
 pub(super) use crate::theme::{
-    COLOR_ACCENT, COLOR_BAD, COLOR_BG, COLOR_BORDER, COLOR_GOOD, COLOR_MUTED, COLOR_PANEL,
-    COLOR_SELECTION_BG, COLOR_TEXT, COLOR_WARN, COLOR_WIDGET_ACTIVE, COLOR_WIDGET_HOVERED,
-    COLOR_WIDGET_IDLE,
+    ResolvedTheme, ThemeKind, COLOR_ACCENT, COLOR_BAD, COLOR_GOOD, COLOR_MUTED, COLOR_TEXT,
+    COLOR_WARN,
 };
 pub(super) const TOOLBAR_CONTROL_HEIGHT: f32 = crate::theme::CONTROL_HEIGHT;
 const ACTIVITY_LOG_LIMIT: usize = 300;
 
-pub(super) fn apply_admin_theme(ctx: &egui::Context) {
+pub(super) fn apply_admin_theme(ctx: &egui::Context, theme: ThemeKind) -> ResolvedTheme {
+    ctx.set_theme(crate::theme::theme_preference(theme));
+    let resolved_theme = crate::theme::resolve_theme(ctx, theme);
+    crate::theme::set_resolved_theme(resolved_theme);
     install_cjk_font(ctx);
 
+    let palette = crate::theme::palette();
     let mut style = (*ctx.global_style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
     style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    style.visuals = egui::Visuals::light();
-    style.visuals.window_fill = COLOR_PANEL;
-    style.visuals.panel_fill = COLOR_BG;
-    style.visuals.widgets.noninteractive.fg_stroke.color = COLOR_TEXT;
-    style.visuals.widgets.inactive.bg_fill = COLOR_WIDGET_IDLE;
-    style.visuals.widgets.hovered.bg_fill = COLOR_WIDGET_HOVERED;
-    style.visuals.widgets.active.bg_fill = COLOR_WIDGET_ACTIVE;
-    style.visuals.selection.bg_fill = COLOR_SELECTION_BG;
-    style.visuals.selection.stroke.color = COLOR_ACCENT;
+    style.visuals = match resolved_theme {
+        ResolvedTheme::Light => egui::Visuals::light(),
+        ResolvedTheme::Dark => egui::Visuals::dark(),
+    };
+    style.visuals.window_fill = palette.panel;
+    style.visuals.panel_fill = palette.bg;
+    style.visuals.extreme_bg_color = palette.panel_subtle;
+    style.visuals.widgets.noninteractive.fg_stroke.color = palette.text;
+    style.visuals.widgets.inactive.fg_stroke.color = palette.text;
+    style.visuals.widgets.hovered.fg_stroke.color = palette.text;
+    style.visuals.widgets.active.fg_stroke.color = palette.text;
+    style.visuals.widgets.inactive.bg_fill = palette.widget_idle;
+    style.visuals.widgets.hovered.bg_fill = palette.widget_hovered;
+    style.visuals.widgets.active.bg_fill = palette.widget_active;
+    style.visuals.window_stroke.color = palette.border;
+    style.visuals.selection.bg_fill = palette.selection_bg;
+    style.visuals.selection.stroke.color = palette.accent;
     #[cfg(debug_assertions)]
     {
         style.debug.warn_if_rect_changes_id = false;
     }
     ctx.set_global_style(style);
+    resolved_theme
 }
 
 fn install_cjk_font(ctx: &egui::Context) {
@@ -83,7 +95,7 @@ pub(super) fn section_title(ui: &mut egui::Ui, title: &str) {
     ui.label(
         egui::RichText::new(title)
             .size(14.0)
-            .color(COLOR_TEXT)
+            .color(crate::theme::palette().text)
             .strong(),
     );
 }
@@ -190,12 +202,12 @@ pub(super) fn empty_state(ui: &mut egui::Ui) {
         ui.label(
             egui::RichText::new("No clients online")
                 .size(16.0)
-                .color(COLOR_TEXT),
+                .color(crate::theme::palette().text),
         );
         ui.label(
             egui::RichText::new("Start a client or refresh after it connects.")
                 .size(13.0)
-                .color(COLOR_MUTED),
+                .color(crate::theme::palette().muted),
         );
     });
     ui.add_space(48.0);

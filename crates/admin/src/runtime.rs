@@ -8,6 +8,8 @@ pub(crate) struct Config {
     pub(crate) ip: String,
     pub(crate) port: u16,
     pub(crate) auth_token: String,
+    pub(crate) theme: String,
+    pub(crate) language: String,
     pub(crate) config_path: PathBuf,
     startup_notice: String,
     overrides: EndpointOverrides,
@@ -38,6 +40,8 @@ impl Config {
             ip: loaded.endpoint.ip,
             port: loaded.endpoint.port,
             auth_token: loaded.auth_token.unwrap_or_default(),
+            theme: loaded.ui.theme,
+            language: loaded.ui.language,
             config_path: loaded.config_path,
             startup_notice,
             overrides,
@@ -80,6 +84,8 @@ impl Config {
         language: &str,
     ) -> Result<(), rdl_config::ConfigError> {
         rdl_config::write_ui_config(ConfigKind::Admin, &self.config_path, theme, language)?;
+        self.theme = theme.to_string();
+        self.language = language.to_string();
         Ok(())
     }
 }

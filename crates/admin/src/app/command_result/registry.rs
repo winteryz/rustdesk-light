@@ -1,8 +1,7 @@
 use super::{
     filtered_table_rows, normalized_table_header, parse_result_table, stable_hash,
-    table_cell_label, table_row_key, table_value, DisplayTableRow, ResultTable, COLOR_BORDER,
-    COLOR_MUTED, COLOR_TEXT, TABLE_BODY_CELL_HEIGHT, TABLE_BODY_TEXT_SIZE,
-    TABLE_HEADER_CELL_HEIGHT, TABLE_HEADER_TEXT_SIZE,
+    table_cell_label, table_row_key, table_value, DisplayTableRow, ResultTable,
+    TABLE_BODY_CELL_HEIGHT, TABLE_BODY_TEXT_SIZE, TABLE_HEADER_CELL_HEIGHT, TABLE_HEADER_TEXT_SIZE,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use eframe::egui;
@@ -71,7 +70,7 @@ pub(super) fn render_result(
         ui.label(
             egui::RichText::new("No registry values match the current filter.")
                 .size(12.0)
-                .color(COLOR_MUTED),
+                .color(crate::theme::palette().muted),
         );
         return;
     }
@@ -146,8 +145,8 @@ fn render_registry_tree_panel(
     width: f32,
 ) {
     egui::Frame::default()
-        .fill(crate::theme::COLOR_PANEL_SUBTLE)
-        .stroke(egui::Stroke::new(1.0, COLOR_BORDER))
+        .fill(crate::theme::palette().panel_subtle)
+        .stroke(egui::Stroke::new(1.0, crate::theme::palette().border))
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(8, 8))
         .show(ui, |ui| {
@@ -157,12 +156,14 @@ fn render_registry_tree_panel(
                 ui.label(
                     egui::RichText::new("Registry")
                         .size(12.0)
-                        .color(COLOR_TEXT)
+                        .color(crate::theme::palette().text)
                         .strong(),
                 );
                 ui.add_space(6.0);
                 egui::CollapsingHeader::new(
-                    egui::RichText::new("Computer").size(12.0).color(COLOR_TEXT),
+                    egui::RichText::new("Computer")
+                        .size(12.0)
+                        .color(crate::theme::palette().text),
                 )
                 .id_salt("registry_tree_computer")
                 .default_open(true)
@@ -193,7 +194,7 @@ fn render_registry_tree_root(
     let response = egui::CollapsingHeader::new(
         egui::RichText::new(registry_display_hive(&root.hive))
             .size(12.0)
-            .color(COLOR_TEXT),
+            .color(crate::theme::palette().text),
     )
     .id_salt(("registry_tree_root", &root.hive))
     .default_open(true)
@@ -249,23 +250,26 @@ fn render_registry_tree_node(
     }
 
     let id = format!("{id_prefix}\\{}", node.name);
-    let response =
-        egui::CollapsingHeader::new(egui::RichText::new(&node.name).size(12.0).color(COLOR_TEXT))
-            .id_salt(("registry_tree_node", id.clone()))
-            .default_open(true)
-            .show(ui, |ui| {
-                for child in &node.children {
-                    render_registry_tree_node(
-                        ui,
-                        groups,
-                        child,
-                        selected_group_index,
-                        table_selected_row,
-                        registry_key_requested,
-                        &id,
-                    );
-                }
-            });
+    let response = egui::CollapsingHeader::new(
+        egui::RichText::new(&node.name)
+            .size(12.0)
+            .color(crate::theme::palette().text),
+    )
+    .id_salt(("registry_tree_node", id.clone()))
+    .default_open(true)
+    .show(ui, |ui| {
+        for child in &node.children {
+            render_registry_tree_node(
+                ui,
+                groups,
+                child,
+                selected_group_index,
+                table_selected_row,
+                registry_key_requested,
+                &id,
+            );
+        }
+    });
     if response.header_response.clicked() {
         if let Some(group_index) = node.group_index.and_then(|index| groups.get(index)) {
             queue_registry_key_request(table_selected_row, registry_key_requested, group_index);
@@ -296,7 +300,9 @@ fn render_registry_tree_leaf(
         .unwrap_or_else(|| registry_display_hive(&group.hive));
     let response = ui.selectable_label(
         selected_group_index == group_index,
-        egui::RichText::new(&label).size(12.0).color(COLOR_TEXT),
+        egui::RichText::new(&label)
+            .size(12.0)
+            .color(crate::theme::palette().text),
     );
     let response = response.on_hover_text(registry_display_path(&group.hive, &group.path));
     if response.clicked() {
@@ -327,13 +333,13 @@ fn render_registry_values_panel(
                     ui.label(
                         egui::RichText::new(registry_display_hive(&group.hive))
                             .size(12.0)
-                            .color(COLOR_TEXT)
+                            .color(crate::theme::palette().text)
                             .strong(),
                     );
                     ui.label(
                         egui::RichText::new(&group.path)
                             .size(12.0)
-                            .color(COLOR_MUTED)
+                            .color(crate::theme::palette().muted)
                             .font(egui::FontId::monospace(12.0)),
                     );
                 });
@@ -360,7 +366,7 @@ fn render_registry_values_table(
         ui.label(
             egui::RichText::new("No values in this key.")
                 .size(12.0)
-                .color(COLOR_MUTED),
+                .color(crate::theme::palette().muted),
         );
         return;
     }
@@ -377,7 +383,7 @@ fn render_registry_values_table(
                         ui,
                         label,
                         TABLE_HEADER_TEXT_SIZE,
-                        COLOR_MUTED,
+                        crate::theme::palette().muted,
                         egui::Align::Min,
                         egui::Sense::hover(),
                     );
@@ -402,7 +408,7 @@ fn render_registry_values_table(
                             ui,
                             cell,
                             TABLE_BODY_TEXT_SIZE,
-                            COLOR_TEXT,
+                            crate::theme::palette().text,
                             egui::Align::Min,
                             egui::Sense::hover(),
                         );

@@ -66,7 +66,7 @@ pub(super) fn render(
             ui.label(
                 egui::RichText::new(status)
                     .size(12.0)
-                    .color(ui::COLOR_MUTED),
+                    .color(crate::theme::palette().muted),
             );
         }
     });
@@ -78,7 +78,7 @@ pub(super) fn render(
     ui.label(
         egui::RichText::new("Code")
             .size(12.0)
-            .color(ui::COLOR_MUTED),
+            .color(crate::theme::palette().muted),
     );
     let editor_height = if has_result {
         (ui.available_height() * 0.46).clamp(160.0, 240.0)

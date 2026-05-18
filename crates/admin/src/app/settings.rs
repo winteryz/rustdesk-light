@@ -1,31 +1,7 @@
-use crate::runtime::Config;
+use crate::{runtime::Config, theme::ThemeKind};
 use eframe::egui;
 
-use super::{form_label, COLOR_BAD, COLOR_GOOD, COLOR_MUTED, COLOR_TEXT, TOOLBAR_CONTROL_HEIGHT};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SettingsTheme {
-    Light,
-    Dark,
-}
-
-impl SettingsTheme {
-    const ALL: [Self; 2] = [Self::Light, Self::Dark];
-
-    fn as_config(self) -> &'static str {
-        match self {
-            Self::Light => "light",
-            Self::Dark => "dark",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Light => "Light",
-            Self::Dark => "Dark",
-        }
-    }
-}
+use super::{form_label, COLOR_BAD, COLOR_GOOD, TOOLBAR_CONTROL_HEIGHT};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SettingsLanguage {
@@ -35,6 +11,13 @@ enum SettingsLanguage {
 
 impl SettingsLanguage {
     const ALL: [Self; 2] = [Self::English, Self::ChineseSimplified];
+
+    fn from_config(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "zh-cn" | "zh_cn" | "zh" => Self::ChineseSimplified,
+            _ => Self::English,
+        }
+    }
 
     fn as_config(self) -> &'static str {
         match self {
@@ -55,7 +38,7 @@ pub(super) struct SettingsState {
     pub(super) server_ip: String,
     pub(super) server_port: String,
     pub(super) auth_token: String,
-    theme: SettingsTheme,
+    theme: ThemeKind,
     language: SettingsLanguage,
     open: bool,
     reconnect_pending: bool,
@@ -69,8 +52,8 @@ impl SettingsState {
             server_ip: config.ip.clone(),
             server_port: config.port.to_string(),
             auth_token: config.auth_token.clone(),
-            theme: SettingsTheme::Light,
-            language: SettingsLanguage::English,
+            theme: ThemeKind::from_config(&config.theme),
+            language: SettingsLanguage::from_config(&config.language),
             open: false,
             reconnect_pending: false,
             notice: String::new(),
@@ -100,6 +83,11 @@ impl SettingsState {
         self.server_ip = config.ip.clone();
         self.server_port = config.port.to_string();
         self.auth_token = config.auth_token.clone();
+    }
+
+    pub(super) fn sync_preferences(&mut self, config: &Config) {
+        self.theme = ThemeKind::from_config(&config.theme);
+        self.language = SettingsLanguage::from_config(&config.language);
     }
 
     pub(super) fn set_notice(&mut self, notice: impl Into<String>) {
@@ -183,7 +171,7 @@ fn render_connection_settings(
     ui.label(
         egui::RichText::new("Connection")
             .size(13.0)
-            .color(COLOR_TEXT)
+            .color(crate::theme::palette().text)
             .strong(),
     );
     ui.add_space(4.0);
@@ -239,32 +227,30 @@ fn render_preference_settings(
     ui.label(
         egui::RichText::new("Appearance")
             .size(13.0)
-            .color(COLOR_TEXT)
+            .color(crate::theme::palette().text)
             .strong(),
     );
     ui.add_space(4.0);
     ui.label(
-        egui::RichText::new(
-            "TODO: Saved to config only; runtime theme/i18n wiring is on the roadmap.",
-        )
-        .size(12.0)
-        .color(COLOR_MUTED),
+        egui::RichText::new("Theme changes apply immediately. System follows the OS appearance.")
+            .size(12.0)
+            .color(crate::theme::palette().muted),
     );
     ui.add_space(6.0);
 
     form_label(ui, "Theme");
-    egui::ComboBox::from_id_salt("admin_settings_theme_todo")
+    egui::ComboBox::from_id_salt("admin_settings_theme")
         .selected_text(state.theme.label())
         .width(ui.available_width())
         .show_ui(ui, |ui| {
-            for theme in SettingsTheme::ALL {
+            for theme in ThemeKind::ALL {
                 ui.selectable_value(&mut state.theme, theme, theme.label());
             }
         });
     ui.add_space(6.0);
 
     form_label(ui, "Language");
-    egui::ComboBox::from_id_salt("admin_settings_language_todo")
+    egui::ComboBox::from_id_salt("admin_settings_language")
         .selected_text(state.language.label())
         .width(ui.available_width())
         .show_ui(ui, |ui| {
@@ -308,7 +294,7 @@ fn render_status(ui: &mut egui::Ui, state: &SettingsState) {
         ui.label(
             egui::RichText::new("Connection settings are saved to the admin config.")
                 .size(12.0)
-                .color(COLOR_MUTED),
+                .color(crate::theme::palette().muted),
         );
     }
 }

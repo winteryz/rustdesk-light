@@ -118,6 +118,7 @@ pub struct LoadedEndpointConfig {
     pub config_exists: bool,
     pub auth_token: Option<String>,
     pub require_client_auth: bool,
+    pub ui: UiConfig,
     pub file_ip: Option<String>,
     pub file_port: Option<u16>,
     pub file_auth_token: Option<String>,
@@ -127,6 +128,21 @@ pub struct LoadedEndpointConfig {
     pub cli_auth_token: Option<String>,
     pub cli_require_client_auth: Option<bool>,
     pub embedded_config: Option<EmbeddedEndpointConfig>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiConfig {
+    pub theme: String,
+    pub language: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: "system".to_string(),
+            language: "en".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -243,6 +259,7 @@ pub fn load_endpoint_config(
     let mut file_port = None;
     let mut auth_token = None;
     let mut require_client_auth = false;
+    let mut ui = UiConfig::default();
     let mut file_auth_token = None;
     let mut file_require_client_auth = None;
     let embedded_config = if kind == ConfigKind::Client {
@@ -272,6 +289,7 @@ pub fn load_endpoint_config(
                     require_client_auth = value;
                     file_require_client_auth = Some(value);
                 }
+                ui = document.ui_config();
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -328,6 +346,7 @@ pub fn load_endpoint_config(
         config_exists,
         auth_token,
         require_client_auth,
+        ui,
         file_ip,
         file_port,
         file_auth_token,
@@ -952,6 +971,19 @@ impl ConfigDocument {
         }
     }
 
+    fn ui_config(&self) -> UiConfig {
+        let mut ui = UiConfig::default();
+        if let Some(section) = self.sections.get("ui") {
+            if let Some(value) = section.get("theme") {
+                ui.theme = parse_toml_string(value);
+            }
+            if let Some(value) = section.get("language") {
+                ui.language = parse_toml_string(value);
+            }
+        }
+        ui
+    }
+
     fn endpoint_port(&self, kind: ConfigKind, key: &str) -> Result<Option<u16>, ConfigError> {
         match self.endpoint_string(kind, key) {
             Some(value) => parse_port(&value).map(Some),
@@ -1231,6 +1263,44 @@ mod tests {
         assert!(text.contains("[ui]"));
         assert!(text.contains("theme = \"dark\""));
         assert!(text.contains("language = \"zh-CN\""));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_reads_ui_config() {
+        let path = std::env::temp_dir().join(format!(
+            "rdl-config-load-ui-test-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            r#"
+            [server]
+            ip = "10.0.0.1"
+            port = 5169
+
+            [ui]
+            theme = "dark"
+            language = "zh-CN"
+            "#,
+        )
+        .unwrap();
+
+        let loaded = load_endpoint_config(
+            ConfigKind::Admin,
+            &EndpointOverrides {
+                config_path: Some(path.clone()),
+                ..EndpointOverrides::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(loaded.ui.theme, "dark");
+        assert_eq!(loaded.ui.language, "zh-CN");
         let _ = fs::remove_file(path);
     }
 

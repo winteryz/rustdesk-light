@@ -1,5 +1,5 @@
 use crate::{
-    theme::{COLOR_BAD, COLOR_GOOD, COLOR_MUTED, COLOR_WARN},
+    theme::{COLOR_BAD, COLOR_GOOD, COLOR_WARN},
     windowing,
 };
 use base64::Engine;
@@ -501,7 +501,11 @@ fn render_toolbar(
                 .lock()
                 .map(|value| *value)
                 .unwrap_or_default();
-            ui.label(egui::RichText::new("Screen").size(12.0).color(COLOR_MUTED));
+            ui.label(
+                egui::RichText::new("Screen")
+                    .size(12.0)
+                    .color(crate::theme::palette().muted),
+            );
             let combo_width = (ui.available_width() - 12.0).max(180.0);
             toolbar_dropdown(
                 ui,
@@ -697,7 +701,7 @@ fn render_frame(
         let available = ui.available_size();
         let Some(texture) = texture else {
             ui.centered_and_justified(|ui| {
-                ui.label(egui::RichText::new(placeholder).color(COLOR_MUTED));
+                ui.label(egui::RichText::new(placeholder).color(crate::theme::palette().muted));
             });
             return;
         };
@@ -802,7 +806,7 @@ fn set_last_mouse_target(
 
 fn render_status_bar(ui: &mut egui::Ui, status: DesktopStatus, notice: &str, stats: &DesktopStats) {
     let (label, color) = match status {
-        DesktopStatus::Ready => ("Ready", COLOR_MUTED),
+        DesktopStatus::Ready => ("Ready", crate::theme::palette().muted),
         DesktopStatus::Pending => ("Pending", COLOR_WARN),
         DesktopStatus::Live => ("Live", COLOR_GOOD),
         DesktopStatus::Failed => ("Failed", COLOR_BAD),

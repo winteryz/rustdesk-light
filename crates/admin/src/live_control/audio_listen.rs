@@ -1,5 +1,5 @@
 use crate::{
-    theme::{COLOR_BAD, COLOR_BORDER, COLOR_GOOD, COLOR_MUTED, COLOR_PANEL, COLOR_WARN},
+    theme::{COLOR_BAD, COLOR_GOOD, COLOR_WARN},
     windowing,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -430,7 +430,11 @@ fn render_toolbar(
                 .lock()
                 .map(|value| *value)
                 .unwrap_or_default();
-            ui.label(egui::RichText::new("Device").size(12.0).color(COLOR_MUTED));
+            ui.label(
+                egui::RichText::new("Device")
+                    .size(12.0)
+                    .color(crate::theme::palette().muted),
+            );
             let combo_width = (ui.available_width() - 12.0).max(180.0);
             toolbar_dropdown(
                 ui,
@@ -536,11 +540,12 @@ fn paint_dropdown_icon(ui: &egui::Ui, response: &egui::Response) {
 fn render_meter(ui: &mut egui::Ui, peak: f32, notice: &str) {
     let desired = egui::vec2(ui.available_width(), 86.0);
     let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
-    ui.painter().rect_filled(rect, 6.0, COLOR_PANEL);
+    ui.painter()
+        .rect_filled(rect, 6.0, crate::theme::palette().panel);
     ui.painter().rect_stroke(
         rect,
         6.0,
-        egui::Stroke::new(1.0, COLOR_BORDER),
+        egui::Stroke::new(1.0, crate::theme::palette().border),
         egui::StrokeKind::Inside,
     );
     let meter_rect = rect.shrink2(egui::vec2(18.0, 28.0));
@@ -555,7 +560,7 @@ fn render_meter(ui: &mut egui::Ui, peak: f32, notice: &str) {
         egui::Align2::CENTER_TOP,
         notice,
         egui::FontId::proportional(13.0),
-        COLOR_MUTED,
+        crate::theme::palette().muted,
     );
 }
 
@@ -563,7 +568,11 @@ fn render_status_bar(ui: &mut egui::Ui, status: AudioStatus, notice: &str, stats
     ui.horizontal(|ui| {
         status_pill(ui, status);
         ui.separator();
-        ui.label(egui::RichText::new(notice).size(12.0).color(COLOR_MUTED));
+        ui.label(
+            egui::RichText::new(notice)
+                .size(12.0)
+                .color(crate::theme::palette().muted),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let meta = if stats.sample_rate == 0 {
                 "no audio".to_string()
@@ -590,14 +599,18 @@ fn render_status_bar(ui: &mut egui::Ui, status: AudioStatus, notice: &str, stats
                     stats.output_misses
                 )
             };
-            ui.label(egui::RichText::new(meta).size(12.0).color(COLOR_MUTED));
+            ui.label(
+                egui::RichText::new(meta)
+                    .size(12.0)
+                    .color(crate::theme::palette().muted),
+            );
         });
     });
 }
 
 fn status_pill(ui: &mut egui::Ui, status: AudioStatus) {
     let (label, color) = match status {
-        AudioStatus::Ready => ("Ready", COLOR_MUTED),
+        AudioStatus::Ready => ("Ready", crate::theme::palette().muted),
         AudioStatus::Pending => ("Pending", COLOR_WARN),
         AudioStatus::Live => ("Live", COLOR_GOOD),
         AudioStatus::Failed => ("Failed", COLOR_BAD),

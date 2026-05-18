@@ -1,6 +1,6 @@
 use super::{balloon_tip, message_box, open_text_in_notepad};
 use crate::{
-    theme::{COLOR_BAD, COLOR_BG, COLOR_GOOD, COLOR_MUTED, COLOR_WARN},
+    theme::{COLOR_BAD, COLOR_GOOD, COLOR_WARN},
     windowing,
 };
 use eframe::egui;
@@ -215,14 +215,22 @@ fn render_form(
     )))
     .exact_size(STATUS_BAR_HEIGHT)
     .show_separator_line(false)
-    .frame(egui::Frame::default().fill(COLOR_BG).inner_margin(0.0))
+    .frame(
+        egui::Frame::default()
+            .fill(crate::theme::palette().bg)
+            .inner_margin(0.0),
+    )
     .show_inside(ui, |ui| {
         ui.add_space(8.0);
         render_status_bar(ui, status, notice);
     });
 
     egui::CentralPanel::default()
-        .frame(egui::Frame::default().fill(COLOR_BG).inner_margin(0.0))
+        .frame(
+            egui::Frame::default()
+                .fill(crate::theme::palette().bg)
+                .inner_margin(0.0),
+        )
         .show_inside(ui, |ui| {
             crate::theme::panel_frame()
                 .corner_radius(8.0)
@@ -250,7 +258,7 @@ fn render_status_bar(
         .unwrap_or(InteractionStatus::Ready);
     let notice = notice.lock().map(|value| value.clone()).unwrap_or_default();
     let (label, default_notice, color) = match status {
-        InteractionStatus::Ready => ("Ready", "Ready", COLOR_MUTED),
+        InteractionStatus::Ready => ("Ready", "Ready", crate::theme::palette().muted),
         InteractionStatus::Sending => ("Sending", "Waiting for client result", COLOR_WARN),
         InteractionStatus::Done => ("Done", "Command sent", COLOR_GOOD),
         InteractionStatus::Failed => ("Failed", "Command failed", COLOR_BAD),
@@ -272,7 +280,7 @@ fn render_title_field(ui: &mut egui::Ui, command: &CommandKind, title: &Arc<Mute
     ui.label(
         egui::RichText::new(title_label(command))
             .size(12.0)
-            .color(COLOR_MUTED),
+            .color(crate::theme::palette().muted),
     );
     let response = ui.add_sized(
         [ui.available_width(), TOOLBAR_CONTROL_HEIGHT],
@@ -292,7 +300,7 @@ fn render_body_field(ui: &mut egui::Ui, command: &CommandKind, body: &Arc<Mutex<
     ui.label(
         egui::RichText::new(body_label(command))
             .size(12.0)
-            .color(COLOR_MUTED),
+            .color(crate::theme::palette().muted),
     );
     let body_height = (ui.available_height() - TOOLBAR_CONTROL_HEIGHT - 36.0).max(150.0);
     let response = ui.add_sized(
@@ -327,7 +335,7 @@ fn render_actions(ui: &mut egui::Ui, body: &Arc<Mutex<String>>, send_requested: 
                 ui.label(
                     egui::RichText::new("Body is empty")
                         .size(12.0)
-                        .color(COLOR_MUTED),
+                        .color(crate::theme::palette().muted),
                 );
             }
         });

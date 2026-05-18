@@ -33,7 +33,7 @@ impl AdminApp {
                                     ui.label(
                                         egui::RichText::new(title)
                                             .size(13.0)
-                                            .color(COLOR_TEXT)
+                                            .color(crate::theme::palette().text)
                                             .strong(),
                                     );
                                     ui.label(crate::theme::muted_text(detail));

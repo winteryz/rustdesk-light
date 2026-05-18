@@ -4,9 +4,6 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use crate::theme::COLOR_TEXT;
-pub(super) use crate::theme::{COLOR_BORDER, COLOR_MUTED, COLOR_PANEL};
-
 pub(super) const TOOLBAR_CONTROL_HEIGHT: f32 = crate::theme::CONTROL_HEIGHT;
 const INLINE_LABEL_WIDTH: f32 = 86.0;
 pub(super) const CODE_ROW_HEIGHT: f32 = 18.0;
@@ -35,7 +32,11 @@ fn render_status_bar(ui: &mut egui::Ui, result_status: &Arc<Mutex<String>>) {
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             render_inline_label(ui, "Status");
-            ui.label(egui::RichText::new(status).size(12.0).color(COLOR_TEXT));
+            ui.label(
+                egui::RichText::new(status)
+                    .size(12.0)
+                    .color(crate::theme::palette().text),
+            );
         },
     );
 }
@@ -53,7 +54,11 @@ pub(super) fn render_inline_label(ui: &mut egui::Ui, label: &str) {
         egui::vec2(INLINE_LABEL_WIDTH, TOOLBAR_CONTROL_HEIGHT),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.label(egui::RichText::new(label).size(12.0).color(COLOR_MUTED));
+            ui.label(
+                egui::RichText::new(label)
+                    .size(12.0)
+                    .color(crate::theme::palette().muted),
+            );
         },
     );
 }
@@ -89,7 +94,11 @@ pub(super) fn render_text_field(
     hint: &str,
 ) {
     let mut text = value.lock().map(|value| value.clone()).unwrap_or_default();
-    ui.label(egui::RichText::new(label).size(12.0).color(COLOR_MUTED));
+    ui.label(
+        egui::RichText::new(label)
+            .size(12.0)
+            .color(crate::theme::palette().muted),
+    );
     let response = ui.add_sized(
         [ui.available_width(), TOOLBAR_CONTROL_HEIGHT],
         egui::TextEdit::singleline(&mut text)
@@ -120,7 +129,7 @@ pub(super) fn render_run_button(
                 ui.label(
                     egui::RichText::new(disabled_message)
                         .size(12.0)
-                        .color(COLOR_TEXT),
+                        .color(crate::theme::palette().text),
                 );
             }
         });

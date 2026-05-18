@@ -1,10 +1,7 @@
 use super::{
     event::AdminInput,
     payload::payload_field,
-    ui::{
-        COLOR_BAD, COLOR_BORDER, COLOR_GOOD, COLOR_MUTED, COLOR_PANEL, COLOR_TEXT, COLOR_WARN,
-        TOOLBAR_CONTROL_HEIGHT,
-    },
+    ui::{COLOR_BAD, COLOR_GOOD, COLOR_WARN, TOOLBAR_CONTROL_HEIGHT},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use eframe::egui;
@@ -395,15 +392,15 @@ fn performance_monitor_pending_detail(detail: &str) -> bool {
 
 fn render_performance_metric_bars(ui: &mut egui::Ui, metrics: &PerformanceMetrics) {
     egui::Frame::default()
-        .fill(COLOR_PANEL)
-        .stroke(egui::Stroke::new(1.0, COLOR_BORDER))
+        .fill(crate::theme::palette().panel)
+        .stroke(egui::Stroke::new(1.0, crate::theme::palette().border))
         .corner_radius(6.0)
         .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new("Resource usage")
                     .size(12.0)
-                    .color(COLOR_TEXT)
+                    .color(crate::theme::palette().text)
                     .strong(),
             );
             ui.add_space(8.0);
@@ -421,7 +418,7 @@ fn render_performance_metric_bar(ui: &mut egui::Ui, metric: &PerformanceMetric) 
             egui::Label::new(
                 egui::RichText::new(metric.label)
                     .size(12.0)
-                    .color(COLOR_MUTED),
+                    .color(crate::theme::palette().muted),
             )
             .truncate(),
         );
@@ -692,7 +689,11 @@ fn render_table_toolbar(
             egui::vec2(38.0, TOOLBAR_CONTROL_HEIGHT),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.label(egui::RichText::new("Filter").size(12.0).color(COLOR_MUTED));
+                ui.label(
+                    egui::RichText::new("Filter")
+                        .size(12.0)
+                        .color(crate::theme::palette().muted),
+                );
             },
         );
         let response = ui.add_sized(
@@ -785,20 +786,28 @@ fn render_startup_add_form(
 
         ui.add_space(8.0);
         egui::Frame::default()
-            .stroke(egui::Stroke::new(1.0, COLOR_BORDER))
+            .stroke(egui::Stroke::new(1.0, crate::theme::palette().border))
             .corner_radius(6.0)
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
-                    ui.label(egui::RichText::new("Name").size(12.0).color(COLOR_MUTED));
+                    ui.label(
+                        egui::RichText::new("Name")
+                            .size(12.0)
+                            .color(crate::theme::palette().muted),
+                    );
                     ui.add_sized(
                         [160.0, TOOLBAR_CONTROL_HEIGHT],
                         egui::TextEdit::singleline(&mut form.name)
                             .hint_text("Item name")
                             .vertical_align(egui::Align::Center),
                     );
-                    ui.label(egui::RichText::new("Command").size(12.0).color(COLOR_MUTED));
+                    ui.label(
+                        egui::RichText::new("Command")
+                            .size(12.0)
+                            .color(crate::theme::palette().muted),
+                    );
                     ui.add_sized(
                         [360.0, TOOLBAR_CONTROL_HEIGHT],
                         egui::TextEdit::singleline(&mut form.command)
@@ -832,7 +841,7 @@ fn render_startup_add_form(
                     ui.label(
                         egui::RichText::new("Name and command are required.")
                             .size(12.0)
-                            .color(COLOR_MUTED),
+                            .color(crate::theme::palette().muted),
                     );
                 }
             });
@@ -986,7 +995,7 @@ fn render_result_table(
         .collect::<Vec<_>>();
 
     egui::Frame::default()
-        .stroke(egui::Stroke::new(1.0, COLOR_BORDER))
+        .stroke(egui::Stroke::new(1.0, crate::theme::palette().border))
         .corner_radius(6.0)
         .show(ui, |ui| {
             let mut table_builder = crate::theme::clickable_table(
@@ -1013,7 +1022,7 @@ fn render_result_table(
                                 ui,
                                 &format!("{cell}{marker}"),
                                 TABLE_HEADER_TEXT_SIZE,
-                                COLOR_MUTED,
+                                crate::theme::palette().muted,
                                 align,
                                 egui::Sense::click(),
                             );
@@ -1060,7 +1069,7 @@ fn render_result_table(
                                     ui,
                                     cell,
                                     TABLE_BODY_TEXT_SIZE,
-                                    COLOR_TEXT,
+                                    crate::theme::palette().text,
                                     align,
                                     egui::Sense::hover(),
                                 );
@@ -1143,7 +1152,7 @@ fn render_result_table(
         ui.label(
             egui::RichText::new("No rows match the current filter.")
                 .size(12.0)
-                .color(COLOR_MUTED),
+                .color(crate::theme::palette().muted),
         );
     }
 }
@@ -1166,24 +1175,25 @@ struct StartupClientAutostartStyle {
 fn startup_client_autostart_style(
     status: StartupClientAutostartStatus,
 ) -> StartupClientAutostartStyle {
+    let palette = crate::theme::palette();
     match status {
         StartupClientAutostartStatus::Enabled => StartupClientAutostartStyle {
             label: "Client Autostart: On",
-            fill: crate::theme::COLOR_SUCCESS_BG,
-            stroke: COLOR_BORDER,
-            text: COLOR_GOOD,
+            fill: palette.success_bg,
+            stroke: palette.border,
+            text: palette.good,
         },
         StartupClientAutostartStatus::Disabled => StartupClientAutostartStyle {
             label: "Client Autostart: Off",
-            fill: crate::theme::COLOR_DANGER_BG,
-            stroke: COLOR_BORDER,
-            text: COLOR_BAD,
+            fill: palette.danger_bg,
+            stroke: palette.border,
+            text: palette.bad,
         },
         StartupClientAutostartStatus::Unknown => StartupClientAutostartStyle {
             label: "Client Autostart: Unknown",
-            fill: crate::theme::COLOR_NEUTRAL_BG,
-            stroke: COLOR_BORDER,
-            text: COLOR_MUTED,
+            fill: palette.neutral_bg,
+            stroke: palette.border,
+            text: palette.muted,
         },
     }
 }
