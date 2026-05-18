@@ -58,6 +58,14 @@ impl SessionRequest {
     }
 }
 
+pub(crate) fn schedule_config_file_restart(config_path: &Path) -> io::Result<PathBuf> {
+    let current_exe = std::env::current_exe()?;
+    let args = config_file_restart_args(config_path);
+    schedule_restart(&current_exe, &args)?;
+    schedule_exit(DEFAULT_RESTART_DELAY_MS, 0);
+    Ok(current_exe)
+}
+
 fn update_client(request: &SessionRequest) -> String {
     if request.dry_run {
         return result(
@@ -279,13 +287,20 @@ fn current_args() -> Vec<OsString> {
     std::env::args_os().skip(1).collect()
 }
 
+fn config_file_restart_args(config_path: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("--config"),
+        config_path.as_os_str().to_os_string(),
+    ]
+}
+
 #[cfg(target_os = "windows")]
 fn schedule_restart(current_exe: &Path, args: &[OsString]) -> io::Result<()> {
+    let start_process = powershell_start_process(current_exe, args);
     let script = format!(
-        "$pidToWait={}; Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue; Start-Process -FilePath {} -ArgumentList @({})",
+        "$pidToWait={}; Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue; {}",
         std::process::id(),
-        powershell_string(&current_exe.display().to_string()),
-        powershell_arg_list(args)
+        start_process
     );
     spawn_powershell(&script)
 }
@@ -307,13 +322,13 @@ fn schedule_replace_and_restart(
     update_path: &Path,
     args: &[OsString],
 ) -> io::Result<()> {
+    let start_process = powershell_start_process(current_exe, args);
     let script = format!(
-        "$pidToWait={}; Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue; Copy-Item -LiteralPath {} -Destination {} -Force; Start-Process -FilePath {} -ArgumentList @({})",
+        "$pidToWait={}; Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue; Copy-Item -LiteralPath {} -Destination {} -Force; {}",
         std::process::id(),
         powershell_string(&update_path.display().to_string()),
         powershell_string(&current_exe.display().to_string()),
-        powershell_string(&current_exe.display().to_string()),
-        powershell_arg_list(args)
+        start_process
     );
     spawn_powershell(&script)
 }
@@ -460,6 +475,19 @@ fn powershell_arg_list(args: &[OsString]) -> String {
         .join(",")
 }
 
+#[cfg(target_os = "windows")]
+fn powershell_start_process(current_exe: &Path, args: &[OsString]) -> String {
+    let command = format!(
+        "Start-Process -FilePath {}",
+        powershell_string(&current_exe.display().to_string())
+    );
+    if args.is_empty() {
+        command
+    } else {
+        format!("{command} -ArgumentList @({})", powershell_arg_list(args))
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 fn sh_args(args: &[OsString]) -> String {
     args.iter()
@@ -502,6 +530,8 @@ fn clean_value(value: &str) -> String {
 mod tests {
     use super::{handle, SessionRequest};
     use rdl_protocol::CommandKind;
+    use std::ffi::OsString;
+    use std::path::Path;
 
     #[test]
     fn refuses_session_commands_without_confirmation() {
@@ -529,5 +559,49 @@ mod tests {
 
         assert!(detail.contains("update_client"));
         assert!(detail.contains("status=dry_run"));
+    }
+
+    #[test]
+    fn config_file_restart_uses_only_config_path_argument() {
+        let args = super::config_file_restart_args(Path::new("client.toml"));
+
+        assert_eq!(
+            args,
+            vec![OsString::from("--config"), OsString::from("client.toml")]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_start_process_omits_empty_argument_list() {
+        let command = super::powershell_start_process(
+            Path::new(r"C:\rdl\rdl-client-gui-configured.exe"),
+            &[],
+        );
+
+        assert_eq!(
+            command,
+            r"Start-Process -FilePath 'C:\rdl\rdl-client-gui-configured.exe'"
+        );
+        assert!(!command.contains("-ArgumentList"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_start_process_keeps_non_empty_argument_list() {
+        let args = [
+            OsString::from("--ip"),
+            OsString::from("127.0.0.1"),
+            OsString::from("--auth-token"),
+            OsString::from("change-me"),
+        ];
+
+        let command =
+            super::powershell_start_process(Path::new(r"C:\rdl\rdl-client-gui.exe"), &args);
+
+        assert_eq!(
+            command,
+            r"Start-Process -FilePath 'C:\rdl\rdl-client-gui.exe' -ArgumentList @('--ip','127.0.0.1','--auth-token','change-me')"
+        );
     }
 }

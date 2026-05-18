@@ -251,7 +251,7 @@ pub(crate) fn handle_ack(
 }
 
 pub(crate) fn handle_transfer(
-    windows: &mut Vec<FileManagerWindow>,
+    windows: &mut [FileManagerWindow],
     client_id: &str,
     _hostname: String,
     _username: String,
@@ -979,9 +979,7 @@ fn render_entries_table(
         |row_response, entry, checked| {
             if let Some(checked) = checked {
                 set_entry_checked(selected_name, entry, checked);
-            } else if row_response.clicked() {
-                select_entry(selected_name, entry);
-            } else if row_response.secondary_clicked() {
+            } else if row_response.clicked() || row_response.secondary_clicked() {
                 select_entry(selected_name, entry);
             }
             if row_response.double_clicked() && entry.kind == "dir" && !is_pending(status) {
@@ -1101,9 +1099,7 @@ fn render_local_entries_table(
         |row_response, entry, checked| {
             if let Some(checked) = checked {
                 set_entry_checked(selected_name, entry, checked);
-            } else if row_response.clicked() {
-                select_entry(selected_name, entry);
-            } else if row_response.secondary_clicked() {
+            } else if row_response.clicked() || row_response.secondary_clicked() {
                 select_entry(selected_name, entry);
             }
             if row_response.double_clicked() && entry.kind == "dir" {
@@ -2027,7 +2023,7 @@ fn local_quick_jump_paths() -> Vec<(&'static str, PathBuf)> {
 fn user_home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        return std::env::var_os("USERPROFILE")
+        std::env::var_os("USERPROFILE")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .or_else(|| {
@@ -2044,7 +2040,7 @@ fn user_home_dir() -> Option<PathBuf> {
                 std::env::var_os("HOME")
                     .filter(|value| !value.is_empty())
                     .map(PathBuf::from)
-            });
+            })
     }
 
     #[cfg(not(windows))]
@@ -3080,7 +3076,7 @@ impl FileResponse {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err("invalid hex length".to_string());
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);

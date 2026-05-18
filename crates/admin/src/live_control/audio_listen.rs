@@ -121,7 +121,7 @@ pub(crate) fn decode_audio_frame(
     if format != "pcm_s16le" {
         return Err(format!("unsupported audio frame format: {format}"));
     }
-    if bytes.len() < 2 || bytes.len() % 2 != 0 {
+    if bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
         return Err("invalid pcm_s16le audio frame size".to_string());
     }
     Ok(AudioFrame {
@@ -134,7 +134,7 @@ pub(crate) fn decode_audio_frame(
 }
 
 pub(crate) fn handle_audio_frame(
-    windows: &mut Vec<AudioListenWindow>,
+    windows: &mut [AudioListenWindow],
     client_id: &str,
     frame: AudioFrame,
 ) {
@@ -225,7 +225,7 @@ pub(crate) fn open_window(
 }
 
 pub(crate) fn handle_ack(
-    windows: &mut Vec<AudioListenWindow>,
+    windows: &mut [AudioListenWindow],
     client_id: &str,
     hostname: String,
     username: String,
@@ -625,7 +625,7 @@ fn format_drift(stretch_ppm: i32) -> String {
 }
 
 fn compact_sample_rate(sample_rate: u32) -> String {
-    if sample_rate >= 1000 && sample_rate % 1000 == 0 {
+    if sample_rate >= 1000 && sample_rate.is_multiple_of(1000) {
         format!("{}k", sample_rate / 1000)
     } else {
         format!("{sample_rate}Hz")

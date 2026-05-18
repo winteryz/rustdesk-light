@@ -342,7 +342,7 @@ fn expand_home_path(path: &str) -> Option<PathBuf> {
 fn user_home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        return std::env::var_os("USERPROFILE")
+        std::env::var_os("USERPROFILE")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .or_else(|| {
@@ -359,7 +359,7 @@ fn user_home_dir() -> Option<PathBuf> {
                 std::env::var_os("HOME")
                     .filter(|value| !value.is_empty())
                     .map(PathBuf::from)
-            });
+            })
     }
 
     #[cfg(not(windows))]
@@ -398,7 +398,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err("invalid hex length".to_string());
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);

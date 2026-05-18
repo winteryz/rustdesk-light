@@ -461,6 +461,30 @@ fn set_status(
     }
 }
 
+fn identity_title(hostname: &str, username: &str) -> String {
+    match (hostname.trim(), username.trim()) {
+        ("", "") => "unknown-host".to_string(),
+        (host, "") => host.to_string(),
+        ("", user) => user.to_string(),
+        (host, user) => format!("{host} / {user}"),
+    }
+}
+
+fn command_title(command: &CommandKind) -> String {
+    command
+        .as_str()
+        .split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{handle_ack, open_window, InteractionStatus};
@@ -517,28 +541,4 @@ mod tests {
             "notify-send failed"
         );
     }
-}
-
-fn identity_title(hostname: &str, username: &str) -> String {
-    match (hostname.trim(), username.trim()) {
-        ("", "") => "unknown-host".to_string(),
-        (host, "") => host.to_string(),
-        ("", user) => user.to_string(),
-        (host, user) => format!("{host} / {user}"),
-    }
-}
-
-fn command_title(command: &CommandKind) -> String {
-    command
-        .as_str()
-        .split('_')
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }

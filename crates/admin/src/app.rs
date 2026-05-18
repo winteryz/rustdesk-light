@@ -15,7 +15,8 @@ use self::{
         kill_target_process_succeeded, performance_auto_refresh_due,
         quiet_user_interaction_command, refresh_command_window, render_command_result,
         render_command_window_status_bar, session_command_requires_confirmation,
-        update_command_window, CommandResultStatus, CommandResultWindow, StartupAddForm,
+        update_command_window, CommandResultRenderState, CommandResultStatus, CommandResultWindow,
+        StartupAddForm,
     },
     event::{AdminEvent, AdminEventSink, AdminInput},
     file_transfer::{
@@ -1792,6 +1793,7 @@ impl AdminApp {
             command,
             &self.config.ip,
             self.config.port,
+            &self.config.auth_token,
         );
     }
 
@@ -1834,6 +1836,7 @@ impl AdminApp {
             last_auto_refresh_at: None,
             process_kill_requested: Arc::new(Mutex::new(None)),
             startup_action_requested: Arc::new(Mutex::new(None)),
+            registry_key_requested: Arc::new(Mutex::new(None)),
             startup_add_form: Arc::new(Mutex::new(StartupAddForm::default())),
             table_filter: Arc::new(Mutex::new(String::new())),
             table_sort: Arc::new(Mutex::new(None)),
@@ -2058,6 +2061,7 @@ impl AdminApp {
             last_auto_refresh_at: None,
             process_kill_requested: Arc::new(Mutex::new(None)),
             startup_action_requested: Arc::new(Mutex::new(None)),
+            registry_key_requested: Arc::new(Mutex::new(None)),
             startup_add_form: Arc::new(Mutex::new(StartupAddForm::default())),
             table_filter: Arc::new(Mutex::new(String::new())),
             table_sort: Arc::new(Mutex::new(None)),
@@ -2649,6 +2653,23 @@ impl AdminApp {
                     ));
                 }
             }
+            if window.command == CommandKind::RegistryManager {
+                let registry_payload = window
+                    .registry_key_requested
+                    .lock()
+                    .ok()
+                    .and_then(|mut value| value.take());
+                if let Some(payload) = registry_payload {
+                    let _ = self.input_tx.send(AdminInput::Command {
+                        target_id: window.client_id.clone(),
+                        command: CommandKind::RegistryManager,
+                        payload,
+                    });
+                    window.status = CommandResultStatus::Pending;
+                    window.open = true;
+                    pending_logs.push(format!("registry key request on {}", window.client_id));
+                }
+            }
             let process_id = window
                 .process_kill_requested
                 .lock()
@@ -2690,6 +2711,7 @@ impl AdminApp {
             let auto_refresh_enabled = window.auto_refresh_enabled.clone();
             let process_kill_requested = window.process_kill_requested.clone();
             let startup_action_requested = window.startup_action_requested.clone();
+            let registry_key_requested = window.registry_key_requested.clone();
             let startup_add_form = window.startup_add_form.clone();
             let table_filter = window.table_filter.clone();
             let table_sort = window.table_sort.clone();
@@ -2716,19 +2738,26 @@ impl AdminApp {
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
                                         let mut detail = detail.clone();
+                                        let render_state = CommandResultRenderState {
+                                            table_filter: &table_filter,
+                                            table_sort: &table_sort,
+                                            table_selected_row: &table_selected_row,
+                                            refresh_requested: &refresh_requested,
+                                            auto_refresh_enabled: &auto_refresh_enabled,
+                                            refresh_in_flight: matches!(
+                                                status,
+                                                CommandResultStatus::Pending
+                                            ),
+                                            process_kill_requested: &process_kill_requested,
+                                            startup_action_requested: &startup_action_requested,
+                                            registry_key_requested: &registry_key_requested,
+                                            startup_add_form: &startup_add_form,
+                                        };
                                         render_command_result(
                                             ui,
                                             &command,
                                             &mut detail,
-                                            &table_filter,
-                                            &table_sort,
-                                            &table_selected_row,
-                                            &refresh_requested,
-                                            &auto_refresh_enabled,
-                                            matches!(status, CommandResultStatus::Pending),
-                                            &process_kill_requested,
-                                            &startup_action_requested,
-                                            &startup_add_form,
+                                            render_state,
                                         );
                                     });
                             },

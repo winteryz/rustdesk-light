@@ -44,7 +44,7 @@ fn open_text_file(path: &Path) -> io::Result<&'static str> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
-        return Ok("opened_in_notepad");
+        Ok("opened_in_notepad")
     }
 
     #[cfg(target_os = "macos")]

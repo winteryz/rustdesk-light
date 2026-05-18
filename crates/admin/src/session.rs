@@ -23,8 +23,10 @@ pub(crate) struct SessionCommandWindow {
     update_path: Arc<Mutex<String>>,
     client_config_ip: Arc<Mutex<String>>,
     client_config_port: Arc<Mutex<String>>,
+    client_config_auth_token: Arc<Mutex<String>>,
+    client_config_default_auth_token: Arc<Mutex<String>>,
     remove_binary: Arc<AtomicBool>,
-    client_config_reconnect: Arc<AtomicBool>,
+    client_config_restart: Arc<AtomicBool>,
     confirmed: Arc<AtomicBool>,
     open: bool,
     close_requested: Arc<AtomicBool>,
@@ -45,6 +47,7 @@ pub(crate) fn open_window(
     command: CommandKind,
     default_ip: &str,
     default_port: u16,
+    default_auth_token: &str,
 ) {
     if let Some(window) = windows
         .iter_mut()
@@ -61,9 +64,13 @@ pub(crate) fn open_window(
             if let Ok(mut value) = window.client_config_port.lock() {
                 *value = default_port.to_string();
             }
-            window
-                .client_config_reconnect
-                .store(true, Ordering::Relaxed);
+            if let Ok(mut value) = window.client_config_auth_token.lock() {
+                value.clear();
+            }
+            if let Ok(mut value) = window.client_config_default_auth_token.lock() {
+                *value = default_auth_token.to_string();
+            }
+            window.client_config_restart.store(true, Ordering::Relaxed);
         }
         return;
     }
@@ -77,8 +84,10 @@ pub(crate) fn open_window(
         update_path: Arc::new(Mutex::new(String::new())),
         client_config_ip: Arc::new(Mutex::new(default_ip.to_string())),
         client_config_port: Arc::new(Mutex::new(default_port.to_string())),
+        client_config_auth_token: Arc::new(Mutex::new(String::new())),
+        client_config_default_auth_token: Arc::new(Mutex::new(default_auth_token.to_string())),
         remove_binary: Arc::new(AtomicBool::new(false)),
-        client_config_reconnect: Arc::new(AtomicBool::new(true)),
+        client_config_restart: Arc::new(AtomicBool::new(true)),
         confirmed: Arc::new(AtomicBool::new(false)),
         open: true,
         close_requested: Arc::new(AtomicBool::new(false)),
@@ -117,8 +126,10 @@ pub(crate) fn render_windows(
         let update_path = window.update_path.clone();
         let client_config_ip = window.client_config_ip.clone();
         let client_config_port = window.client_config_port.clone();
+        let client_config_auth_token = window.client_config_auth_token.clone();
+        let client_config_default_auth_token = window.client_config_default_auth_token.clone();
         let remove_binary = window.remove_binary.clone();
-        let client_config_reconnect = window.client_config_reconnect.clone();
+        let client_config_restart = window.client_config_restart.clone();
         let confirmed = window.confirmed.clone();
         let close_requested = window.close_requested.clone();
         let send_requested = window.send_requested.clone();
@@ -138,8 +149,10 @@ pub(crate) fn render_windows(
                         &update_path,
                         &client_config_ip,
                         &client_config_port,
+                        &client_config_auth_token,
+                        &client_config_default_auth_token,
                         &remove_binary,
-                        &client_config_reconnect,
+                        &client_config_restart,
                         &confirmed,
                         &send_requested,
                     );
@@ -167,6 +180,11 @@ pub(crate) fn render_windows(
                 .lock()
                 .map(|value| value.clone())
                 .unwrap_or_default();
+            let client_config_auth_token = window
+                .client_config_auth_token
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
             outbound.push(OutboundSessionCommand {
                 client_id: client_id.clone(),
                 command: window.command.clone(),
@@ -176,8 +194,9 @@ pub(crate) fn render_windows(
                     &update_path,
                     &client_config_ip,
                     &client_config_port,
+                    &client_config_auth_token,
                     window.remove_binary.load(Ordering::Relaxed),
-                    window.client_config_reconnect.load(Ordering::Relaxed),
+                    window.client_config_restart.load(Ordering::Relaxed),
                 ),
             });
             window.open = false;
@@ -195,8 +214,10 @@ fn render_form(
     update_path: &Arc<Mutex<String>>,
     client_config_ip: &Arc<Mutex<String>>,
     client_config_port: &Arc<Mutex<String>>,
+    client_config_auth_token: &Arc<Mutex<String>>,
+    client_config_default_auth_token: &Arc<Mutex<String>>,
     remove_binary: &Arc<AtomicBool>,
-    client_config_reconnect: &Arc<AtomicBool>,
+    client_config_restart: &Arc<AtomicBool>,
     confirmed: &Arc<AtomicBool>,
     send_requested: &Arc<AtomicBool>,
 ) {
@@ -221,8 +242,10 @@ fn render_form(
                     update_path,
                     client_config_ip,
                     client_config_port,
+                    client_config_auth_token,
+                    client_config_default_auth_token,
                     remove_binary,
-                    client_config_reconnect,
+                    client_config_restart,
                 );
                 ui.add_space(10.0);
                 render_confirm(ui, confirmed, send_requested);
@@ -237,8 +260,10 @@ fn render_command_fields(
     update_path: &Arc<Mutex<String>>,
     client_config_ip: &Arc<Mutex<String>>,
     client_config_port: &Arc<Mutex<String>>,
+    client_config_auth_token: &Arc<Mutex<String>>,
+    client_config_default_auth_token: &Arc<Mutex<String>>,
     remove_binary: &Arc<AtomicBool>,
-    client_config_reconnect: &Arc<AtomicBool>,
+    client_config_restart: &Arc<AtomicBool>,
 ) {
     match command {
         CommandKind::UpdateClient => {
@@ -249,7 +274,9 @@ fn render_command_fields(
                 ui,
                 client_config_ip,
                 client_config_port,
-                client_config_reconnect,
+                client_config_auth_token,
+                client_config_default_auth_token,
+                client_config_restart,
             );
         }
         CommandKind::Shutdown | CommandKind::Reboot => {
@@ -273,7 +300,9 @@ fn render_client_config(
     ui: &mut egui::Ui,
     client_config_ip: &Arc<Mutex<String>>,
     client_config_port: &Arc<Mutex<String>>,
-    client_config_reconnect: &Arc<AtomicBool>,
+    client_config_auth_token: &Arc<Mutex<String>>,
+    client_config_default_auth_token: &Arc<Mutex<String>>,
+    client_config_restart: &Arc<AtomicBool>,
 ) {
     let mut ip = client_config_ip
         .lock()
@@ -325,13 +354,53 @@ fn render_client_config(
     }
 
     ui.add_space(8.0);
-    let mut reconnect = client_config_reconnect.load(Ordering::Relaxed);
+    let mut token = client_config_auth_token
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+    ui.label(
+        egui::RichText::new("Auth Token")
+            .size(12.0)
+            .color(COLOR_MUTED),
+    );
+    ui.horizontal(|ui| {
+        let input_width = (ui.available_width() - 132.0).max(180.0);
+        let response = ui.add_sized(
+            [input_width, TOOLBAR_CONTROL_HEIGHT],
+            egui::TextEdit::singleline(&mut token)
+                .password(true)
+                .hint_text("Optional")
+                .vertical_align(egui::Align::Center),
+        );
+        let mut changed = response.changed();
+        if ui.button("Use admin token").clicked() {
+            token = client_config_default_auth_token
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            changed = true;
+        }
+        if changed {
+            let cleaned = sanitize_single_line(&token);
+            if let Ok(mut value) = client_config_auth_token.lock() {
+                *value = cleaned;
+            }
+        }
+    });
+
+    ui.add_space(8.0);
+    let mut restart = client_config_restart.load(Ordering::Relaxed);
     if ui
-        .checkbox(&mut reconnect, "Reconnect after apply")
+        .checkbox(&mut restart, "Restart from config file after apply")
         .changed()
     {
-        client_config_reconnect.store(reconnect, Ordering::Relaxed);
+        client_config_restart.store(restart, Ordering::Relaxed);
     }
+    ui.label(
+        egui::RichText::new("The client will restart with client.toml only; startup arguments are not carried over.")
+            .size(12.0)
+            .color(COLOR_MUTED),
+    );
 }
 
 fn render_update_path(ui: &mut egui::Ui, update_path: &Arc<Mutex<String>>) {
@@ -429,8 +498,9 @@ fn payload_for(
     update_path: &str,
     client_config_ip: &str,
     client_config_port: &str,
+    client_config_auth_token: &str,
     remove_binary: bool,
-    client_config_reconnect: bool,
+    client_config_restart: bool,
 ) -> String {
     let mut lines = vec!["confirm=true".to_string()];
     match command {
@@ -447,7 +517,12 @@ fn payload_for(
             }
             let port = client_config_port.trim().parse::<u16>().unwrap_or(5169);
             lines.push(format!("port={port}"));
-            lines.push(format!("reconnect={client_config_reconnect}"));
+            let token = client_config_auth_token.trim();
+            if !token.is_empty() {
+                lines.push(format!("auth_token={}", sanitize_single_line(token)));
+            }
+            lines.push(format!("restart={client_config_restart}"));
+            lines.push(format!("reconnect={client_config_restart}"));
         }
         CommandKind::Shutdown | CommandKind::Reboot => {
             let delay = delay_seconds
@@ -475,7 +550,9 @@ fn risk_text(command: &CommandKind) -> &'static str {
         CommandKind::KillClientProcess => "Stops the remote client process.",
         CommandKind::Shutdown => "Powers off the remote computer.",
         CommandKind::Reboot => "Restarts the remote computer.",
-        CommandKind::ClientConfig => "Writes the remote client's config file.",
+        CommandKind::ClientConfig => {
+            "Writes the remote client's config file and restarts it from that file."
+        }
         CommandKind::DeleteClient => "Removes this client identity and stops the client.",
         _ => "",
     }
@@ -516,40 +593,78 @@ mod tests {
 
     #[test]
     fn update_payload_omits_empty_path() {
-        let payload = payload_for(&CommandKind::UpdateClient, "30", "", "", "", false, true);
+        let payload = payload_for(
+            &CommandKind::UpdateClient,
+            "30",
+            "",
+            "",
+            "",
+            "",
+            false,
+            true,
+        );
 
         assert_eq!(payload, "confirm=true");
     }
 
     #[test]
     fn shutdown_payload_includes_delay() {
-        let payload = payload_for(&CommandKind::Shutdown, "45", "", "", "", false, true);
+        let payload = payload_for(&CommandKind::Shutdown, "45", "", "", "", "", false, true);
 
         assert_eq!(payload, "confirm=true\ndelay_seconds=45");
     }
 
     #[test]
     fn uninstall_payload_includes_binary_choice() {
-        let payload = payload_for(&CommandKind::UninstallClient, "30", "", "", "", true, true);
+        let payload = payload_for(
+            &CommandKind::UninstallClient,
+            "30",
+            "",
+            "",
+            "",
+            "",
+            true,
+            true,
+        );
 
         assert_eq!(payload, "confirm=true\nremove_binary=true");
     }
 
     #[test]
-    fn client_config_payload_includes_endpoint_and_reconnect() {
+    fn client_config_payload_includes_endpoint_and_restart() {
         let payload = payload_for(
             &CommandKind::ClientConfig,
             "30",
             "",
             "10.0.0.8",
             "7000",
+            "",
             false,
             true,
         );
 
         assert_eq!(
             payload,
-            "confirm=true\nip=10.0.0.8\nport=7000\nreconnect=true"
+            "confirm=true\nip=10.0.0.8\nport=7000\nrestart=true\nreconnect=true"
+        );
+    }
+
+    #[test]
+    fn client_config_payload_includes_auth_token_when_provided() {
+        let payload = payload_for(
+            &CommandKind::ClientConfig,
+            "30",
+            "",
+            "10.0.0.8",
+            "7000",
+            "secret-token",
+            false,
+            true,
+        );
+
+        assert_eq!(
+            payload,
+            "confirm=true\nip=10.0.0.8\nport=7000\nauth_token=secret-token\nrestart=true\nreconnect=true"
         );
     }
 }

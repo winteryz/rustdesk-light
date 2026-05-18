@@ -1,7 +1,7 @@
 use crate::support::truncate_chars;
 use rdl_protocol::{CommandOutputStream, REMOTE_TERMINAL_CANCEL};
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -164,7 +164,7 @@ where
 
         let status = child
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "terminal process lock poisoned"))?
+            .map_err(|_| io::Error::other("terminal process lock poisoned"))?
             .try_wait()?;
         if let Some(status) = status {
             break status;
@@ -242,12 +242,14 @@ fn change_dir(target: &str) -> String {
     terminal_response(next.display().to_string(), "")
 }
 
-fn expand_dir(current: &PathBuf, target: &str) -> PathBuf {
+fn expand_dir(current: &Path, target: &str) -> PathBuf {
     if target == "~" {
-        return home_dir().unwrap_or_else(|| current.clone());
+        return home_dir().unwrap_or_else(|| current.to_path_buf());
     }
     if let Some(rest) = target.strip_prefix("~/") {
-        return home_dir().unwrap_or_else(|| current.clone()).join(rest);
+        return home_dir()
+            .unwrap_or_else(|| current.to_path_buf())
+            .join(rest);
     }
     let path = PathBuf::from(target);
     if path.is_absolute() {
@@ -520,7 +522,7 @@ where
     let child = {
         let running = running_command_lock()
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "terminal process lock poisoned"))?;
+            .map_err(|_| io::Error::other("terminal process lock poisoned"))?;
         let Some(running) = running.as_ref() else {
             let mut sequence = 1;
             return send_final(

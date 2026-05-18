@@ -534,7 +534,26 @@ fn client_connection_once(
                     payload: payload.clone(),
                 });
                 if command == CommandKind::ClientConfig {
-                    let update = crate::runtime::update_client_config(&config, &payload);
+                    let mut update = crate::runtime::update_client_config(&config, &payload);
+                    if update.restart {
+                        match crate::session::schedule_config_file_restart(&config.config_path) {
+                            Ok(path) => {
+                                update.detail.push_str(&format!(
+                                    "\nrestart_scheduled=true\nrestart_path={}\nrestart_config_path={}",
+                                    detail_value(&path.display().to_string()),
+                                    detail_value(&config.config_path.display().to_string())
+                                ));
+                            }
+                            Err(error) => {
+                                update.accepted = false;
+                                update.restart = false;
+                                update.detail.push_str(&format!(
+                                    "\nrestart_scheduled=false\nrestart_error={}",
+                                    detail_value(&error.to_string())
+                                ));
+                            }
+                        }
+                    }
                     let _ = queue_message(
                         &out_tx,
                         &session_token,
@@ -545,7 +564,7 @@ fn client_connection_once(
                             detail: update.detail,
                         },
                     );
-                    if update.reconnect {
+                    if update.restart {
                         break;
                     }
                     continue;
@@ -1750,6 +1769,10 @@ fn command_ack_send_failure(
         accepted: false,
         detail: format!("client failed to send command result: {error}"),
     }))
+}
+
+fn detail_value(value: &str) -> String {
+    value.replace(['\t', '\r', '\n'], " ").trim().to_string()
 }
 
 fn desktop_payload_is_move(payload: &str) -> bool {

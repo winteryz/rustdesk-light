@@ -18,6 +18,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+mod registry;
+
 const PERFORMANCE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const TABLE_BODY_TEXT_SIZE: f32 = 11.5;
 const TABLE_HEADER_TEXT_SIZE: f32 = 11.5;
@@ -41,6 +43,7 @@ pub(super) struct CommandResultWindow {
     pub(super) last_auto_refresh_at: Option<Instant>,
     pub(super) process_kill_requested: Arc<Mutex<Option<String>>>,
     pub(super) startup_action_requested: Arc<Mutex<Option<String>>>,
+    pub(super) registry_key_requested: Arc<Mutex<Option<String>>>,
     pub(super) startup_add_form: Arc<Mutex<StartupAddForm>>,
     pub(super) table_filter: Arc<Mutex<String>>,
     pub(super) table_sort: Arc<Mutex<Option<TableSort>>>,
@@ -80,7 +83,11 @@ pub(super) fn update_command_window(
     } else {
         CommandResultStatus::Failed
     };
-    window.detail = detail;
+    window.detail = if accepted && window.command == CommandKind::RegistryManager {
+        registry::merge_details(&window.detail, &detail).unwrap_or(detail)
+    } else {
+        detail
+    };
     window.hostname = hostname;
     window.username = username;
     window.open = true;
@@ -266,49 +273,55 @@ pub(super) fn detail_status(detail: &str) -> Option<String> {
     payload_field(detail, "status")
 }
 
+pub(super) struct CommandResultRenderState<'a> {
+    pub(super) table_filter: &'a Arc<Mutex<String>>,
+    pub(super) table_sort: &'a Arc<Mutex<Option<TableSort>>>,
+    pub(super) table_selected_row: &'a Arc<Mutex<Option<String>>>,
+    pub(super) refresh_requested: &'a Arc<AtomicBool>,
+    pub(super) auto_refresh_enabled: &'a Arc<AtomicBool>,
+    pub(super) refresh_in_flight: bool,
+    pub(super) process_kill_requested: &'a Arc<Mutex<Option<String>>>,
+    pub(super) startup_action_requested: &'a Arc<Mutex<Option<String>>>,
+    pub(super) registry_key_requested: &'a Arc<Mutex<Option<String>>>,
+    pub(super) startup_add_form: &'a Arc<Mutex<StartupAddForm>>,
+}
+
 pub(super) fn render_command_result(
     ui: &mut egui::Ui,
     command: &CommandKind,
     detail: &mut String,
-    table_filter: &Arc<Mutex<String>>,
-    table_sort: &Arc<Mutex<Option<TableSort>>>,
-    table_selected_row: &Arc<Mutex<Option<String>>>,
-    refresh_requested: &Arc<AtomicBool>,
-    auto_refresh_enabled: &Arc<AtomicBool>,
-    refresh_in_flight: bool,
-    process_kill_requested: &Arc<Mutex<Option<String>>>,
-    startup_action_requested: &Arc<Mutex<Option<String>>>,
-    startup_add_form: &Arc<Mutex<StartupAddForm>>,
+    state: CommandResultRenderState<'_>,
 ) {
     if command_expects_result_table(command) {
         render_table_toolbar(
             ui,
             command,
-            table_filter,
-            refresh_requested,
-            refresh_in_flight,
-            startup_add_form,
+            state.table_filter,
+            state.refresh_requested,
+            state.refresh_in_flight,
+            state.startup_add_form,
         );
         if matches!(command, CommandKind::StartupManager) {
             render_startup_add_form(
                 ui,
-                startup_add_form,
-                startup_action_requested,
-                refresh_in_flight,
+                state.startup_add_form,
+                state.startup_action_requested,
+                state.refresh_in_flight,
             );
         }
         ui.add_space(8.0);
         if let Some(table) = parse_result_table(detail) {
-            render_result_table(
-                ui,
-                command,
-                &table,
-                table_filter,
-                table_sort,
-                table_selected_row,
-                process_kill_requested,
-                startup_action_requested,
-            );
+            if matches!(command, CommandKind::RegistryManager) {
+                registry::render_result(
+                    ui,
+                    &table,
+                    state.table_filter,
+                    state.table_selected_row,
+                    state.registry_key_requested,
+                );
+                return;
+            }
+            render_result_table(ui, command, &table, &state);
             return;
         }
         return;
@@ -316,12 +329,12 @@ pub(super) fn render_command_result(
     if matches!(command, CommandKind::PerformanceMonitor) {
         render_performance_monitor_toolbar(
             ui,
-            refresh_requested,
-            auto_refresh_enabled,
-            refresh_in_flight,
+            state.refresh_requested,
+            state.auto_refresh_enabled,
+            state.refresh_in_flight,
         );
         ui.add_space(8.0);
-        render_performance_monitor_detail(ui, detail, refresh_in_flight);
+        render_performance_monitor_detail(ui, detail, state.refresh_in_flight);
         return;
     }
     if matches!(command, CommandKind::Camera) {
@@ -911,18 +924,16 @@ fn render_result_table(
     ui: &mut egui::Ui,
     command: &CommandKind,
     table: &ResultTable,
-    table_filter: &Arc<Mutex<String>>,
-    table_sort: &Arc<Mutex<Option<TableSort>>>,
-    table_selected_row: &Arc<Mutex<Option<String>>>,
-    process_kill_requested: &Arc<Mutex<Option<String>>>,
-    startup_action_requested: &Arc<Mutex<Option<String>>>,
+    state: &CommandResultRenderState<'_>,
 ) {
-    let filter = table_filter
+    let filter = state
+        .table_filter
         .lock()
         .map(|value| value.trim().to_ascii_lowercase())
         .unwrap_or_default();
-    let mut sort = table_sort.lock().map(|value| *value).unwrap_or(None);
-    let selected_row = table_selected_row
+    let mut sort = state.table_sort.lock().map(|value| *value).unwrap_or(None);
+    let selected_row = state
+        .table_selected_row
         .lock()
         .map(|value| value.clone())
         .unwrap_or(None);
@@ -1025,10 +1036,10 @@ fn render_result_table(
                                 if let Some(process_id) = process_id.clone() {
                                     ui.separator();
                                     if ui.button("Kill Process").clicked() {
-                                        if let Ok(mut selected) = table_selected_row.lock() {
+                                        if let Ok(mut selected) = state.table_selected_row.lock() {
                                             *selected = Some(row_key.clone());
                                         }
-                                        if let Ok(mut value) = process_kill_requested.lock() {
+                                        if let Ok(mut value) = state.process_kill_requested.lock() {
                                             *value = Some(process_id.clone());
                                         }
                                         ui.close();
@@ -1037,10 +1048,11 @@ fn render_result_table(
                                 if let Some(startup_action) = startup_action.clone() {
                                     ui.separator();
                                     if ui.button(startup_action.label).clicked() {
-                                        if let Ok(mut selected) = table_selected_row.lock() {
+                                        if let Ok(mut selected) = state.table_selected_row.lock() {
                                             *selected = Some(row_key.clone());
                                         }
-                                        if let Ok(mut value) = startup_action_requested.lock() {
+                                        if let Ok(mut value) = state.startup_action_requested.lock()
+                                        {
                                             *value = Some(startup_action.payload.clone());
                                         }
                                         ui.close();
@@ -1054,7 +1066,7 @@ fn render_result_table(
                             response.ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         if response.clicked() || response.secondary_clicked() {
-                            if let Ok(mut value) = table_selected_row.lock() {
+                            if let Ok(mut value) = state.table_selected_row.lock() {
                                 *value = Some(row_key.clone());
                             }
                         }
@@ -1062,7 +1074,7 @@ fn render_result_table(
                 });
         });
 
-    if let Ok(mut value) = table_sort.lock() {
+    if let Ok(mut value) = state.table_sort.lock() {
         *value = sort;
     }
     if rows.is_empty() {
@@ -1349,7 +1361,6 @@ fn table_column_spec(command: &CommandKind, header: &str) -> TableColumnSpec {
         CommandKind::ProcessManager => process_column_spec(header),
         CommandKind::WindowManager => window_column_spec(header),
         CommandKind::StartupManager => startup_column_spec(header),
-        CommandKind::RegistryManager => registry_column_spec(header),
         CommandKind::DriverManager => driver_column_spec(header),
         CommandKind::EventLog => event_log_column_spec(header),
         CommandKind::ActiveConnections => connection_column_spec(header),
@@ -1396,16 +1407,6 @@ fn startup_column_spec(header: &str) -> TableColumnSpec {
         "scope" | "source" | "status" => column_spec(86.0, 150.0, 0.0, egui::Align::Min),
         "name" => column_spec(150.0, 320.0, 0.8, egui::Align::Min),
         "command" => column_spec(220.0, 720.0, 2.6, egui::Align::Min),
-        _ => default_column_spec(header),
-    }
-}
-
-fn registry_column_spec(header: &str) -> TableColumnSpec {
-    match normalized_table_header(header).as_str() {
-        "hive" | "type" => column_spec(52.0, 86.0, 0.0, egui::Align::Min),
-        "path" => column_spec(190.0, 460.0, 1.5, egui::Align::Min),
-        "name" => column_spec(130.0, 280.0, 0.8, egui::Align::Min),
-        "value" => column_spec(220.0, 760.0, 2.4, egui::Align::Min),
         _ => default_column_spec(header),
     }
 }
@@ -1486,6 +1487,21 @@ fn estimated_table_text_width(value: &str) -> f32 {
             }
         })
         .sum::<f32>()
+}
+
+pub(super) fn command_title(command: &CommandKind) -> String {
+    command
+        .as_str()
+        .split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -1880,25 +1896,11 @@ Filesystem 512-blocks Used Available Capacity iused ifree %iused Mounted on
             last_auto_refresh_at: None,
             process_kill_requested: Arc::new(Mutex::new(None)),
             startup_action_requested: Arc::new(Mutex::new(None)),
+            registry_key_requested: Arc::new(Mutex::new(None)),
             startup_add_form: Arc::new(Mutex::new(StartupAddForm::default())),
             table_filter: Arc::new(Mutex::new(String::new())),
             table_sort: Arc::new(Mutex::new(None)),
             table_selected_row: Arc::new(Mutex::new(None)),
         }
     }
-}
-
-pub(super) fn command_title(command: &CommandKind) -> String {
-    command
-        .as_str()
-        .split('_')
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }

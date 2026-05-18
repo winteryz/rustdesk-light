@@ -212,7 +212,7 @@ pub(crate) fn open_window(
 }
 
 pub(crate) fn handle_ack(
-    windows: &mut Vec<VoiceChatWindow>,
+    windows: &mut [VoiceChatWindow],
     client_id: &str,
     hostname: String,
     username: String,
@@ -276,7 +276,7 @@ pub(crate) fn decode_audio_frame(
     if format != "pcm_s16le" {
         return Err(format!("unsupported voice chat audio format: {format}"));
     }
-    if bytes.len() < 2 || bytes.len() % 2 != 0 {
+    if bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
         return Err("invalid pcm_s16le voice chat frame size".to_string());
     }
     Ok(AudioFrame {
@@ -289,7 +289,7 @@ pub(crate) fn decode_audio_frame(
 }
 
 pub(crate) fn handle_audio_frame(
-    windows: &mut Vec<VoiceChatWindow>,
+    windows: &mut [VoiceChatWindow],
     client_id: &str,
     frame: AudioFrame,
 ) {

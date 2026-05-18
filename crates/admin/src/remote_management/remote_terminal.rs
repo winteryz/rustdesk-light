@@ -106,7 +106,7 @@ pub(crate) fn open_window(
 }
 
 pub(crate) fn handle_ack(
-    windows: &mut Vec<TerminalWindow>,
+    windows: &mut [TerminalWindow],
     client_id: &str,
     hostname: String,
     username: String,
@@ -152,7 +152,7 @@ pub(crate) fn handle_ack(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_output(
-    windows: &mut Vec<TerminalWindow>,
+    windows: &mut [TerminalWindow],
     client_id: &str,
     hostname: String,
     username: String,

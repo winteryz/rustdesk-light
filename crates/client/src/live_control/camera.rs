@@ -76,11 +76,11 @@ impl CameraRequest {
 fn stop_camera() -> String {
     #[cfg(target_os = "windows")]
     {
-        return windows_stop_camera();
+        windows_stop_camera()
     }
     #[cfg(target_os = "macos")]
     {
-        return macos_stop_camera();
+        macos_stop_camera()
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     "camera_stopped".to_string()

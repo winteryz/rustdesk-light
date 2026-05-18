@@ -180,9 +180,7 @@ fn admin_connection_once(
                     return Ok(ConnectionEnd::ReconnectRequested);
                 }
             };
-            if let Err(error) = result {
-                return Err(error);
-            }
+            result?;
         }
 
         let mut processed_messages = 0usize;

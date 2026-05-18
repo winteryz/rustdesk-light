@@ -590,7 +590,7 @@ fn should_initialize_missing_config(
     config_exists: bool,
     embedded_config_loaded: bool,
 ) -> bool {
-    !config_exists && !(kind == ConfigKind::Client && embedded_config_loaded)
+    !(config_exists || kind == ConfigKind::Client && embedded_config_loaded)
 }
 
 fn parse_port(value: &str) -> Result<u16, ConfigError> {

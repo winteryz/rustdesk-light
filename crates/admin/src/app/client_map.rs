@@ -304,7 +304,7 @@ fn render_map_stats_bar(
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(width, MAP_STATS_HEIGHT), egui::Sense::hover());
     let painter = ui.painter_at(rect);
-    let chip_width = ((width - 8.0) / 2.0).min(220.0).max(0.0);
+    let chip_width = ((width - 8.0) / 2.0).clamp(0.0, 220.0);
     let total_width = chip_width * 2.0 + 8.0;
     let left = rect.center().x - total_width / 2.0;
     let first = egui::Rect::from_min_size(

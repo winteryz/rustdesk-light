@@ -1496,10 +1496,7 @@ fn endpoint_source_label(loaded: &rdl_config::LoadedEndpointConfig) -> &'static 
     }
 }
 
-fn auth_source_label(
-    loaded: &rdl_config::LoadedEndpointConfig,
-    generated: bool,
-) -> &'static str {
+fn auth_source_label(loaded: &rdl_config::LoadedEndpointConfig, generated: bool) -> &'static str {
     if loaded.cli_auth_token.is_some() {
         "args"
     } else if std::env::var("RDL_AUTH_TOKEN")

@@ -195,10 +195,7 @@ impl ClientBuilderState {
             }
         };
 
-        let sign_detail = match postprocess_generated_client(&output_path) {
-            Ok(sign_detail) => sign_detail,
-            Err(error) => return Err(error),
-        };
+        let sign_detail = postprocess_generated_client(&output_path)?;
 
         Ok(format!(
             "payload={} bytes slot_offset={}{}",

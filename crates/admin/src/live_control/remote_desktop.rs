@@ -99,7 +99,7 @@ pub(crate) fn decode_video_frame(
 }
 
 pub(crate) fn handle_decoded_frame(
-    windows: &mut Vec<RemoteDesktopWindow>,
+    windows: &mut [RemoteDesktopWindow],
     client_id: &str,
     frame: DesktopFrame,
 ) {
@@ -250,7 +250,7 @@ pub(crate) fn open_window(
 }
 
 pub(crate) fn handle_ack(
-    windows: &mut Vec<RemoteDesktopWindow>,
+    windows: &mut [RemoteDesktopWindow],
     client_id: &str,
     _hostname: String,
     _username: String,

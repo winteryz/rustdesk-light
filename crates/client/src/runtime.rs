@@ -41,6 +41,7 @@ pub(crate) fn acquire_client_process_lock() -> io::Result<ClientProcessLock> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&path)?;
     match file.try_lock_exclusive() {
         Ok(()) => {
@@ -175,7 +176,7 @@ fn client_binary_name() -> &'static str {
 pub(crate) struct ClientConfigUpdate {
     pub(crate) accepted: bool,
     pub(crate) detail: String,
-    pub(crate) reconnect: bool,
+    pub(crate) restart: bool,
 }
 
 pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConfigUpdate {
@@ -184,14 +185,14 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
         return ClientConfigUpdate {
             accepted: true,
             detail: client_config_detail("current", config, config, None, false, "current config"),
-            reconnect: false,
+            restart: false,
         };
     }
     if !request.confirm {
         return ClientConfigUpdate {
             accepted: false,
             detail: "client_config\nstatus=refused\nmessage=confirm=true is required".to_string(),
-            reconnect: false,
+            restart: false,
         };
     }
     if let Some(port) = request.invalid_port.as_ref() {
@@ -201,7 +202,7 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
                 "client_config\nstatus=error\nmessage=invalid port: {}",
                 clean_value(port)
             ),
-            reconnect: false,
+            restart: false,
         };
     }
     if config.embedded_config_enabled() {
@@ -215,7 +216,7 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
                 false,
                 "embedded read-only config is active; client.toml is not loaded or saved",
             ),
-            reconnect: false,
+            restart: false,
         };
     }
 
@@ -230,14 +231,14 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
         return ClientConfigUpdate {
             accepted: false,
             detail: "client_config\nstatus=error\nmessage=ip cannot be empty".to_string(),
-            reconnect: false,
+            restart: false,
         };
     }
     if request.ip.is_none() && request.port.is_none() {
         return ClientConfigUpdate {
             accepted: false,
             detail: "client_config\nstatus=error\nmessage=ip or port is required".to_string(),
-            reconnect: false,
+            restart: false,
         };
     }
 
@@ -259,7 +260,7 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
                 false,
                 "config would be updated",
             ),
-            reconnect: false,
+            restart: false,
         };
     }
 
@@ -272,8 +273,26 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
                 "client_config\nstatus=error\nmessage={}",
                 clean_value(&error.to_string())
             ),
-            reconnect: false,
+            restart: false,
         };
+    }
+    if let Some(auth_token) = request
+        .auth_token
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if let Err(error) =
+            rdl_config::write_auth_token_config(ConfigKind::Client, &config.config_path, auth_token)
+        {
+            return ClientConfigUpdate {
+                accepted: false,
+                detail: format!(
+                    "client_config\nstatus=error\nmessage=config was written but auth token save failed: {}",
+                    clean_value(&error.to_string())
+                ),
+                restart: false,
+            };
+        }
     }
 
     let reloaded = match config.reload() {
@@ -285,16 +304,16 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
                     "client_config\nstatus=error\nmessage=config was written but reload failed: {}",
                     clean_value(&error.to_string())
                 ),
-                reconnect: false,
+                restart: false,
             }
         }
     };
     let effective_changed = reloaded.ip != config.ip || reloaded.port != config.port;
-    let reconnect = request.reconnect && effective_changed;
-    let message = if reconnect {
-        "config updated; reconnecting"
+    let restart = request.restart;
+    let message = if restart {
+        "config updated; client restart requested from config file"
     } else if effective_changed {
-        "config updated; reconnect disabled"
+        "config updated; restart disabled"
     } else if config.cli_ip_overridden() || config.cli_port_overridden() {
         "config updated; startup arguments still override effective endpoint"
     } else {
@@ -308,10 +327,10 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
             config,
             &reloaded,
             Some(&endpoint),
-            reconnect,
+            restart,
             message,
         ),
-        reconnect,
+        restart,
     }
 }
 
@@ -320,7 +339,8 @@ struct ClientConfigUpdateRequest {
     confirm: bool,
     dry_run: bool,
     show: bool,
-    reconnect: bool,
+    restart: bool,
+    auth_token: Option<String>,
     ip: Option<String>,
     port: Option<u16>,
     invalid_port: Option<String>,
@@ -333,9 +353,12 @@ impl ClientConfigUpdateRequest {
             confirm: bool_field(payload, "confirm"),
             dry_run: bool_field(payload, "dry_run"),
             show: action.as_deref() == Some("show"),
-            reconnect: payload_field(payload, "reconnect")
+            restart: payload_field(payload, "restart")
+                .or_else(|| payload_field(payload, "reconnect"))
                 .map(|value| bool_value(&value))
                 .unwrap_or(true),
+            auth_token: payload_field(payload, "auth_token")
+                .filter(|value| !value.trim().is_empty()),
             ip: payload_field(payload, "ip").filter(|value| !value.trim().is_empty()),
             port: payload_field(payload, "port").and_then(|value| value.parse::<u16>().ok()),
             invalid_port: payload_field(payload, "port")
@@ -349,7 +372,7 @@ fn client_config_detail(
     current: &Config,
     effective: &Config,
     file_endpoint: Option<&EndpointConfig>,
-    reconnect: bool,
+    restart: bool,
     message: &str,
 ) -> String {
     let file_endpoint = file_endpoint
@@ -371,7 +394,15 @@ fn client_config_detail(
         format!("cli_port_override={}", current.cli_port_overridden()),
         format!("embedded_config={}", current.embedded_config_enabled()),
         format!("config_mode={}", clean_value(current.config_mode_label())),
-        format!("reconnect={reconnect}"),
+        format!(
+            "auth_token_configured={}",
+            !effective.auth_token.trim().is_empty()
+        ),
+        format!("restart={restart}"),
+        format!(
+            "restart_mode={}",
+            if restart { "config_file" } else { "none" }
+        ),
     ]
     .join("\n")
 }
@@ -594,7 +625,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn remote_config_update_writes_file_and_requests_reconnect() {
+    fn remote_config_update_writes_file_and_requests_restart() {
         let path = temp_config_path("client-update");
         let config = Config::load(EndpointOverrides {
             config_path: Some(path.clone()),
@@ -608,7 +639,7 @@ mod tests {
         );
 
         assert!(update.accepted);
-        assert!(update.reconnect);
+        assert!(update.restart);
         let reloaded = config.reload().unwrap();
         assert_eq!(reloaded.ip, "10.0.0.9");
         assert_eq!(reloaded.port, 7000);
@@ -622,6 +653,7 @@ mod tests {
             config_path: Some(path.clone()),
             ip: Some("192.0.2.10".to_string()),
             port: Some(6000),
+            auth_token: Some("cli-token".to_string()),
             ..Default::default()
         })
         .unwrap();
@@ -632,12 +664,46 @@ mod tests {
         );
 
         assert!(update.accepted);
-        assert!(!update.reconnect);
+        assert!(update.restart);
         assert!(update.detail.contains("cli_ip_override=true"));
         assert!(update.detail.contains("cli_port_override=true"));
+        assert!(update.detail.contains("restart_mode=config_file"));
         let reloaded = config.reload().unwrap();
         assert_eq!(reloaded.ip, "192.0.2.10");
         assert_eq!(reloaded.port, 6000);
+        let file_loaded = Config::load(EndpointOverrides {
+            config_path: Some(path.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(file_loaded.auth_token, "");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn remote_config_update_can_write_requested_auth_token() {
+        let path = temp_config_path("client-token-update");
+        let config = Config::load(EndpointOverrides {
+            config_path: Some(path.clone()),
+            auth_token: Some("old-token".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let update = update_client_config(
+            &config,
+            "confirm=true\nip=10.0.0.9\nport=7000\nauth_token=new-token\nrestart=true",
+        );
+
+        assert!(update.accepted);
+        assert!(update.restart);
+        assert!(update.detail.contains("auth_token_configured=true"));
+        let file_loaded = Config::load(EndpointOverrides {
+            config_path: Some(path.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(file_loaded.auth_token, "new-token");
         let _ = fs::remove_file(path);
     }
 
@@ -670,7 +736,7 @@ mod tests {
         );
 
         assert!(!update.accepted);
-        assert!(!update.reconnect);
+        assert!(!update.restart);
         assert!(update.detail.contains("status=refused"));
         assert!(update.detail.contains("embedded_config=true"));
         assert!(!path.exists());
