@@ -68,11 +68,23 @@ pub(super) fn render(ui: &mut egui::Ui, result_detail: &Arc<Mutex<String>>) {
     ui.add_space(10.0);
     ui.separator();
     ui.add_space(6.0);
-    ui.label(
-        egui::RichText::new(t("Output"))
-            .size(12.0)
-            .color(crate::theme::palette().muted),
-    );
+    let copy_text = detail.clone();
+    let can_copy = !copy_text.trim().is_empty();
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(t("Output"))
+                .size(12.0)
+                .color(crate::theme::palette().muted),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(can_copy, egui::Button::new(t("Copy All")))
+                .clicked()
+            {
+                ui.ctx().copy_text(copy_text.clone());
+            }
+        });
+    });
     ui.add_space(4.0);
     let height = ui.available_height().clamp(96.0, 180.0);
     let mut output = if detail.trim().is_empty() {
@@ -87,14 +99,22 @@ pub(super) fn render(ui: &mut egui::Ui, result_detail: &Arc<Mutex<String>>) {
         .auto_shrink([false, false])
         .max_height(height)
         .show(ui, |ui| {
-            ui.add_sized(
+            let response = ui.add_sized(
                 [ui.available_width(), output_content_height],
                 egui::TextEdit::multiline(&mut output)
                     .font(egui::TextStyle::Monospace)
                     .desired_width(f32::INFINITY)
-                    .desired_rows(output_rows)
-                    .interactive(false),
+                    .desired_rows(output_rows),
             );
+            response.context_menu(|ui| {
+                if ui
+                    .add_enabled(can_copy, egui::Button::new(t("Copy All")))
+                    .clicked()
+                {
+                    ui.ctx().copy_text(copy_text.clone());
+                    ui.close();
+                }
+            });
         });
 }
 
