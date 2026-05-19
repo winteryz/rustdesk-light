@@ -4,6 +4,7 @@ use rdl_protocol::CommandKind;
 mod audio_listen;
 #[cfg(feature = "gui")]
 mod camera;
+pub(crate) mod realtime_video;
 #[cfg(feature = "gui")]
 mod remote_desktop;
 

@@ -1,3 +1,4 @@
+use super::video_pipeline::{PendingVideoFrame, VideoFrameCoalescer};
 use crate::live_control;
 use eframe::egui;
 use rdl_protocol::{
@@ -98,6 +99,11 @@ pub(super) enum AdminEvent {
         format: String,
         bytes: Vec<u8>,
     },
+    VideoFrameReady {
+        client_id: String,
+        source: VideoSource,
+        coalescer: Arc<VideoFrameCoalescer>,
+    },
     AudioFrame {
         client_id: String,
         source: AudioSource,
@@ -132,6 +138,7 @@ pub(super) struct AdminEventSink {
     tx: Sender<AdminEvent>,
     repaint_handle: Option<Arc<Mutex<Option<egui::Context>>>>,
     audio_playback_registry: Option<live_control::audio_listen::AudioPlaybackRegistry>,
+    video_frame_coalescer: Option<Arc<VideoFrameCoalescer>>,
 }
 
 impl AdminEventSink {
@@ -144,7 +151,16 @@ impl AdminEventSink {
             tx,
             repaint_handle,
             audio_playback_registry,
+            video_frame_coalescer: None,
         }
+    }
+
+    pub(super) fn with_video_frame_coalescer(
+        mut self,
+        coalescer: Arc<VideoFrameCoalescer>,
+    ) -> Self {
+        self.video_frame_coalescer = Some(coalescer);
+        self
     }
 
     pub(super) fn send(&self, event: AdminEvent) {
@@ -163,7 +179,53 @@ impl AdminEventSink {
         {
             registry.push_frame(client_id, *seq, *sample_rate, *channels, format, bytes);
         }
+        let Some(event) = self.coalesce_video_frame(event) else {
+            return;
+        };
         let _ = self.tx.send(event);
+        self.request_repaint();
+    }
+
+    fn coalesce_video_frame(&self, event: AdminEvent) -> Option<AdminEvent> {
+        let Some(coalescer) = self.video_frame_coalescer.as_ref() else {
+            return Some(event);
+        };
+        match event {
+            AdminEvent::VideoFrame {
+                client_id,
+                source,
+                seq,
+                source_width,
+                source_height,
+                image_width,
+                image_height,
+                format,
+                bytes,
+            } => {
+                let frame = PendingVideoFrame {
+                    seq,
+                    source_width,
+                    source_height,
+                    image_width,
+                    image_height,
+                    format,
+                    bytes,
+                };
+                if coalescer.push(client_id.clone(), source.clone(), frame) {
+                    Some(AdminEvent::VideoFrameReady {
+                        client_id,
+                        source,
+                        coalescer: coalescer.clone(),
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => Some(event),
+        }
+    }
+
+    fn request_repaint(&self) {
         if let Some(ctx) = self
             .repaint_handle
             .as_ref()

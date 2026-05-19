@@ -1,5 +1,30 @@
 use super::*;
 
+fn overview_metric(ui: &mut egui::Ui, label: &str, value: impl Into<String>) {
+    let value = value.into();
+    let palette = crate::theme::palette();
+    egui::Frame::default()
+        .fill(palette.bg)
+        .stroke(egui::Stroke::new(1.0, palette.border))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.set_min_width(match label {
+                value if value == t("Selected") => 170.0,
+                value if value == t("Version") => 112.0,
+                _ => 82.0,
+            });
+            ui.horizontal(|ui| {
+                ui.label(crate::theme::muted_text(label));
+                ui.add(
+                    egui::Label::new(crate::theme::strong_body_text(value.clone()).size(13.0))
+                        .selectable(false),
+                )
+                .on_hover_text(value);
+            });
+        });
+}
+
 impl AdminApp {
     pub(super) fn render_overview(&mut self, ui: &mut egui::Ui) {
         panel(ui, |ui| {

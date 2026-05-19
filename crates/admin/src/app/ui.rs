@@ -105,6 +105,26 @@ pub(super) fn table_header(ui: &mut egui::Ui, title: &str) {
     ui.label(crate::theme::muted_text(title).strong());
 }
 
+pub(super) fn about_row(ui: &mut egui::Ui, label: &str, value: impl Into<String>) {
+    let value = value.into();
+    ui.horizontal(|ui| {
+        ui.set_min_height(22.0);
+        ui.add_sized(
+            [84.0, 18.0],
+            egui::Label::new(crate::theme::muted_text(label)),
+        );
+        ui.add_sized(
+            [ui.available_width(), 18.0],
+            egui::Label::new(crate::theme::body_text(value.clone())).selectable(true),
+        )
+        .on_hover_text(value);
+    });
+}
+
+pub(super) fn form_label(ui: &mut egui::Ui, label: &str) {
+    ui.label(crate::theme::muted_text(label).strong());
+}
+
 pub(super) fn centered_cell(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     ui.with_layout(
         egui::Layout::left_to_right(egui::Align::Center),

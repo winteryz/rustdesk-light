@@ -5,7 +5,7 @@ use crate::{
 };
 use eframe::egui;
 
-use super::{form_label, COLOR_BAD, COLOR_GOOD, TOOLBAR_CONTROL_HEIGHT};
+use super::{ui::form_label, COLOR_BAD, COLOR_GOOD, TOOLBAR_CONTROL_HEIGHT};
 
 pub(super) struct SettingsState {
     pub(super) server_ip: String,
@@ -106,6 +106,29 @@ pub(super) enum SettingsAction {
         theme: String,
         language: String,
     },
+}
+
+pub(super) fn parse_connection_settings(
+    ip: &str,
+    port_text: &str,
+    token: &str,
+) -> Result<(String, u16, String), String> {
+    let ip = ip.trim().to_string();
+    let port_text = port_text.trim();
+    let token = token.trim().to_string();
+
+    if ip.is_empty() {
+        return Err(t("Server IP cannot be empty.").to_string());
+    }
+    let port = match port_text.parse::<u16>() {
+        Ok(port) if port > 0 => port,
+        _ => return Err(t("Server port must be 1-65535.").to_string()),
+    };
+    if token.is_empty() {
+        return Err(t("Token cannot be empty.").to_string());
+    }
+
+    Ok((ip, port, token))
 }
 
 pub(super) fn render_settings_window(

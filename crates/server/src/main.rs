@@ -1,23 +1,25 @@
+use geoip::GeoIpLocator;
 use rdl_protocol::{
-    audio_udp, now_epoch_ms, read_envelope, write_envelope, AudioSource, ClientInfo,
-    ClientLocation, FileTransferAction, FileTransferDirection, Message, Role,
+    now_epoch_ms, read_envelope, AudioSource, ClientInfo, FileTransferAction,
+    FileTransferDirection, Message, Role, VideoSource,
 };
+use realtime_video::{latest_video_channel, RealtimeVideoSender};
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+mod audio_udp_relay;
+mod geoip;
+mod peer_writer;
+mod realtime_video;
 
 const HEARTBEAT_INTERVAL_MS: u128 = 10_000;
 const STALE_PEER_MS: u128 = 45_000;
 const MAINTENANCE_TICK_MS: u64 = 100;
-const WRITER_BULK_POLL_MS: u64 = 2;
-const WRITER_VIDEO_QUEUE_CAPACITY: usize = 4;
-const UDP_RELAY_IDLE_TIMEOUT_MS: u64 = 30_000;
-const UDP_RELAY_RECV_TIMEOUT_MS: u64 = 100;
-const UDP_RELAY_MAINTENANCE_MS: u64 = 1_000;
 
 #[derive(Debug)]
 enum ServerEvent {
@@ -47,29 +49,19 @@ enum ServerEvent {
 #[derive(Clone, Debug)]
 struct PeerSender {
     high: Sender<Message>,
-    video: SyncSender<Message>,
+    video: RealtimeVideoSender<Message>,
     bulk: Sender<Message>,
 }
 
 impl PeerSender {
     fn send(&self, message: Message) -> Result<(), mpsc::SendError<Message>> {
-        if server_message_is_video_realtime(&message) {
-            try_send_lossy(&self.video, message)
-        } else if server_message_is_bulk(&message) {
+        if peer_writer::message_is_video_realtime(&message) {
+            self.video.send_latest(message)
+        } else if peer_writer::message_is_bulk(&message) {
             self.bulk.send(message)
         } else {
             self.high.send(message)
         }
-    }
-}
-
-fn try_send_lossy(
-    tx: &SyncSender<Message>,
-    message: Message,
-) -> Result<(), mpsc::SendError<Message>> {
-    match tx.try_send(message) {
-        Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
-        Err(TrySendError::Disconnected(message)) => Err(mpsc::SendError(message)),
     }
 }
 
@@ -89,134 +81,13 @@ struct Peer {
 
 type FileTransferKey = (String, u64, &'static str);
 type ProxyStreamKey = (String, u64);
+type VideoRouteKey = (String, u8);
 
 #[derive(Clone)]
 struct AuthConfig {
     token: String,
     generated: bool,
     require_client_auth: bool,
-}
-
-struct GeoIpLocator {
-    reader: Option<maxminddb::Reader<Vec<u8>>>,
-    path: Option<PathBuf>,
-}
-
-impl GeoIpLocator {
-    fn open(path: Option<&Path>) -> Self {
-        let Some(path) = path else {
-            return Self {
-                reader: None,
-                path: None,
-            };
-        };
-        match maxminddb::Reader::open_readfile(path) {
-            Ok(reader) => Self {
-                reader: Some(reader),
-                path: Some(path.to_path_buf()),
-            },
-            Err(error) => {
-                eprintln!("geoip disabled: {}: {error}", path.display());
-                Self {
-                    reader: None,
-                    path: Some(path.to_path_buf()),
-                }
-            }
-        }
-    }
-
-    fn status_label(&self) -> String {
-        match (&self.reader, &self.path) {
-            (Some(_), Some(path)) => path.display().to_string(),
-            (Some(_), None) => "enabled".to_string(),
-            (None, Some(path)) => format!("disabled({})", path.display()),
-            (None, None) => "disabled".to_string(),
-        }
-    }
-
-    fn lookup_peer_addr(&self, peer_addr: &str) -> Option<ClientLocation> {
-        let reader = self.reader.as_ref()?;
-        let ip = peer_ip(peer_addr)?;
-        if !geoip_candidate(ip) {
-            return None;
-        }
-        let result = reader.lookup(ip).ok()?;
-        let city = result.decode::<maxminddb::geoip2::City>().ok()??;
-        let latitude = city.location.latitude?;
-        let longitude = city.location.longitude?;
-        let accuracy_meters = city
-            .location
-            .accuracy_radius
-            .map(|km| u32::from(km).saturating_mul(1_000))
-            .unwrap_or(0);
-        Some(ClientLocation::from_degrees(
-            latitude,
-            longitude,
-            accuracy_meters,
-            "ip",
-            geoip_label(&city),
-            now_epoch_ms(),
-        ))
-    }
-}
-
-fn peer_ip(peer_addr: &str) -> Option<IpAddr> {
-    peer_addr
-        .parse::<SocketAddr>()
-        .map(|addr| addr.ip())
-        .ok()
-        .or_else(|| peer_addr.parse::<IpAddr>().ok())
-}
-
-fn geoip_candidate(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            !(ip.is_loopback()
-                || ip.is_private()
-                || ip.is_link_local()
-                || ip.is_broadcast()
-                || ip.is_documentation()
-                || ip.is_multicast()
-                || ip.is_unspecified())
-        }
-        IpAddr::V6(ip) => {
-            !(ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_multicast()
-                || ip.is_unique_local()
-                || ((ip.segments()[0] & 0xffc0) == 0xfe80))
-        }
-    }
-}
-
-fn geoip_label(city: &maxminddb::geoip2::City<'_>) -> String {
-    let mut parts = Vec::new();
-    if let Some(name) = preferred_name(&city.city.names) {
-        parts.push(name.to_string());
-    }
-    if let Some(subdivision) = city
-        .subdivisions
-        .first()
-        .and_then(|subdivision| preferred_name(&subdivision.names))
-    {
-        if !parts.iter().any(|part| part == subdivision) {
-            parts.push(subdivision.to_string());
-        }
-    }
-    if let Some(country) = preferred_name(&city.country.names).or(city.country.iso_code) {
-        if !parts.iter().any(|part| part == country) {
-            parts.push(country.to_string());
-        }
-    }
-    if parts.is_empty() {
-        "IP geolocation".to_string()
-    } else {
-        parts.join(", ")
-    }
-}
-
-fn preferred_name<'a>(names: &'a maxminddb::geoip2::Names<'a>) -> Option<&'a str> {
-    names.simplified_chinese.or(names.english)
 }
 
 fn main() -> io::Result<()> {
@@ -241,81 +112,10 @@ fn main() -> io::Result<()> {
         );
     }
     println!("use this token in rdl-admin-gui; clients need it only when client_auth=required");
-    start_audio_udp_relay(bind_addr.clone());
+    audio_udp_relay::start(bind_addr.clone());
     thread::spawn(move || accept_loop(listener, events_tx));
     event_loop(events_rx, geoip, config.auth);
     Ok(())
-}
-
-fn start_audio_udp_relay(bind_addr: String) {
-    thread::spawn(move || match UdpSocket::bind(&bind_addr) {
-        Ok(socket) => {
-            println!("audio udp relay listening on {bind_addr}");
-            if let Err(error) = audio_udp_relay_loop(socket) {
-                eprintln!("audio udp relay stopped: {error}");
-            }
-        }
-        Err(error) => eprintln!("audio udp relay bind failed on {bind_addr}: {error}"),
-    });
-}
-
-#[derive(Clone, Copy)]
-struct AudioUdpRoute {
-    receiver_addr: SocketAddr,
-    last_seen: Instant,
-}
-
-fn audio_udp_relay_loop(socket: UdpSocket) -> io::Result<()> {
-    socket.set_read_timeout(Some(Duration::from_millis(UDP_RELAY_RECV_TIMEOUT_MS)))?;
-    let mut routes = HashMap::<u64, AudioUdpRoute>::new();
-    let mut buf = [0_u8; audio_udp::MAX_PACKET_BYTES];
-    let mut last_maintenance = Instant::now();
-    loop {
-        match socket.recv_from(&mut buf) {
-            Ok((len, addr)) => match audio_udp::decode(&buf[..len]) {
-                Ok(audio_udp::Packet::Register { stream_id }) => {
-                    routes.insert(
-                        stream_id,
-                        AudioUdpRoute {
-                            receiver_addr: addr,
-                            last_seen: Instant::now(),
-                        },
-                    );
-                }
-                Ok(audio_udp::Packet::Unregister { stream_id }) => {
-                    if routes
-                        .get(&stream_id)
-                        .map(|route| route.receiver_addr == addr)
-                        .unwrap_or(false)
-                    {
-                        routes.remove(&stream_id);
-                    }
-                }
-                Ok(audio_udp::Packet::Audio { stream_id, .. }) => {
-                    if let Some(route) = routes.get_mut(&stream_id) {
-                        route.last_seen = Instant::now();
-                        let _ = socket.send_to(&buf[..len], route.receiver_addr);
-                    }
-                }
-                Err(error) => {
-                    eprintln!("audio udp relay ignored packet from {addr}: {error}");
-                }
-            },
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.kind() == io::ErrorKind::TimedOut => {}
-            Err(error) => return Err(error),
-        }
-
-        if last_maintenance.elapsed() >= Duration::from_millis(UDP_RELAY_MAINTENANCE_MS) {
-            let now = Instant::now();
-            routes.retain(|_, route| {
-                now.duration_since(route.last_seen)
-                    < Duration::from_millis(UDP_RELAY_IDLE_TIMEOUT_MS)
-            });
-            last_maintenance = now;
-        }
-    }
 }
 
 fn accept_loop(listener: TcpListener, events_tx: Sender<ServerEvent>) {
@@ -342,7 +142,7 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
         eprintln!("peer {peer_id} set TCP_NODELAY failed: {error}");
     }
     let (high_tx, high_rx) = mpsc::channel::<Message>();
-    let (video_tx, video_rx) = mpsc::sync_channel::<Message>(WRITER_VIDEO_QUEUE_CAPACITY);
+    let (video_tx, video_rx) = latest_video_channel();
     let (bulk_tx, bulk_rx) = mpsc::channel::<Message>();
     if events_tx
         .send(ServerEvent::Connected {
@@ -367,7 +167,7 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
         }
     };
 
-    thread::spawn(move || writer_loop(peer_id, writer, high_rx, video_rx, bulk_rx));
+    thread::spawn(move || peer_writer::writer_loop(peer_id, writer, high_rx, video_rx, bulk_rx));
 
     let mut reader = stream;
     loop {
@@ -428,110 +228,18 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
     let _ = events_tx.send(ServerEvent::Disconnected { peer_id });
 }
 
-fn writer_loop(
-    peer_id: usize,
-    mut writer: TcpStream,
-    high_rx: Receiver<Message>,
-    video_rx: Receiver<Message>,
-    bulk_rx: Receiver<Message>,
-) {
-    let mut next_message_id = 1u64;
-    let mut high_open = true;
-    let mut video_open = true;
-    let mut bulk_open = true;
-    while high_open || video_open || bulk_open {
-        loop {
-            match high_rx.try_recv() {
-                Ok(message) => {
-                    if !write_server_message(peer_id, &mut writer, &mut next_message_id, message) {
-                        return;
-                    }
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    high_open = false;
-                    break;
-                }
-            }
-        }
-
-        loop {
-            match video_rx.try_recv() {
-                Ok(message) => {
-                    if !write_server_message(peer_id, &mut writer, &mut next_message_id, message) {
-                        return;
-                    }
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    video_open = false;
-                    break;
-                }
-            }
-        }
-
-        if !bulk_open {
-            thread::sleep(Duration::from_millis(WRITER_BULK_POLL_MS));
-            continue;
-        }
-
-        match bulk_rx.recv_timeout(Duration::from_millis(WRITER_BULK_POLL_MS)) {
-            Ok(message) => {
-                if !write_server_message(peer_id, &mut writer, &mut next_message_id, message) {
-                    return;
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                if !high_open && !video_open && !bulk_open {
-                    break;
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => bulk_open = false,
-        }
-    }
-}
-
-fn write_server_message(
-    peer_id: usize,
-    writer: &mut TcpStream,
-    next_message_id: &mut u64,
-    message: Message,
-) -> bool {
-    let result = write_envelope(writer, Role::Server, *next_message_id, None, message);
-    *next_message_id = next_message_id.saturating_add(1);
-    if let Err(error) = result {
-        eprintln!("peer {peer_id} write failed: {error}");
-        return false;
-    }
-    true
-}
-
-fn server_message_is_video_realtime(message: &Message) -> bool {
-    matches!(message, Message::VideoFrame { .. })
-}
-
-fn server_message_is_bulk(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::FileTransfer {
-            action: FileTransferAction::Directory
-                | FileTransferAction::Chunk
-                | FileTransferAction::Progress,
-            ..
-        } | Message::ProxyData { .. }
-    )
-}
-
 fn event_loop(events_rx: Receiver<ServerEvent>, geoip: GeoIpLocator, auth: AuthConfig) {
     let mut peers: HashMap<usize, Peer> = HashMap::new();
     let mut cancelled_file_transfers = HashSet::<FileTransferKey>::new();
     let mut proxy_routes = HashMap::<ProxyStreamKey, usize>::new();
+    let mut video_routes = HashMap::<VideoRouteKey, HashSet<usize>>::new();
 
     loop {
         let event = match events_rx.recv_timeout(Duration::from_millis(MAINTENANCE_TICK_MS)) {
             Ok(event) => event,
             Err(RecvTimeoutError::Timeout) => {
                 maintain_peers(&mut peers);
+                retain_live_video_routes(&mut video_routes, &peers);
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => break,
@@ -868,10 +576,29 @@ fn event_loop(events_rx: Receiver<ServerEvent>, geoip: GeoIpLocator, auth: AuthC
                             target_id,
                             source.as_str()
                         );
-                        if let Some(error) =
-                            route_video_control_to_client(&peers, &target_id, source, payload)
-                        {
-                            send_video_error(peer_id, &target_id, error, &peers);
+                        let action = video_control_action(&payload);
+                        if peer_role(peer_id, &peers) == Some(Role::Admin) {
+                            update_video_subscription(
+                                &mut video_routes,
+                                peer_id,
+                                &target_id,
+                                &source,
+                                action.as_deref(),
+                            );
+                        }
+                        if let Some(error) = route_video_control_to_client(
+                            &peers,
+                            &target_id,
+                            source.clone(),
+                            payload,
+                        ) {
+                            remove_video_subscription(
+                                &mut video_routes,
+                                peer_id,
+                                &target_id,
+                                &source,
+                            );
+                            send_video_error(peer_id, &target_id, source, error, &peers);
                         }
                     }
                     Message::VideoFrame {
@@ -887,8 +614,8 @@ fn event_loop(events_rx: Receiver<ServerEvent>, geoip: GeoIpLocator, auth: AuthC
                     } => {
                         mark_seen(peer_id, &mut peers);
                         let message = Message::VideoFrame {
-                            client_id,
-                            source,
+                            client_id: client_id.clone(),
+                            source: source.clone(),
                             seq,
                             source_width,
                             source_height,
@@ -897,11 +624,13 @@ fn event_loop(events_rx: Receiver<ServerEvent>, geoip: GeoIpLocator, auth: AuthC
                             format,
                             bytes,
                         };
-                        for peer in peers.values() {
-                            if peer.role == Some(Role::Admin) {
-                                let _ = peer.sender.send(message.clone());
-                            }
-                        }
+                        route_video_frame_to_subscribers(
+                            &peers,
+                            &video_routes,
+                            &client_id,
+                            &source,
+                            message,
+                        );
                     }
                     Message::AudioControl {
                         target_id,
@@ -1077,12 +806,14 @@ fn event_loop(events_rx: Receiver<ServerEvent>, geoip: GeoIpLocator, auth: AuthC
                     .to_string();
                 println!("audit event=disconnect peer=#{peer_id} identity={identity}");
                 remove_proxy_routes_for_peer(peer_id, removed.as_ref(), &mut proxy_routes, &peers);
+                remove_video_routes_for_peer(peer_id, removed.as_ref(), &mut video_routes);
                 if removed.and_then(|peer| peer.client_info).is_some() {
                     broadcast_clients(&peers);
                 }
             }
         }
         maintain_peers(&mut peers);
+        retain_live_video_routes(&mut video_routes, &peers);
     }
 }
 
@@ -1250,7 +981,7 @@ fn route_desktop_to_client(
 fn route_video_control_to_client(
     peers: &HashMap<usize, Peer>,
     target_id: &str,
-    source: rdl_protocol::VideoSource,
+    source: VideoSource,
     payload: String,
 ) -> Option<String> {
     let target = peers.values().find(|peer| {
@@ -1273,6 +1004,119 @@ fn route_video_control_to_client(
         })
         .err()
         .map(|error| error.to_string())
+}
+
+fn video_control_action(payload: &str) -> Option<String> {
+    payload_field(payload, "action").map(|action| action.to_ascii_lowercase())
+}
+
+fn update_video_subscription(
+    video_routes: &mut HashMap<VideoRouteKey, HashSet<usize>>,
+    admin_peer_id: usize,
+    client_id: &str,
+    source: &VideoSource,
+    action: Option<&str>,
+) {
+    match action {
+        Some("start") => {
+            video_routes
+                .entry(video_route_key(client_id, source))
+                .or_default()
+                .insert(admin_peer_id);
+        }
+        Some("stop") => {
+            remove_video_subscription(video_routes, admin_peer_id, client_id, source);
+        }
+        _ => {}
+    }
+}
+
+fn remove_video_subscription(
+    video_routes: &mut HashMap<VideoRouteKey, HashSet<usize>>,
+    admin_peer_id: usize,
+    client_id: &str,
+    source: &VideoSource,
+) {
+    let key = video_route_key(client_id, source);
+    let should_remove = if let Some(admins) = video_routes.get_mut(&key) {
+        admins.remove(&admin_peer_id);
+        admins.is_empty()
+    } else {
+        false
+    };
+    if should_remove {
+        video_routes.remove(&key);
+    }
+}
+
+fn route_video_frame_to_subscribers(
+    peers: &HashMap<usize, Peer>,
+    video_routes: &HashMap<VideoRouteKey, HashSet<usize>>,
+    client_id: &str,
+    source: &VideoSource,
+    message: Message,
+) {
+    let Some(admins) = video_routes.get(&video_route_key(client_id, source)) else {
+        return;
+    };
+    for admin_peer_id in admins {
+        if let Some(peer) = peers.get(admin_peer_id) {
+            if peer.role == Some(Role::Admin) {
+                let _ = peer.sender.send(message.clone());
+            }
+        }
+    }
+}
+
+fn retain_live_video_routes(
+    video_routes: &mut HashMap<VideoRouteKey, HashSet<usize>>,
+    peers: &HashMap<usize, Peer>,
+) {
+    video_routes.retain(|(client_id, _), admins| {
+        admins.retain(|peer_id| {
+            peers
+                .get(peer_id)
+                .map(|peer| peer.role == Some(Role::Admin))
+                .unwrap_or(false)
+        });
+        !admins.is_empty() && client_peer_exists(peers, client_id)
+    });
+}
+
+fn remove_video_routes_for_peer(
+    peer_id: usize,
+    removed: Option<&Peer>,
+    video_routes: &mut HashMap<VideoRouteKey, HashSet<usize>>,
+) {
+    let removed_client_id = removed
+        .and_then(|peer| peer.client_info.as_ref())
+        .map(|info| info.id.clone());
+    video_routes.retain(|(client_id, _), admins| {
+        admins.remove(&peer_id);
+        !admins.is_empty() && removed_client_id.as_deref() != Some(client_id)
+    });
+}
+
+fn client_peer_exists(peers: &HashMap<usize, Peer>, client_id: &str) -> bool {
+    peers.values().any(|peer| {
+        peer.role == Some(Role::Client)
+            && peer
+                .client_info
+                .as_ref()
+                .map(|info| info.id == client_id)
+                .unwrap_or(false)
+    })
+}
+
+fn video_route_key(client_id: &str, source: &VideoSource) -> VideoRouteKey {
+    (client_id.to_string(), video_source_key(source))
+}
+
+fn video_source_key(source: &VideoSource) -> u8 {
+    match source {
+        VideoSource::RemoteDesktop => 1,
+        VideoSource::Camera => 2,
+    }
 }
 
 fn route_audio_control_to_client(
@@ -1543,11 +1387,17 @@ fn send_desktop_error(
     }
 }
 
-fn send_video_error(peer_id: usize, client_id: &str, error: String, peers: &HashMap<usize, Peer>) {
+fn send_video_error(
+    peer_id: usize,
+    client_id: &str,
+    source: VideoSource,
+    error: String,
+    peers: &HashMap<usize, Peer>,
+) {
     if let Some(peer) = peers.get(&peer_id) {
         let _ = peer.sender.send(Message::VideoFrame {
             client_id: client_id.to_string(),
-            source: rdl_protocol::VideoSource::RemoteDesktop,
+            source,
             seq: 0,
             source_width: 0,
             source_height: 0,

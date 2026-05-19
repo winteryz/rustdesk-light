@@ -1,5 +1,9 @@
+mod about;
+mod audio_udp;
 mod client_builder;
 mod client_map;
+mod client_registry;
+mod client_state;
 mod client_table;
 mod command_result;
 pub(crate) mod event;
@@ -10,11 +14,21 @@ mod settings;
 mod status_bar;
 mod toast;
 mod ui;
+mod video_pipeline;
 mod window_dispatch;
 
 use self::{
+    audio_udp::{
+        initial_stream_id, push_pending_audio_frame, voice_audio_forward_loop, AudioUdpEndpoint,
+        AudioUdpSender, AudioUdpSession, PendingAudioFrame,
+    },
     client_builder::ClientBuilderState,
     client_map::ClientMapWindow,
+    client_state::{
+        client_commands_disabled_text, client_identity_label, client_location_label,
+        client_online_notice, client_os_label, client_status_display, client_status_text,
+        ClientOnlineToast, ClientRow, ClientStatus,
+    },
     command_result::{
         command_status_notice, command_title, command_window_identity_title, detail_status,
         kill_target_process_succeeded, performance_auto_refresh_due,
@@ -30,12 +44,13 @@ use self::{
     },
     network::admin_network_loop,
     payload::{payload_field, video_stream_payload},
-    settings::{SettingsAction, SettingsState},
+    settings::{parse_connection_settings, SettingsAction, SettingsState},
     ui::{
         activity_context_menu, apply_admin_theme, cell_label, centered_cell, empty_state, panel,
         prune_activity_logs, section_title, table_header, timestamped_log, COLOR_BAD, COLOR_GOOD,
         COLOR_WARN, TOOLBAR_CONTROL_HEIGHT,
     },
+    video_pipeline::{PendingVideoFrame, VideoDecodeWorkers, VideoFrameCoalescer},
 };
 use crate::{
     command_menu,
@@ -46,12 +61,11 @@ use crate::{
 };
 use eframe::egui;
 use rdl_protocol::{
-    audio_udp, now_epoch_ms, AudioSource, ClientInfo, CommandKind, CommandOutputStream,
-    FileTransferAction, FileTransferDirection, Message, VideoSource,
+    AudioSource, ClientInfo, CommandKind, CommandOutputStream, FileTransferAction,
+    FileTransferDirection, Message, VideoSource,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
-use std::net::UdpSocket;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, Sender, SyncSender},
@@ -65,22 +79,12 @@ const GUI_REALTIME_AUDIO_FRAME_INTERVAL_MS: u64 = 16;
 const ADMIN_INPUT_QUEUE_CAPACITY: usize = 8;
 const VOICE_AUDIO_OUTBOUND_QUEUE_CAPACITY: usize = 128;
 const MAX_GUI_EVENTS_PER_FRAME: usize = 4096;
-const MAX_PENDING_AUDIO_MS: u64 = 240;
-const MAX_PENDING_AUDIO_FRAMES_PER_SOURCE: usize = 32;
 const CLIENT_ONLINE_TOAST_TTL: Duration = Duration::from_secs(5);
 const MAX_CLIENT_ONLINE_TOASTS: usize = 4;
-const AUDIO_UDP_REGISTER_INTERVAL_MS: u64 = 250;
-const AUDIO_UDP_RECV_TIMEOUT_MS: u64 = 20;
-const AUDIO_STREAM_REPORT_INTERVAL_MS: u64 = 1_000;
 const STATUS_BAR_HEIGHT: f32 = 44.0;
 const STATUS_BAR_CONTENT_HEIGHT: f32 = 26.0;
 const STATUS_BAR_GAP: f32 = 8.0;
 const ROOT_STATUS_BAR_BOTTOM_MARGIN: f32 = 12.0;
-const PACKAGE_AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
-const PACKAGE_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
-const PACKAGE_LICENSE: &str = env!("CARGO_PKG_LICENSE");
-const FALLBACK_REPOSITORY: &str = "https://github.com/marlkiller/rust-desk-light";
-
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
     eprintln!("{}", config.startup_config_notice());
@@ -122,7 +126,8 @@ fn run_gui(config: Config) -> eframe::Result {
             event_tx,
             Some(network_repaint_handle),
             Some(network_audio_playback_registry),
-        );
+        )
+        .with_video_frame_coalescer(Arc::new(VideoFrameCoalescer::default()));
         if let Err(error) = admin_network_loop(
             network_config,
             input_rx,
@@ -167,185 +172,6 @@ fn run_gui(config: Config) -> eframe::Result {
     )
 }
 
-fn voice_audio_forward_loop(
-    voice_audio_rx: Receiver<user_interaction::voice_chat::OutboundCommand>,
-    voice_udp_senders: Arc<Mutex<HashMap<String, AudioUdpSender>>>,
-    voice_udp_endpoints: Arc<Mutex<HashMap<String, AudioUdpEndpoint>>>,
-) {
-    let mut missing_senders = HashMap::<String, (u64, Instant)>::new();
-    let mut send_failures = HashMap::<String, (u64, Instant, String)>::new();
-    while let Ok(command) = voice_audio_rx.recv() {
-        let user_interaction::voice_chat::OutboundCommand::AudioFrame {
-            client_id,
-            seq,
-            sample_rate,
-            channels,
-            format,
-            bytes,
-        } = command
-        else {
-            continue;
-        };
-        let mut remove_sender = false;
-        let endpoint = voice_udp_endpoints
-            .lock()
-            .ok()
-            .and_then(|endpoints| endpoints.get(&client_id).cloned());
-        if let Ok(mut senders) = voice_udp_senders.lock() {
-            if !senders.contains_key(&client_id) {
-                if let Some(endpoint) = endpoint.as_ref() {
-                    match AudioUdpSender::connect(endpoint) {
-                        Ok(sender) => {
-                            debug_log!(
-                                "debug event=voice_chat_udp_sender_recovered client={} stream={}",
-                                client_id,
-                                endpoint.stream_id
-                            );
-                            senders.insert(client_id.clone(), sender);
-                        }
-                        Err(error) => {
-                            debug_log!(
-                                "debug event=voice_chat_udp_sender_recover_failed client={} error={}",
-                                client_id, error
-                            );
-                        }
-                    }
-                }
-            }
-            if let Some(sender) = senders.get_mut(&client_id) {
-                missing_senders.remove(&client_id);
-                if let Err(error) =
-                    sender.send_frame(&client_id, seq, sample_rate, channels, &format, &bytes)
-                {
-                    report_voice_udp_send_failure(&mut send_failures, &client_id, &error);
-                    remove_sender = error.kind() != io::ErrorKind::InvalidInput;
-                } else {
-                    send_failures.remove(&client_id);
-                }
-            }
-            if remove_sender {
-                senders.remove(&client_id);
-            } else if !senders.contains_key(&client_id) {
-                let entry = missing_senders
-                    .entry(client_id.clone())
-                    .or_insert((0, Instant::now()));
-                entry.0 = entry.0.saturating_add(1);
-                if entry.1.elapsed() >= Duration::from_millis(AUDIO_STREAM_REPORT_INTERVAL_MS) {
-                    debug_log!(
-                        "debug event=voice_chat_udp_missing_sender client={} frames={}",
-                        client_id,
-                        entry.0
-                    );
-                    entry.1 = Instant::now();
-                }
-            }
-        }
-    }
-}
-
-fn report_voice_udp_send_failure(
-    send_failures: &mut HashMap<String, (u64, Instant, String)>,
-    client_id: &str,
-    error: &io::Error,
-) {
-    let error_text = error.to_string();
-    let entry = send_failures
-        .entry(client_id.to_string())
-        .or_insert_with(|| {
-            (
-                0,
-                Instant::now() - Duration::from_millis(AUDIO_STREAM_REPORT_INTERVAL_MS),
-                error_text.clone(),
-            )
-        });
-    if entry.2 != error_text {
-        entry.0 = 0;
-        entry.1 = Instant::now() - Duration::from_millis(AUDIO_STREAM_REPORT_INTERVAL_MS);
-        entry.2 = error_text;
-    }
-    entry.0 = entry.0.saturating_add(1);
-    if entry.1.elapsed() >= Duration::from_millis(AUDIO_STREAM_REPORT_INTERVAL_MS) {
-        debug_log!(
-            "debug event=voice_chat_udp_send_failed client={} count={} error={}",
-            client_id,
-            entry.0,
-            entry.2
-        );
-        entry.0 = 0;
-        entry.1 = Instant::now();
-    }
-}
-
-fn audio_udp_receive_loop(
-    socket: UdpSocket,
-    server_addr: String,
-    client_id: String,
-    source: AudioSource,
-    stream_id: u64,
-    stop: Arc<AtomicBool>,
-    event_sink: AdminEventSink,
-) {
-    let mut register_packet = Vec::new();
-    let mut unregister_packet = Vec::new();
-    audio_udp::encode_register(stream_id, &mut register_packet);
-    audio_udp::encode_unregister(stream_id, &mut unregister_packet);
-    let mut last_register = Instant::now() - Duration::from_millis(AUDIO_UDP_REGISTER_INTERVAL_MS);
-    let mut buf = [0_u8; audio_udp::MAX_PACKET_BYTES];
-
-    while !stop.load(Ordering::Relaxed) {
-        if last_register.elapsed() >= Duration::from_millis(AUDIO_UDP_REGISTER_INTERVAL_MS) {
-            if let Err(error) = socket.send_to(&register_packet, &server_addr) {
-                event_sink.send(AdminEvent::Log(format!(
-                    "audio udp register failed: {error}"
-                )));
-                break;
-            }
-            last_register = Instant::now();
-        }
-
-        match socket.recv_from(&mut buf) {
-            Ok((len, _)) => match audio_udp::decode(&buf[..len]) {
-                Ok(audio_udp::Packet::Audio {
-                    stream_id: packet_stream_id,
-                    seq,
-                    sample_rate,
-                    channels,
-                    format,
-                    bytes,
-                    ..
-                }) if packet_stream_id == stream_id => {
-                    event_sink.send(AdminEvent::AudioFrame {
-                        client_id: client_id.clone(),
-                        source: source.clone(),
-                        seq,
-                        sample_rate,
-                        channels,
-                        format: format.to_string(),
-                        bytes: bytes.to_vec(),
-                    });
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    event_sink.send(AdminEvent::Log(format!(
-                        "audio udp packet ignored: {error}"
-                    )));
-                }
-            },
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.kind() == io::ErrorKind::TimedOut => {}
-            Err(error) => {
-                event_sink.send(AdminEvent::Log(format!(
-                    "audio udp receive failed: {error}"
-                )));
-                break;
-            }
-        }
-    }
-
-    let _ = socket.send_to(&unregister_packet, server_addr);
-}
-
 #[cfg(target_os = "macos")]
 fn disable_macos_automatic_window_tabbing() {
     if let Some(main_thread) = objc2_foundation::MainThreadMarker::new() {
@@ -375,6 +201,7 @@ struct AdminApp {
     file_manager_windows: Vec<remote_management::file_manager::FileManagerWindow>,
     desktop_windows: Vec<live_control::remote_desktop::RemoteDesktopWindow>,
     camera_windows: Vec<live_control::camera::CameraWindow>,
+    video_decode_workers: VideoDecodeWorkers,
     audio_windows: Vec<live_control::audio_listen::AudioListenWindow>,
     audio_udp_sessions: HashMap<String, AudioUdpSession>,
     audio_udp_next_stream_id: u64,
@@ -396,400 +223,6 @@ struct AdminApp {
     settings: SettingsState,
     about_open: bool,
     applied_theme: Option<(crate::theme::ThemeKind, crate::theme::ResolvedTheme)>,
-}
-
-#[derive(Clone)]
-struct ClientRow {
-    info: ClientInfo,
-    status: ClientStatus,
-}
-
-struct ClientOnlineToast {
-    title: String,
-    detail: String,
-    created_at: Instant,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum ClientStatus {
-    Online,
-    Stale,
-    Offline,
-}
-
-impl ClientStatus {
-    fn can_receive_commands(self) -> bool {
-        matches!(self, ClientStatus::Online)
-    }
-}
-
-struct PendingVideoFrame {
-    seq: u64,
-    source_width: u32,
-    source_height: u32,
-    image_width: u32,
-    image_height: u32,
-    format: String,
-    bytes: Vec<u8>,
-}
-
-struct PendingAudioFrame {
-    source: AudioSource,
-    seq: u64,
-    sample_rate: u32,
-    channels: u16,
-    format: String,
-    bytes: Vec<u8>,
-}
-
-struct AudioUdpSession {
-    stream_id: u64,
-    stop: Arc<AtomicBool>,
-}
-
-#[derive(Clone)]
-struct AudioUdpEndpoint {
-    host: String,
-    port: u16,
-    stream_id: u64,
-}
-
-struct AudioUdpSender {
-    socket: UdpSocket,
-    stream_id: u64,
-    packet: Vec<u8>,
-    sent_packets: u64,
-    sent_bytes: u64,
-    last_report: Instant,
-}
-
-impl AudioUdpSender {
-    fn connect(endpoint: &AudioUdpEndpoint) -> Result<Self, String> {
-        let socket =
-            UdpSocket::bind("0.0.0.0:0").map_err(|error| format!("bind udp failed: {error}"))?;
-        socket
-            .connect(endpoint.addr())
-            .map_err(|error| format!("connect udp relay failed: {error}"))?;
-        Ok(Self {
-            socket,
-            stream_id: endpoint.stream_id,
-            packet: Vec::with_capacity(audio_udp::MAX_PACKET_BYTES),
-            sent_packets: 0,
-            sent_bytes: 0,
-            last_report: Instant::now(),
-        })
-    }
-
-    fn send_frame(
-        &mut self,
-        client_id: &str,
-        seq: u64,
-        sample_rate: u32,
-        channels: u16,
-        format: &str,
-        bytes: &[u8],
-    ) -> io::Result<()> {
-        audio_udp::encode_audio(
-            self.stream_id,
-            seq,
-            now_epoch_ms() as u64,
-            sample_rate,
-            channels,
-            format,
-            bytes,
-            &mut self.packet,
-        )
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        self.socket.send(&self.packet)?;
-        self.sent_packets = self.sent_packets.saturating_add(1);
-        self.sent_bytes = self.sent_bytes.saturating_add(bytes.len() as u64);
-        if self.last_report.elapsed() >= Duration::from_millis(AUDIO_STREAM_REPORT_INTERVAL_MS) {
-            debug_log!(
-                "debug event=voice_chat_tx client={} transport=udp packets={} bytes={}",
-                client_id,
-                self.sent_packets,
-                self.sent_bytes
-            );
-            self.last_report = Instant::now();
-        }
-        Ok(())
-    }
-}
-
-impl AudioUdpEndpoint {
-    fn from_payload(payload: &str) -> Result<Option<Self>, String> {
-        if payload_field(payload, "transport").as_deref() != Some("udp") {
-            return Ok(None);
-        }
-        let host = payload_field(payload, "udp_host")
-            .ok_or_else(|| "missing audio udp host".to_string())?;
-        let port = payload_field(payload, "udp_port")
-            .and_then(|value| value.parse::<u16>().ok())
-            .ok_or_else(|| "missing audio udp port".to_string())?;
-        let stream_id = payload_field(payload, "udp_stream")
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| "missing audio udp stream".to_string())?;
-        Ok(Some(Self {
-            host,
-            port,
-            stream_id,
-        }))
-    }
-
-    fn addr(&self) -> String {
-        format!("{}:{}", self.host, self.port)
-    }
-}
-
-fn push_pending_audio_frame(
-    queues: &mut HashMap<(String, u8), VecDeque<PendingAudioFrame>>,
-    client_id: String,
-    frame: PendingAudioFrame,
-) {
-    let source_key = audio_source_key(&frame.source);
-    let queue = queues.entry((client_id, source_key)).or_default();
-    queue.push_back(frame);
-    while queue.len() > MAX_PENDING_AUDIO_FRAMES_PER_SOURCE
-        || pending_audio_duration_ms(queue) > MAX_PENDING_AUDIO_MS
-    {
-        if queue.len() <= 1 {
-            break;
-        }
-        let _ = queue.pop_front();
-    }
-}
-
-fn pending_audio_duration_ms(queue: &VecDeque<PendingAudioFrame>) -> u64 {
-    queue.iter().map(pending_audio_frame_duration_ms).sum()
-}
-
-fn pending_audio_frame_duration_ms(frame: &PendingAudioFrame) -> u64 {
-    let channels = frame.channels.max(1) as usize;
-    let sample_rate = frame.sample_rate.max(1) as u64;
-    let frames = frame.bytes.len() / 2 / channels;
-    ((frames as u64 * 1000) / sample_rate).max(1)
-}
-
-fn audio_source_key(source: &AudioSource) -> u8 {
-    match source {
-        AudioSource::AudioListen => 1,
-        AudioSource::VoiceChat => 2,
-    }
-}
-
-fn client_status_text(ui: &mut egui::Ui, status: ClientStatus) {
-    let (text, color) = client_status_display(status);
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
-        ui.painter().circle_filled(rect.center(), 3.5, color);
-        ui.add(
-            egui::Label::new(egui::RichText::new(text).size(12.0).color(color).strong())
-                .selectable(false)
-                .sense(egui::Sense::hover()),
-        );
-    });
-}
-
-fn client_status_display(status: ClientStatus) -> (&'static str, egui::Color32) {
-    match status {
-        ClientStatus::Online => (t("Online"), COLOR_GOOD),
-        ClientStatus::Stale => (t("Stale"), COLOR_WARN),
-        ClientStatus::Offline => (t("Offline"), COLOR_BAD),
-    }
-}
-
-fn client_commands_disabled_text(status: ClientStatus) -> &'static str {
-    match status {
-        ClientStatus::Online => "",
-        ClientStatus::Stale => t("Client stale - commands disabled"),
-        ClientStatus::Offline => t("Client offline - commands disabled"),
-    }
-}
-
-fn overview_metric(ui: &mut egui::Ui, label: &str, value: impl Into<String>) {
-    let value = value.into();
-    let palette = crate::theme::palette();
-    egui::Frame::default()
-        .fill(palette.bg)
-        .stroke(egui::Stroke::new(1.0, palette.border))
-        .corner_radius(6.0)
-        .inner_margin(egui::Margin::symmetric(10, 6))
-        .show(ui, |ui| {
-            ui.set_min_width(match label {
-                value if value == t("Selected") => 170.0,
-                value if value == t("Version") => 112.0,
-                _ => 82.0,
-            });
-            ui.horizontal(|ui| {
-                ui.label(crate::theme::muted_text(label));
-                ui.add(
-                    egui::Label::new(crate::theme::strong_body_text(value.clone()).size(13.0))
-                        .selectable(false),
-                )
-                .on_hover_text(value);
-            });
-        });
-}
-
-fn about_row(ui: &mut egui::Ui, label: &str, value: impl Into<String>) {
-    let value = value.into();
-    ui.horizontal(|ui| {
-        ui.set_min_height(22.0);
-        ui.add_sized(
-            [84.0, 18.0],
-            egui::Label::new(crate::theme::muted_text(label)),
-        );
-        ui.add_sized(
-            [ui.available_width(), 18.0],
-            egui::Label::new(crate::theme::body_text(value.clone())).selectable(true),
-        )
-        .on_hover_text(value);
-    });
-}
-
-fn form_label(ui: &mut egui::Ui, label: &str) {
-    ui.label(crate::theme::muted_text(label).strong());
-}
-
-fn parse_connection_settings(
-    ip: &str,
-    port_text: &str,
-    token: &str,
-) -> Result<(String, u16, String), String> {
-    let ip = ip.trim().to_string();
-    let port_text = port_text.trim();
-    let token = token.trim().to_string();
-
-    if ip.is_empty() {
-        return Err(t("Server IP cannot be empty.").to_string());
-    }
-    let port = match port_text.parse::<u16>() {
-        Ok(port) if port > 0 => port,
-        _ => return Err(t("Server port must be 1-65535.").to_string()),
-    };
-    if token.is_empty() {
-        return Err(t("Token cannot be empty.").to_string());
-    }
-
-    Ok((ip, port, token))
-}
-
-fn info_icon_button(ui: &mut egui::Ui, selected: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(STATUS_BAR_CONTENT_HEIGHT, STATUS_BAR_CONTENT_HEIGHT),
-        egui::Sense::click(),
-    );
-    if ui.is_rect_visible(rect) {
-        let icon_color = if response.hovered() || selected {
-            crate::theme::palette().text
-        } else {
-            crate::theme::palette().muted
-        };
-        let palette = crate::theme::palette();
-        let bg_color = if selected {
-            palette.widget_active
-        } else if response.hovered() {
-            palette.widget_idle
-        } else {
-            egui::Color32::TRANSPARENT
-        };
-        if bg_color != egui::Color32::TRANSPARENT {
-            ui.painter()
-                .rect_filled(rect, egui::CornerRadius::same(6), bg_color);
-        }
-
-        let center = rect.center();
-        ui.painter()
-            .circle_stroke(center, 8.0, egui::Stroke::new(1.5, icon_color));
-        ui.painter()
-            .circle_filled(egui::pos2(center.x, center.y - 4.2), 1.25, icon_color);
-        ui.painter().line_segment(
-            [
-                egui::pos2(center.x, center.y - 0.8),
-                egui::pos2(center.x, center.y + 5.0),
-            ],
-            egui::Stroke::new(1.6, icon_color),
-        );
-    }
-    response.on_hover_text(t("About"))
-}
-
-fn package_repository() -> &'static str {
-    if PACKAGE_REPOSITORY.trim().is_empty() {
-        FALLBACK_REPOSITORY
-    } else {
-        PACKAGE_REPOSITORY
-    }
-}
-
-fn client_location_label(client: &ClientInfo) -> String {
-    client
-        .location
-        .as_ref()
-        .map(|location| {
-            let label = location.label.trim();
-            if label.is_empty() {
-                format!("{:.2}, {:.2}", location.latitude(), location.longitude())
-            } else {
-                label.to_string()
-            }
-        })
-        .unwrap_or_else(|| "-".to_string())
-}
-
-fn client_os_label(os: &str) -> String {
-    let os = os.trim();
-    if os.is_empty() {
-        "💻 Unknown".to_string()
-    } else {
-        format!("{} {os}", client_os_emoji(os))
-    }
-}
-
-fn client_os_emoji(os: &str) -> &'static str {
-    let os = os.to_ascii_lowercase();
-    if os.contains("android") {
-        "🤖"
-    } else if os.contains("iphone") || os.contains("ipad") || os.contains("ios") {
-        "📱"
-    } else if os.contains("macos") || os.contains("darwin") || os.contains("os x") {
-        "🍎"
-    } else if os.contains("windows") || os.starts_with("win") {
-        "💻"
-    } else if os.contains("linux")
-        || os.contains("ubuntu")
-        || os.contains("debian")
-        || os.contains("fedora")
-        || os.contains("centos")
-        || os.contains("red hat")
-        || os.contains("arch")
-        || os.contains("alpine")
-        || os.contains("nixos")
-        || os.contains("mint")
-    {
-        "🐧"
-    } else {
-        "💻"
-    }
-}
-
-fn client_identity_label(client: &ClientInfo) -> String {
-    match (client.hostname.trim(), client.username.trim()) {
-        ("", "") => client.id.clone(),
-        (hostname, "") => hostname.to_string(),
-        ("", username) => username.to_string(),
-        (hostname, username) => format!("{hostname} / {username}"),
-    }
-}
-
-fn client_online_notice(client: &ClientInfo) -> (String, String) {
-    let title = format!("{} is online", client_identity_label(client));
-    let detail = if client.peer_addr.trim().is_empty() {
-        client.id.clone()
-    } else {
-        format!("{} - {}", client.id, client.peer_addr)
-    };
-    (title, detail)
 }
 
 impl AdminApp {
@@ -822,8 +255,6 @@ impl AdminApp {
                 rdl_version::display_version()
             )),
             timestamped_log(startup_config_notice),
-            #[cfg(debug_assertions)]
-            timestamped_log("中文日志测试：Activity 中文显示正常。"),
         ];
         Self {
             config,
@@ -843,9 +274,10 @@ impl AdminApp {
             file_manager_windows: Vec::new(),
             desktop_windows: Vec::new(),
             camera_windows: Vec::new(),
+            video_decode_workers: VideoDecodeWorkers::default(),
             audio_windows: Vec::new(),
             audio_udp_sessions: HashMap::new(),
-            audio_udp_next_stream_id: now_epoch_ms() as u64,
+            audio_udp_next_stream_id: initial_stream_id(),
             terminal_windows: Vec::new(),
             proxy_windows: Vec::new(),
             chat_windows: Vec::new(),
@@ -1005,6 +437,23 @@ impl AdminApp {
                         image_height,
                         format,
                         bytes,
+                    };
+                    match source {
+                        VideoSource::RemoteDesktop => {
+                            latest_desktop_video_frames.insert(client_id, frame);
+                        }
+                        VideoSource::Camera => {
+                            latest_camera_video_frames.insert(client_id, frame);
+                        }
+                    }
+                }
+                AdminEvent::VideoFrameReady {
+                    client_id,
+                    source,
+                    coalescer,
+                } => {
+                    let Some(frame) = coalescer.take(&client_id, &source) else {
+                        continue;
                     };
                     match source {
                         VideoSource::RemoteDesktop => {
@@ -1246,43 +695,6 @@ impl AdminApp {
         }
     }
 
-    fn render_about_window(&mut self, ctx: &egui::Context) {
-        if !self.about_open {
-            return;
-        }
-
-        let mut open = self.about_open;
-        let mut close_requested = false;
-        egui::Window::new(t("About"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(420.0)
-            .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new("rust-desk-light admin")
-                        .size(18.0)
-                        .color(crate::theme::palette().text)
-                        .strong(),
-                );
-                ui.add_space(6.0);
-                about_row(ui, t("Version"), rdl_version::display_version());
-                about_row(ui, t("Author"), PACKAGE_AUTHORS);
-                about_row(ui, t("Repository"), package_repository());
-                about_row(ui, t("License"), PACKAGE_LICENSE);
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button(t("Copy repository")).clicked() {
-                        ui.ctx().copy_text(package_repository().to_string());
-                    }
-                    if ui.button(t("Close")).clicked() {
-                        close_requested = true;
-                    }
-                });
-            });
-        self.about_open = open && !close_requested;
-    }
-
     fn handle_pending_audio_frame(&mut self, client_id: &str, frame: PendingAudioFrame) {
         match frame.source {
             AudioSource::AudioListen => match live_control::audio_listen::decode_audio_frame(
@@ -1358,187 +770,11 @@ impl AdminApp {
             .unwrap_or(false)
     }
 
-    fn spawn_desktop_frame_decode(&self, client_id: String, payload: String) {
-        let sink = AdminEventSink::new(
-            self.event_tx.clone(),
-            Some(self.repaint_handle.clone()),
-            None,
-        );
-        thread::spawn(move || {
-            let decode_started = Instant::now();
-            let result = live_control::remote_desktop::decode_frame_payload(&payload);
-            sink.send(AdminEvent::DecodedDesktopFrame {
-                client_id,
-                result,
-                decode_ms: Some(decode_started.elapsed().as_millis()),
-            });
-        });
-    }
-
-    fn spawn_camera_frame_decode(&self, client_id: String, payload: String) {
-        let sink = AdminEventSink::new(
-            self.event_tx.clone(),
-            Some(self.repaint_handle.clone()),
-            None,
-        );
-        thread::spawn(move || {
-            let decode_started = Instant::now();
-            let result = live_control::camera::decode_frame_payload(&payload);
-            sink.send(AdminEvent::DecodedCameraFrame {
-                client_id,
-                result,
-                decode_ms: Some(decode_started.elapsed().as_millis()),
-            });
-        });
-    }
-
-    fn spawn_video_frame_decode(
-        &self,
-        client_id: String,
-        source: VideoSource,
-        frame: PendingVideoFrame,
-    ) {
-        let sink = AdminEventSink::new(
-            self.event_tx.clone(),
-            Some(self.repaint_handle.clone()),
-            None,
-        );
-        thread::spawn(move || {
-            let decode_started = Instant::now();
-            match source {
-                VideoSource::RemoteDesktop => {
-                    let result = live_control::remote_desktop::decode_video_frame(
-                        frame.seq,
-                        frame.source_width,
-                        frame.source_height,
-                        frame.image_width,
-                        frame.image_height,
-                        frame.format,
-                        frame.bytes,
-                    );
-                    sink.send(AdminEvent::DecodedDesktopFrame {
-                        client_id,
-                        result,
-                        decode_ms: Some(decode_started.elapsed().as_millis()),
-                    });
-                }
-                VideoSource::Camera => {
-                    let result = live_control::camera::decode_video_frame(
-                        frame.seq,
-                        frame.image_width,
-                        frame.image_height,
-                        frame.format,
-                        frame.bytes,
-                    );
-                    sink.send(AdminEvent::DecodedCameraFrame {
-                        client_id,
-                        result,
-                        decode_ms: Some(decode_started.elapsed().as_millis()),
-                    });
-                }
-            }
-        });
-    }
-
     fn push_log(&mut self, line: impl Into<String>) {
         let line = timestamped_log(line);
         eprintln!("{line}");
         self.log_lines.push(line);
         prune_activity_logs(&mut self.log_lines);
-    }
-
-    fn push_client_online_toast(&mut self, title: String, detail: String) {
-        self.push_log(format!("client online: {title}"));
-        self.client_online_toasts.push_back(ClientOnlineToast {
-            title,
-            detail,
-            created_at: Instant::now(),
-        });
-        while self.client_online_toasts.len() > MAX_CLIENT_ONLINE_TOASTS {
-            self.client_online_toasts.pop_front();
-        }
-    }
-
-    fn merge_clients(&mut self, clients: Vec<ClientInfo>) {
-        let notify_online_changes = self.client_list_initialized;
-        let online_ids: HashSet<String> = clients.iter().map(|client| client.id.clone()).collect();
-        let mut online_notices = Vec::new();
-        for client in clients {
-            if let Some(existing) = self.clients.iter_mut().find(|row| row.info.id == client.id) {
-                let was_online = existing.status == ClientStatus::Online;
-                existing.info = client;
-                existing.status = ClientStatus::Online;
-                if !was_online {
-                    online_notices.push(client_online_notice(&existing.info));
-                }
-            } else {
-                online_notices.push(client_online_notice(&client));
-                self.clients.push(ClientRow {
-                    info: client,
-                    status: ClientStatus::Online,
-                });
-            }
-        }
-
-        for row in &mut self.clients {
-            if !online_ids.contains(&row.info.id) && row.status != ClientStatus::Stale {
-                row.status = ClientStatus::Offline;
-            }
-        }
-
-        if notify_online_changes {
-            for (title, detail) in online_notices {
-                self.push_client_online_toast(title, detail);
-            }
-        }
-        self.client_list_initialized = true;
-    }
-
-    fn filtered_clients(&self) -> Vec<ClientRow> {
-        let filter = self.client_filter.trim().to_ascii_lowercase();
-        self.clients
-            .iter()
-            .filter(|row| {
-                if filter.is_empty() {
-                    return true;
-                }
-                row.info.id.to_ascii_lowercase().contains(&filter)
-                    || row.info.fingerprint.to_ascii_lowercase().contains(&filter)
-                    || row.info.hostname.to_ascii_lowercase().contains(&filter)
-                    || row.info.username.to_ascii_lowercase().contains(&filter)
-                    || row.info.os.to_ascii_lowercase().contains(&filter)
-                    || client_location_label(&row.info)
-                        .to_ascii_lowercase()
-                        .contains(&filter)
-            })
-            .cloned()
-            .collect()
-    }
-
-    fn online_client_count(&self) -> usize {
-        self.clients
-            .iter()
-            .filter(|row| row.status == ClientStatus::Online)
-            .count()
-    }
-
-    fn client_status_for(&self, client_id: &str) -> Option<ClientStatus> {
-        self.clients
-            .iter()
-            .find(|row| row.info.id == client_id)
-            .map(|row| row.status)
-    }
-
-    fn selected_client_label(&self) -> String {
-        let Some(selected_id) = self.selected_client_id.as_deref() else {
-            return "None".to_string();
-        };
-
-        self.clients
-            .iter()
-            .find(|row| row.info.id == selected_id)
-            .map(|row| client_identity_label(&row.info))
-            .unwrap_or_else(|| selected_id.to_string())
     }
 
     fn send_command(&mut self, client_id: &str, command: CommandKind) {
@@ -1702,157 +938,6 @@ impl AdminApp {
             username,
             self.audio_playback_registry.clone(),
         );
-    }
-
-    fn next_audio_udp_stream_id(&mut self) -> u64 {
-        let stream_id = self.audio_udp_next_stream_id.max(1);
-        self.audio_udp_next_stream_id = self.audio_udp_next_stream_id.saturating_add(1);
-        stream_id
-    }
-
-    fn start_audio_udp_receive_session(
-        &mut self,
-        client_id: &str,
-        source: AudioSource,
-    ) -> Option<AudioUdpSession> {
-        let server_addr = format!("{}:{}", self.config.ip, self.config.port);
-        let socket = match UdpSocket::bind("0.0.0.0:0") {
-            Ok(socket) => socket,
-            Err(error) => {
-                self.push_log(format!("audio udp bind failed: {error}"));
-                return None;
-            }
-        };
-        if let Err(error) =
-            socket.set_read_timeout(Some(Duration::from_millis(AUDIO_UDP_RECV_TIMEOUT_MS)))
-        {
-            self.push_log(format!("audio udp timeout setup failed: {error}"));
-            return None;
-        }
-        let stream_id = self.next_audio_udp_stream_id();
-        let stop = Arc::new(AtomicBool::new(false));
-        let event_sink = AdminEventSink::new(
-            self.event_tx.clone(),
-            Some(self.repaint_handle.clone()),
-            Some(self.audio_playback_registry.clone()),
-        );
-        let worker_stop = stop.clone();
-        let worker_client_id = client_id.to_string();
-        let worker_server_addr = server_addr.clone();
-        let worker_source = source.clone();
-        thread::spawn(move || {
-            audio_udp_receive_loop(
-                socket,
-                worker_server_addr,
-                worker_client_id,
-                worker_source,
-                stream_id,
-                worker_stop,
-                event_sink,
-            );
-        });
-        self.push_log(format!(
-            "audio udp session started client={client_id} source={} stream={stream_id} relay={server_addr}",
-            source.as_str()
-        ));
-        Some(AudioUdpSession { stream_id, stop })
-    }
-
-    fn start_audio_udp_session(&mut self, client_id: &str) -> Option<u64> {
-        self.stop_audio_udp_session(client_id);
-        let session = self.start_audio_udp_receive_session(client_id, AudioSource::AudioListen)?;
-        let stream_id = session.stream_id;
-        self.audio_udp_sessions
-            .insert(client_id.to_string(), session);
-        Some(stream_id)
-    }
-
-    fn stop_audio_udp_session(&mut self, client_id: &str) {
-        if let Some(session) = self.audio_udp_sessions.remove(client_id) {
-            session.stop.store(true, Ordering::Relaxed);
-            self.push_log(format!(
-                "audio udp session stopped client={client_id} stream={}",
-                session.stream_id
-            ));
-        }
-    }
-
-    fn stop_all_audio_udp_sessions(&mut self) {
-        let client_ids: Vec<String> = self.audio_udp_sessions.keys().cloned().collect();
-        for client_id in client_ids {
-            self.stop_audio_udp_session(&client_id);
-        }
-    }
-
-    fn start_voice_udp_session(&mut self, client_id: &str) -> Option<u64> {
-        self.stop_voice_udp_session(client_id);
-        let session = self.start_audio_udp_receive_session(client_id, AudioSource::VoiceChat)?;
-        let stream_id = session.stream_id;
-        self.voice_udp_sessions
-            .insert(client_id.to_string(), session);
-        Some(stream_id)
-    }
-
-    fn stop_voice_udp_session(&mut self, client_id: &str) {
-        if let Some(session) = self.voice_udp_sessions.remove(client_id) {
-            session.stop.store(true, Ordering::Relaxed);
-            self.push_log(format!(
-                "voice udp session stopped client={client_id} stream={}",
-                session.stream_id
-            ));
-        }
-    }
-
-    fn stop_all_voice_udp_sessions(&mut self) {
-        let client_ids: Vec<String> = self.voice_udp_sessions.keys().cloned().collect();
-        for client_id in client_ids {
-            self.stop_voice_udp_session(&client_id);
-        }
-    }
-
-    fn set_voice_udp_sender(&mut self, client_id: &str, detail: &str) -> Result<(), String> {
-        let endpoint = AudioUdpEndpoint::from_payload(detail)?
-            .ok_or_else(|| "voice chat udp transport unavailable".to_string())?;
-        self.set_voice_udp_sender_endpoint(client_id, &endpoint)
-    }
-
-    fn set_voice_udp_sender_endpoint(
-        &mut self,
-        client_id: &str,
-        endpoint: &AudioUdpEndpoint,
-    ) -> Result<(), String> {
-        let sender = AudioUdpSender::connect(endpoint)?;
-        self.voice_udp_endpoints
-            .lock()
-            .map_err(|_| "voice udp endpoint map is poisoned".to_string())?
-            .insert(client_id.to_string(), endpoint.clone());
-        self.voice_udp_senders
-            .lock()
-            .map_err(|_| "voice udp sender map is poisoned".to_string())?
-            .insert(client_id.to_string(), sender);
-        self.push_log(format!(
-            "voice udp sender ready client={client_id} stream={} relay={}:{}",
-            endpoint.stream_id, endpoint.host, endpoint.port
-        ));
-        Ok(())
-    }
-
-    fn remove_voice_udp_sender(&mut self, client_id: &str) {
-        if let Ok(mut senders) = self.voice_udp_senders.lock() {
-            senders.remove(client_id);
-        }
-        if let Ok(mut endpoints) = self.voice_udp_endpoints.lock() {
-            endpoints.remove(client_id);
-        }
-    }
-
-    fn clear_voice_udp_senders(&mut self) {
-        if let Ok(mut senders) = self.voice_udp_senders.lock() {
-            senders.clear();
-        }
-        if let Ok(mut endpoints) = self.voice_udp_endpoints.lock() {
-            endpoints.clear();
-        }
     }
 
     fn open_session_command_window(&mut self, client_id: &str, command: CommandKind) {
