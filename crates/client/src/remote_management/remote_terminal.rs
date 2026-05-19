@@ -355,7 +355,7 @@ where
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
-                    let chunk = String::from_utf8_lossy(&buffer[..count]).to_string();
+                    let chunk = crate::text_decode::command_output(&buffer[..count]);
                     if tx.send((stream, chunk)).is_err() {
                         break;
                     }
@@ -401,8 +401,8 @@ fn command_output_text(
     stderr: Vec<u8>,
     max_lines: usize,
 ) -> String {
-    let stdout = String::from_utf8_lossy(&stdout);
-    let stderr = String::from_utf8_lossy(&stderr);
+    let stdout = crate::text_decode::command_output(&stdout);
+    let stderr = crate::text_decode::command_output(&stderr);
     let mut text = String::new();
     if !success {
         text.push_str(program);

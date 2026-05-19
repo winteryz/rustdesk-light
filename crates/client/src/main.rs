@@ -35,6 +35,7 @@ mod session;
 mod stream_state;
 mod support;
 mod system_info;
+mod text_decode;
 mod user_interaction;
 #[cfg(feature = "gui")]
 mod windowing;

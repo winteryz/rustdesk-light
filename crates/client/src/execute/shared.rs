@@ -87,8 +87,8 @@ pub(super) fn run_process(program: &str, args: &[String], working_dir: Option<&s
 }
 
 fn command_output_text(success: bool, stdout: Vec<u8>, stderr: Vec<u8>) -> String {
-    let stdout = String::from_utf8_lossy(&stdout);
-    let stderr = String::from_utf8_lossy(&stderr);
+    let stdout = crate::text_decode::command_output(&stdout);
+    let stderr = crate::text_decode::command_output(&stderr);
     let mut lines = vec![format!(
         "status={}",
         if success { "success" } else { "failed" }
