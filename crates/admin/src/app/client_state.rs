@@ -95,7 +95,7 @@ pub(super) fn client_online_notice(client: &ClientInfo) -> (String, String) {
 pub(super) fn client_os_label(os: &str) -> String {
     let os = os.trim();
     if os.is_empty() {
-        "馃捇 Unknown".to_string()
+        "💻 Unknown".to_string()
     } else {
         format!("{} {os}", client_os_emoji(os))
     }
@@ -104,13 +104,13 @@ pub(super) fn client_os_label(os: &str) -> String {
 fn client_os_emoji(os: &str) -> &'static str {
     let os = os.to_ascii_lowercase();
     if os.contains("android") {
-        "馃"
+        "🤖"
     } else if os.contains("iphone") || os.contains("ipad") || os.contains("ios") {
-        "馃摫"
+        "📱"
     } else if os.contains("macos") || os.contains("darwin") || os.contains("os x") {
-        "馃崕"
+        "🍎"
     } else if os.contains("windows") || os.starts_with("win") {
-        "馃捇"
+        "🪟"
     } else if os.contains("linux")
         || os.contains("ubuntu")
         || os.contains("debian")
@@ -122,8 +122,8 @@ fn client_os_emoji(os: &str) -> &'static str {
         || os.contains("nixos")
         || os.contains("mint")
     {
-        "馃惂"
+        "🐧"
     } else {
-        "馃捇"
+        "💻"
     }
 }
