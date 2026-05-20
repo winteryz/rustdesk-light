@@ -699,7 +699,7 @@ fn render_toolbar(
             if ui
                 .add_enabled(
                     is_running,
-                    egui::Checkbox::new(&mut keyboard, t("Keyboard Control")),
+                    egui::Checkbox::new(&mut keyboard, t("Keyboard")),
                 )
                 .changed()
             {

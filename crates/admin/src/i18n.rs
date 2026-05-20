@@ -311,7 +311,7 @@ fn zh(key: &'static str) -> &'static str {
         "Item" => "项目",
         "Item name" => "项目名称",
         "Jump" => "跳转",
-        "Keyboard Control" => "键盘控制",
+        "Keyboard" => "键盘",
         "Killed by admin" => "管理员已结束",
         "Kill Process" => "结束进程",
         "Known" => "已知",
