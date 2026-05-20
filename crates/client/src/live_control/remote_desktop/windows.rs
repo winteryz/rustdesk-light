@@ -505,6 +505,7 @@ pub(crate) mod input {
             inputs.push(key_input(*modifier, KEYEVENTF_KEYUP));
         }
         if let Err(error) = send_inputs(&inputs) {
+            let _ = send_inputs(&key_release_inputs(vk, &modifiers));
             return format!("remote_desktop_error\nmessage={error}");
         }
         format!("remote_desktop_input\nmessage=key {name}")
@@ -548,6 +549,14 @@ pub(crate) mod input {
                 },
             },
         }
+    }
+
+    fn key_release_inputs(vk: VIRTUAL_KEY, modifiers: &[VIRTUAL_KEY]) -> Vec<INPUT> {
+        let mut inputs = vec![key_input(vk, KEYEVENTF_KEYUP)];
+        for modifier in modifiers.iter().rev() {
+            inputs.push(key_input(*modifier, KEYEVENTF_KEYUP));
+        }
+        inputs
     }
 
     fn unicode_input(unit: u16, flags: u32) -> INPUT {

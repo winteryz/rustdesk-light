@@ -315,6 +315,7 @@ pub(crate) mod capture {
 }
 
 pub(crate) mod input {
+    use std::os::unix::process::CommandExt;
     use std::process::Command;
 
     use super::super::KeyModifiers;
@@ -362,15 +363,20 @@ pub(crate) mod input {
             args.push("keydown".to_string());
             args.push((*modifier).to_string());
         }
-        args.push("key".to_string());
-        args.push(key_name);
+        args.push("keydown".to_string());
+        args.push(key_name.clone());
+        args.push("keyup".to_string());
+        args.push(key_name.clone());
         for modifier in modifiers.iter().rev() {
             args.push("keyup".to_string());
             args.push((*modifier).to_string());
         }
         match run_xdotool_owned(&args) {
             Ok(()) => format!("remote_desktop_input\nmessage=key {name}"),
-            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+            Err(error) => {
+                let _ = release_key_combo(&key_name, &modifiers);
+                format!("remote_desktop_error\nmessage={error}")
+            }
         }
     }
 
@@ -447,6 +453,15 @@ pub(crate) mod input {
         keys
     }
 
+    fn release_key_combo(key_name: &str, modifiers: &[&str]) -> Result<(), String> {
+        let mut args = vec!["keyup".to_string(), key_name.to_string()];
+        for modifier in modifiers.iter().rev() {
+            args.push("keyup".to_string());
+            args.push((*modifier).to_string());
+        }
+        run_xdotool_owned(&args)
+    }
+
     fn run_xdotool(args: &[&str]) -> Result<(), String> {
         if std::env::var("WAYLAND_DISPLAY").is_ok() && std::env::var("DISPLAY").is_err() {
             return Err(
@@ -454,8 +469,10 @@ pub(crate) mod input {
                     .to_string(),
             );
         }
-        let output = Command::new("xdotool")
-            .args(args)
+        let mut command = Command::new("xdotool");
+        command.args(args);
+        command.process_group(0);
+        let output = command
             .output()
             .map_err(|error| format!("xdotool failed: {error}; install xdotool for X11 input"))?;
         if output.status.success() {

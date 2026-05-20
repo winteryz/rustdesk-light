@@ -348,15 +348,24 @@ pub(crate) mod input {
         let source = event_source()?;
         let key_code = key_code(name).ok_or_else(|| format!("unsupported key {name}"))?;
         let modifiers = modifier_key_codes(modifiers);
-        for modifier in &modifiers {
-            post_keyboard_event(&source, *modifier, true)?;
+        let result = (|| {
+            for modifier in &modifiers {
+                post_keyboard_event(&source, *modifier, true)?;
+            }
+            post_keyboard_event(&source, key_code, true)?;
+            post_keyboard_event(&source, key_code, false)?;
+            for modifier in modifiers.iter().rev() {
+                post_keyboard_event(&source, *modifier, false)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = post_keyboard_event(&source, key_code, false);
+            for modifier in modifiers.iter().rev() {
+                let _ = post_keyboard_event(&source, *modifier, false);
+            }
         }
-        post_keyboard_event(&source, key_code, true)?;
-        post_keyboard_event(&source, key_code, false)?;
-        for modifier in modifiers.iter().rev() {
-            post_keyboard_event(&source, *modifier, false)?;
-        }
-        Ok(())
+        result
     }
 
     fn post_text(text: &str) -> Result<(), String> {

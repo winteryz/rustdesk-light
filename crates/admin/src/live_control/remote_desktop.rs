@@ -35,6 +35,7 @@ pub(crate) struct RemoteDesktopWindow {
     mouse_control: Arc<AtomicBool>,
     mouse_drag: Arc<Mutex<MouseDragState>>,
     keyboard_control: Arc<AtomicBool>,
+    keyboard_shortcuts: Arc<Mutex<KeyboardShortcutState>>,
     last_mouse_move: Arc<Mutex<Instant>>,
     last_mouse_target: Arc<Mutex<Option<(i32, i32)>>>,
     running: Arc<AtomicBool>,
@@ -155,6 +156,9 @@ fn stop_capture(window: &mut RemoteDesktopWindow, notice: &str) {
     if let Ok(mut drag) = window.mouse_drag.lock() {
         *drag = MouseDragState::default();
     }
+    if let Ok(mut shortcuts) = window.keyboard_shortcuts.lock() {
+        *shortcuts = KeyboardShortcutState::default();
+    }
     window.pending_since = None;
     window.stats.fps = 0.0;
     window.stats.latency_ms = None;
@@ -201,6 +205,12 @@ enum DesktopStatus {
 struct MouseDragState {
     active: bool,
     last_point: Option<(i32, i32)>,
+}
+
+#[derive(Default)]
+struct KeyboardShortcutState {
+    copy_active: bool,
+    cut_active: bool,
 }
 
 impl MouseDragState {
@@ -263,6 +273,7 @@ pub(crate) fn open_window(
         mouse_control: Arc::new(AtomicBool::new(false)),
         mouse_drag: Arc::new(Mutex::new(MouseDragState::default())),
         keyboard_control: Arc::new(AtomicBool::new(false)),
+        keyboard_shortcuts: Arc::new(Mutex::new(KeyboardShortcutState::default())),
         last_mouse_move: Arc::new(Mutex::new(Instant::now())),
         last_mouse_target: Arc::new(Mutex::new(None)),
         running: Arc::new(AtomicBool::new(false)),
@@ -415,6 +426,7 @@ pub(crate) fn render_windows(
         let mouse_control = window.mouse_control.clone();
         let mouse_drag = window.mouse_drag.clone();
         let keyboard_control = window.keyboard_control.clone();
+        let keyboard_shortcuts = window.keyboard_shortcuts.clone();
         let last_mouse_move = window.last_mouse_move.clone();
         let last_mouse_target = window.last_mouse_target.clone();
         let running = window.running.clone();
@@ -458,6 +470,7 @@ pub(crate) fn render_windows(
                                 &mouse_control,
                                 &mouse_drag,
                                 &keyboard_control,
+                                &keyboard_shortcuts,
                                 &last_mouse_move,
                                 &last_mouse_target,
                                 &notice,
@@ -790,6 +803,7 @@ fn render_frame(
     mouse_control: &Arc<AtomicBool>,
     mouse_drag: &Arc<Mutex<MouseDragState>>,
     keyboard_control: &Arc<AtomicBool>,
+    keyboard_shortcuts: &Arc<Mutex<KeyboardShortcutState>>,
     last_mouse_move: &Arc<Mutex<Instant>>,
     last_mouse_target: &Arc<Mutex<Option<(i32, i32)>>>,
     placeholder: &str,
@@ -817,7 +831,7 @@ fn render_frame(
         if response.clicked() && keyboard_control.load(Ordering::Relaxed) {
             response.request_focus();
         }
-        queue_keyboard_events(ui, &response, keyboard_control, queued);
+        queue_keyboard_events(ui, &response, keyboard_control, keyboard_shortcuts, queued);
         queue_mouse_events(
             ui,
             &response,
@@ -972,12 +986,40 @@ fn queue_keyboard_events(
     ui: &egui::Ui,
     response: &egui::Response,
     keyboard_control: &Arc<AtomicBool>,
+    keyboard_shortcuts: &Arc<Mutex<KeyboardShortcutState>>,
     queued: &Arc<Mutex<Vec<String>>>,
 ) {
     if !keyboard_control.load(Ordering::Relaxed) || !response.has_focus() {
+        clear_keyboard_shortcuts(keyboard_shortcuts);
         return;
     }
     let events = ui.input(|input| input.events.clone());
+    let modifier_down = ui.input(|input| input.modifiers.ctrl || input.modifiers.command);
+    if !modifier_down {
+        clear_keyboard_shortcuts(keyboard_shortcuts);
+    }
+    let has_raw_copy_key = events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::C,
+                pressed: true,
+                modifiers,
+                ..
+            } if modifiers.ctrl || modifiers.command
+        )
+    });
+    let has_raw_cut_key = events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::X,
+                pressed: true,
+                modifiers,
+                ..
+            } if modifiers.ctrl || modifiers.command
+        )
+    });
     for event in events {
         match event {
             egui::Event::Text(text) | egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
@@ -991,16 +1033,20 @@ fn queue_keyboard_events(
                 }
             }
             egui::Event::Copy => {
-                queue_ui_payload(
-                    queued,
-                    keyboard_key_payload("c", false, egui::Modifiers::COMMAND),
-                );
+                if !has_raw_copy_key && take_semantic_shortcut(keyboard_shortcuts, "copy") {
+                    queue_ui_payload(
+                        queued,
+                        keyboard_key_payload("c", false, egui::Modifiers::COMMAND),
+                    );
+                }
             }
             egui::Event::Cut => {
-                queue_ui_payload(
-                    queued,
-                    keyboard_key_payload("x", false, egui::Modifiers::COMMAND),
-                );
+                if !has_raw_cut_key && take_semantic_shortcut(keyboard_shortcuts, "cut") {
+                    queue_ui_payload(
+                        queued,
+                        keyboard_key_payload("x", false, egui::Modifiers::COMMAND),
+                    );
+                }
             }
             egui::Event::Key {
                 key,
@@ -1009,7 +1055,7 @@ fn queue_keyboard_events(
                 modifiers,
                 ..
             } => {
-                if !pressed || !keyboard_key_should_send(key, modifiers) {
+                if !pressed || repeat || !keyboard_key_should_send(key, modifiers) {
                     continue;
                 }
                 if let Some(name) = keyboard_key_name(key) {
@@ -1018,6 +1064,32 @@ fn queue_keyboard_events(
             }
             _ => {}
         }
+    }
+}
+
+fn clear_keyboard_shortcuts(keyboard_shortcuts: &Arc<Mutex<KeyboardShortcutState>>) {
+    if let Ok(mut shortcuts) = keyboard_shortcuts.lock() {
+        *shortcuts = KeyboardShortcutState::default();
+    }
+}
+
+fn take_semantic_shortcut(
+    keyboard_shortcuts: &Arc<Mutex<KeyboardShortcutState>>,
+    shortcut: &str,
+) -> bool {
+    let Ok(mut shortcuts) = keyboard_shortcuts.lock() else {
+        return true;
+    };
+    match shortcut {
+        "copy" if !shortcuts.copy_active => {
+            shortcuts.copy_active = true;
+            true
+        }
+        "cut" if !shortcuts.cut_active => {
+            shortcuts.cut_active = true;
+            true
+        }
+        _ => false,
     }
 }
 
