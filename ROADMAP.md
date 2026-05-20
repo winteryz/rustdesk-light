@@ -15,9 +15,10 @@
 - Admin, server, client, shared protocol, shared config, and release build wiring are in place.
 - Admin can list clients, run commands, view results, and open live/file/terminal tools.
 - Client supports system info, clipboard, process/window/startup/driver/registry views, event log, and performance snapshot.
+- Client supports scheduled task creation for startup and daily command execution.
 - File manager supports local/remote navigation, upload/download, directory transfer, native file pickers, transfer status, cancel, delete, rename, and new folder.
 - Remote terminal supports cwd, history, streaming output, cancellation, copy, and safe close.
-- Remote desktop supports screen selection, TCP video frames, mouse move/click, and text input.
+- Remote desktop supports screen selection, TCP video frames, mouse move/click, text input, and raw keyboard events for shortcuts, arrows, function keys, and modifiers.
 - Camera, audio listen, and voice chat are working.
 - Admin supports saved settings preferences, currently including theme and language, with English and Chinese UI resources.
 - Runtime config files are initialized automatically and can be overridden by startup args.
@@ -41,7 +42,7 @@
 
 - [ ] Sync clipboard inside remote-control sessions.
 - [ ] Show a local visible "being remotely controlled" indicator on the client.
-- [ ] Support raw keyboard events for shortcuts, arrows, function keys, and modifiers.
+- [x] Support raw keyboard events for shortcuts, arrows, function keys, and modifiers.
 
 ### Admin UI
 
@@ -65,8 +66,6 @@
 
 - Move To Group.
 - Clone Client Settings.
-- Create Task.
-- Command Preset.
 - Plugin Manager.
 
 ## Later

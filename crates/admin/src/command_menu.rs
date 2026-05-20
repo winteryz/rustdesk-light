@@ -394,14 +394,6 @@ fn render_execute(
             CommandKind::CreateTask,
             send_command,
         );
-        ui.separator();
-        menu_command(
-            ui,
-            client_id,
-            "Command Preset",
-            CommandKind::CommandPreset,
-            send_command,
-        );
     });
 }
 
@@ -553,5 +545,6 @@ fn command_is_implemented(command: &CommandKind) -> bool {
             | CommandKind::ExecuteFile
             | CommandKind::ExecuteCode
             | CommandKind::ExecuteStaticCommand
+            | CommandKind::CreateTask
     )
 }

@@ -60,8 +60,13 @@ pub fn handle_command(command: &CommandKind, payload: &str, gui_mode: bool) -> C
         CommandKind::ExecuteFile
         | CommandKind::ExecuteCode
         | CommandKind::ExecuteStaticCommand
-        | CommandKind::CreateTask
-        | CommandKind::CommandPreset => crate::execute::handle(command, payload),
+        | CommandKind::CreateTask => crate::execute::handle(command, payload),
+        CommandKind::CommandPreset => {
+            return CommandReply::rejected(
+                "command_preset\nstatus=unsupported\nmessage=command presets were removed"
+                    .to_string(),
+            )
+        }
         _ => format!(
             "TODO: {} accepted as planned stub; payload='{}'",
             command.as_str(),

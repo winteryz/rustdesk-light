@@ -383,12 +383,15 @@ fn render_performance_monitor_detail(
 }
 
 fn performance_monitor_pending_detail(detail: &str) -> bool {
-    matches!(
-        detail.trim(),
-        "Waiting for client result..."
-            | "Refreshing command result..."
-            | "Auto refreshing performance monitor..."
-    )
+    let detail = detail.trim();
+    detail == t("Waiting for client result...")
+        || detail == t("Refreshing...")
+        || matches!(
+            detail,
+            "Waiting for client result..."
+                | "Refreshing command result..."
+                | "Auto refreshing performance monitor..."
+        )
 }
 
 fn render_performance_metric_bars(ui: &mut egui::Ui, metrics: &PerformanceMetrics) {

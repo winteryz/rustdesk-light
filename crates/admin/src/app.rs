@@ -981,7 +981,7 @@ impl AdminApp {
             username,
             command,
             status: CommandResultStatus::Pending,
-            detail: "Waiting for client result...".to_string(),
+            detail: t("Waiting for client result...").to_string(),
             open: true,
             close_requested: Arc::new(AtomicBool::new(false)),
             refresh_requested: Arc::new(AtomicBool::new(false)),

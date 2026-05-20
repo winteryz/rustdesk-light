@@ -739,11 +739,11 @@ fn render_transfer_buttons(
 ) {
     ui.vertical_centered(|ui| {
         ui.set_min_size(ui.available_size());
-        ui.add_space(150.0);
+        ui.add_space(TRANSFER_TABLE_HEIGHT);
         if ui
             .add_enabled(
                 !is_pending(status),
-                egui::Button::new("Down ->")
+                egui::Button::new(t("Download"))
                     .min_size(egui::vec2(TRANSFER_BUTTON_WIDTH, TOOLBAR_CONTROL_HEIGHT)),
             )
             .on_hover_text(t("Download selected remote file or folder"))
@@ -778,11 +778,11 @@ fn render_transfer_buttons(
                 ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
             }
         }
-        ui.add_space(8.0);
+        ui.add_space(crate::theme::PANEL_MARGIN);
         if ui
             .add_enabled(
                 !is_pending(status),
-                egui::Button::new("<- Up")
+                egui::Button::new(t("Upload"))
                     .min_size(egui::vec2(TRANSFER_BUTTON_WIDTH, TOOLBAR_CONTROL_HEIGHT)),
             )
             .on_hover_text(t("Upload selected local file or folder"))
