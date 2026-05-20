@@ -507,6 +507,7 @@ fn list_result(action: &str, message: &str, tasks: Vec<ManagedTask>) -> String {
     lines.join("\n")
 }
 
+#[cfg(target_os = "windows")]
 fn parse_task_row(line: &str) -> Option<ManagedTask> {
     let parts = line.split('\t').collect::<Vec<_>>();
     if parts.len() < 5 {
