@@ -1,4 +1,6 @@
-use crate::support::{join_sections, run_command, run_first_available, run_powershell};
+use crate::support::{
+    join_sections, run_command, run_command_with_env, run_first_available, run_powershell,
+};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rdl_protocol::CommandKind;
 use std::fs;
@@ -840,12 +842,16 @@ fn performance_snapshot() -> String {
         join_sections(
             "performance_snapshot",
             vec![
-                run_command("uptime", &[], 5),
-                run_command("free", &["-m"], 10),
-                run_command("df", &["-h", "."], 10),
+                run_c_locale_command("uptime", &[], 5),
+                run_c_locale_command("free", &["-m"], 10),
+                run_c_locale_command("df", &["-h", "."], 10),
             ],
         )
     }
+}
+
+fn run_c_locale_command(program: &str, args: &[&str], max_lines: usize) -> String {
+    run_command_with_env(program, args, &[("LC_ALL", "C")], max_lines)
 }
 
 fn event_log_summary() -> String {

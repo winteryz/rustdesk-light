@@ -548,7 +548,7 @@ fn parse_windows_memory_percent(detail: &str) -> Option<f32> {
 
 fn parse_linux_memory_percent(detail: &str) -> Option<f32> {
     detail.lines().find_map(|line| {
-        let rest = line.trim_start().strip_prefix("Mem:")?;
+        let rest = parse_linux_memory_line_rest(line)?;
         let values = rest
             .split_whitespace()
             .filter_map(first_number)
@@ -557,6 +557,19 @@ fn parse_linux_memory_percent(detail: &str) -> Option<f32> {
         let used = *values.get(1)?;
         (total > 0.0).then_some(used * 100.0 / total)
     })
+}
+
+fn parse_linux_memory_line_rest(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for label in ["mem:", "mem："] {
+        if lower.starts_with(label) {
+            return trimmed.get(label.len()..);
+        }
+    }
+    ["内存:", "内存："]
+        .into_iter()
+        .find_map(|label| trimmed.strip_prefix(label))
 }
 
 fn parse_macos_memory_percent(detail: &str) -> Option<f32> {
@@ -583,15 +596,41 @@ fn parse_vm_stat_pages(detail: &str, label: &str) -> Option<f32> {
 }
 
 fn parse_df_disk_percent(detail: &str) -> Option<f32> {
-    let mut lines = detail.lines();
-    while lines
-        .next()
-        .is_some_and(|line| !line.split_whitespace().any(|cell| cell == "Filesystem"))
-    {}
-    lines.find_map(|line| {
-        line.split_whitespace()
-            .find_map(|cell| cell.strip_suffix('%').and_then(first_number))
+    let mut after_header = false;
+    detail.lines().find_map(|line| {
+        if is_df_header_line(line) {
+            after_header = true;
+            return None;
+        }
+        if !after_header && !looks_like_df_row(line) {
+            return None;
+        }
+        parse_df_row_percent(line)
     })
+}
+
+fn is_df_header_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.split_whitespace().any(|cell| cell == "filesystem")
+        || lower.contains("mounted on")
+        || line.split_whitespace().any(|cell| cell == "文件系统")
+        || line.contains("挂载点")
+}
+
+fn looks_like_df_row(line: &str) -> bool {
+    let cells = line.split_whitespace().collect::<Vec<_>>();
+    cells.len() >= 5
+        && cells
+            .iter()
+            .any(|cell| cell.strip_suffix('%').and_then(first_number).is_some())
+}
+
+fn parse_df_row_percent(line: &str) -> Option<f32> {
+    if !looks_like_df_row(line) {
+        return None;
+    }
+    line.split_whitespace()
+        .find_map(|cell| cell.strip_suffix('%').and_then(first_number))
 }
 
 fn first_number(value: &str) -> Option<f32> {
@@ -1729,6 +1768,32 @@ fn estimated_table_text_width(value: &str) -> f32 {
             }
         })
         .sum::<f32>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_localized_ubuntu_performance_snapshot() {
+        let detail = "\
+performance_snapshot:
+09:34:57 up 21 min,  1 user,  load average: 2.51, 1.92, 1.21
+total        used        free      shared  buff/cache   available
+内存：          1594         693         111          22         971         901
+交换：          3357         450        2907
+文件系统        容量  已用  可用 已用% 挂载点
+/dev/sda2        20G   16G  2.8G   86% /
+";
+
+        let metrics = parse_performance_metrics(detail);
+
+        assert!(metrics.cpu.is_some());
+        let memory = metrics.memory.expect("memory metric");
+        assert!((memory.percent - (693.0 * 100.0 / 1594.0)).abs() < 0.1);
+        let disk = metrics.disk.expect("disk metric");
+        assert!((disk.percent - 86.0).abs() < f32::EPSILON);
+    }
 }
 
 pub(super) fn command_title(command: &CommandKind) -> String {

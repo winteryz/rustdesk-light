@@ -12,18 +12,41 @@ pub fn run_command(program: &str, args: &[&str], max_lines: usize) -> String {
     run_command_timeout(program, args, max_lines, Duration::from_secs(12))
 }
 
+pub fn run_command_with_env(
+    program: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+    max_lines: usize,
+) -> String {
+    run_command_timeout_with_env(program, args, env, max_lines, Duration::from_secs(12))
+}
+
 pub fn run_command_timeout(
     program: &str,
     args: &[&str],
     max_lines: usize,
     timeout: Duration,
 ) -> String {
-    let mut child = match Command::new(program)
+    run_command_timeout_with_env(program, args, &[], max_lines, timeout)
+}
+
+fn run_command_timeout_with_env(
+    program: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+    max_lines: usize,
+    timeout: Duration,
+) -> String {
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return format!("{program} failed: {error}"),
     };
