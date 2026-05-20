@@ -29,29 +29,62 @@ fn render_status_bar(ui: &mut egui::Ui, result_status: &Arc<Mutex<String>>) {
     let (label, notice, color) = status_bar_state(&status);
 
     ui.set_min_height(26.0);
-    crate::theme::render_status_line(ui, &label, color, notice, |_| {});
+    crate::theme::render_status_line(ui, &label, color, &notice, |_| {});
 }
 
-fn status_bar_state(status: &str) -> (String, &'static str, egui::Color32) {
+fn status_bar_state(status: &str) -> (String, String, egui::Color32) {
     let status = status.trim();
     let palette = crate::theme::palette();
     if status.is_empty() || status == t("Ready") {
-        return (t("Ready").to_string(), t("Ready"), palette.muted);
+        return (
+            t("Ready").to_string(),
+            t("Ready").to_string(),
+            palette.muted,
+        );
     }
     if status == t("Running...") || status == t("Running") {
         return (
             t("Running").to_string(),
-            t("Waiting for client result"),
+            t("Waiting for client result").to_string(),
             palette.warn,
         );
     }
-    if status == t("Rejected") || status == t("Failed") {
-        return (status.to_string(), t("Command failed"), palette.bad);
+    if status == t("Rejected") || status.starts_with(&format!("{}:", t("Rejected"))) {
+        return (
+            t("Rejected").to_string(),
+            status_notice(status, t("Rejected"), t("Command failed")),
+            palette.bad,
+        );
+    }
+    if status == t("Failed") || status.starts_with(&format!("{}:", t("Failed"))) {
+        return (
+            t("Failed").to_string(),
+            status_notice(status, t("Failed"), t("Command failed")),
+            palette.bad,
+        );
     }
     if status == t("Completed") || status == t("Done") {
-        return (t("Done").to_string(), t("Result received"), palette.good);
+        return (
+            t("Done").to_string(),
+            t("Result received").to_string(),
+            palette.good,
+        );
     }
-    (status.to_string(), t("Result received"), palette.good)
+    (
+        status.to_string(),
+        t("Result received").to_string(),
+        palette.good,
+    )
+}
+
+fn status_notice(status: &str, prefix: &str, fallback: &str) -> String {
+    status
+        .strip_prefix(prefix)
+        .and_then(|value| value.trim_start().strip_prefix(':'))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 pub(super) fn render_inline_label(ui: &mut egui::Ui, label: &str) {

@@ -326,6 +326,64 @@ pub(crate) fn clickable_table<'a>(
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
 }
 
+pub(crate) fn table_header_label(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    table_label_with_cursor(
+        ui,
+        muted_text(text).strong(),
+        egui::Align::Min,
+        egui::Sense::hover(),
+        egui::CursorIcon::Default,
+    )
+}
+
+pub(crate) fn table_body_label(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    table_label_with_cursor(
+        ui,
+        body_text(text),
+        egui::Align::Min,
+        egui::Sense::hover(),
+        egui::CursorIcon::PointingHand,
+    )
+}
+
+pub(crate) fn table_cell_label(
+    ui: &mut egui::Ui,
+    text: &str,
+    size: f32,
+    color: egui::Color32,
+    align: egui::Align,
+    sense: egui::Sense,
+) -> egui::Response {
+    table_label_with_cursor(
+        ui,
+        egui::RichText::new(text).size(size).color(color),
+        align,
+        sense,
+        egui::CursorIcon::PointingHand,
+    )
+}
+
+fn table_label_with_cursor(
+    ui: &mut egui::Ui,
+    text: impl Into<egui::WidgetText>,
+    align: egui::Align,
+    sense: egui::Sense,
+    cursor: egui::CursorIcon,
+) -> egui::Response {
+    let response = ui.add_sized(
+        [ui.available_width(), ui.available_height()],
+        egui::Label::new(text)
+            .selectable(false)
+            .truncate()
+            .halign(align)
+            .sense(sense),
+    );
+    if response.hovered() {
+        response.ctx.set_cursor_icon(cursor);
+    }
+    response
+}
+
 pub(crate) fn muted_text(text: impl Into<String>) -> egui::RichText {
     egui::RichText::new(text).size(12.0).color(palette().muted)
 }

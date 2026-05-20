@@ -398,12 +398,14 @@ fn client_connection_once(
                 if command == CommandKind::ClientConfig {
                     let mut update = crate::runtime::update_client_config(&config, &payload);
                     if update.restart {
-                        match crate::session::schedule_config_file_restart(&config.config_path) {
+                        match crate::session::schedule_config_file_restart(
+                            &update.restart_config_path,
+                        ) {
                             Ok(path) => {
                                 update.detail.push_str(&format!(
                                     "\nrestart_scheduled=true\nrestart_path={}\nrestart_config_path={}",
                                     detail_value(&path.display().to_string()),
-                                    detail_value(&config.config_path.display().to_string())
+                                    detail_value(&update.restart_config_path.display().to_string())
                                 ));
                             }
                             Err(error) => {

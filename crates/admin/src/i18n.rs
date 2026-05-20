@@ -135,6 +135,7 @@ fn zh(key: &'static str) -> &'static str {
         "At startup" => "启动时",
         "Audio Listen" => "音频监听",
         "Audio output failed" => "音频输出失败",
+        "Auth Token Configured" => "已配置认证令牌",
         "audio listen failed" => "音频监听失败",
         "Auth Token" => "认证令牌",
         "Auth token" => "认证令牌",
@@ -160,6 +161,9 @@ fn zh(key: &'static str) -> &'static str {
         "Choose..." => "选择...",
         "Clear" => "清空",
         "Clear Closed" => "清除已关闭",
+        "Clear Group" => "清除分组",
+        "CLI IP Override" => "命令行 IP 覆盖",
+        "CLI Port Override" => "命令行端口覆盖",
         "Clear or adjust the filter to show clients on the map." => {
             "清空或调整筛选条件以在地图上显示客户端。"
         }
@@ -170,6 +174,8 @@ fn zh(key: &'static str) -> &'static str {
         "Client accepted audio listen" => "客户端已接受音频监听",
         "Client Builder" => "客户端生成器",
         "Client Config" => "客户端配置",
+        "Client config loaded." => "客户端配置已加载。",
+        "Client config saved. Restarting client." => "客户端配置已保存，正在重启客户端。",
         "Clone Client Settings" => "克隆客户端设置",
         "Clone local socket failed: {error}" => "克隆本地套接字失败：{error}",
         "Clone target stream failed: {error}" => "克隆目标连接失败：{error}",
@@ -189,6 +195,9 @@ fn zh(key: &'static str) -> &'static str {
         "Command Preset" => "命令预设",
         "Command failed" => "命令失败",
         "Command is required" => "命令不能为空",
+        "Config File Content" => "配置文件内容",
+        "Config Mode" => "配置模式",
+        "Config Path" => "配置路径",
         "Command or executable path" => "命令或可执行文件路径",
         "Command sent" => "命令已发送",
         "Completed" => "已完成",
@@ -196,7 +205,11 @@ fn zh(key: &'static str) -> &'static str {
         "Computer Info" => "计算机信息",
         "Confirm" => "确认",
         "Confirm Delete" => "确认删除",
+        "Confirm Delete Startup Item" => "确认删除启动项",
+        "Confirm Delete Task" => "确认删除任务",
+        "Confirm Kill Process" => "确认结束进程",
         "Confirm Local Delete" => "确认删除本地项",
+        "Confirm Save" => "确认保存",
         "Confirmation required" => "需要确认",
         "Configure login autostart for this client" => "配置此客户端的登录自启动",
         "Connected to service" => "已连接服务",
@@ -242,6 +255,8 @@ fn zh(key: &'static str) -> &'static str {
         "Delete Startup Item" => "删除启动项",
         "Delete this local item?" => "删除这个本地项目？",
         "Delete this remote item?" => "删除这个远程项目？",
+        "Delete this startup item?" => "删除这个启动项？",
+        "Delete this task?" => "删除这个任务？",
         "Device" => "设备",
         "Direction" => "方向",
         "Disk" => "磁盘",
@@ -259,6 +274,8 @@ fn zh(key: &'static str) -> &'static str {
         "Enable" => "启用",
         "Enabled" => "已启用",
         "Enable Startup Item" => "启用启动项",
+        "Effective Server" => "生效服务器",
+        "Embedded Config" => "嵌入配置",
         "Embedded config" => "嵌入配置",
         "Embedded config slot is missing" => "缺少嵌入配置槽",
         "Embedded mode: generated clients do not load, create, or save client.toml" => {
@@ -269,6 +286,7 @@ fn zh(key: &'static str) -> &'static str {
         "error" => "错误",
         "Error" => "错误",
         "Event Log" => "事件日志",
+        "Edit Task" => "编辑任务",
         "Execute" => "执行",
         "Execute Code" => "执行代码",
         "Execute File" => "执行文件",
@@ -292,6 +310,8 @@ fn zh(key: &'static str) -> &'static str {
         "Generated" => "已生成",
         "General SOCKS server failure" => "SOCKS 服务器通用失败",
         "Go" => "转到",
+        "Group" => "分组",
+        "Group Name" => "分组名称",
         "GeoIP may be configured, but current clients have no public IP location. Local, LAN, VPN, proxy, and relay addresses cannot be placed on the map." => {
             "GeoIP 可能已配置，但当前客户端没有公网 IP 位置。本地、局域网、VPN、代理和中继地址无法标注到地图上。"
         }
@@ -318,6 +338,7 @@ fn zh(key: &'static str) -> &'static str {
         "Keyboard" => "键盘",
         "Killed by admin" => "管理员已结束",
         "Kill Process" => "结束进程",
+        "Kill this process?" => "结束这个进程？",
         "Known" => "已知",
         "Kill Client Process" => "结束客户端进程",
         "Language" => "语言",
@@ -364,6 +385,7 @@ fn zh(key: &'static str) -> &'static str {
         "New name" => "新名称",
         "No camera frame to save" => "没有可保存的摄像头画面",
         "No clients online" => "没有在线客户端",
+        "No startup arguments" => "无启动参数",
         "No connections" => "暂无连接",
         "No client has been generated in this window yet" => "此窗口尚未生成客户端",
         "No audio input devices found" => "未找到音频输入设备",
@@ -395,6 +417,7 @@ fn zh(key: &'static str) -> &'static str {
         "OS Version" => "系统版本",
         "Output" => "输出",
         "Pending" => "等待中",
+        "PID" => "PID",
         "Path on the client" => "客户端上的路径",
         "Paste" => "粘贴",
         "Performance Monitor" => "性能监控",
@@ -406,6 +429,7 @@ fn zh(key: &'static str) -> &'static str {
         "Preset" => "预设",
         "present" => "存在",
         "Process Manager" => "进程管理",
+        "Process" => "进程",
         "Progress" => "进度",
         "Proxy" => "代理",
         "Proxy data arrived before open result" => "代理打开前收到了数据",
@@ -453,7 +477,6 @@ fn zh(key: &'static str) -> &'static str {
         "Rename local item" => "重命名本地项目",
         "Rename remote item" => "重命名远程项目",
         "Replacement Binary Path" => "替换二进制路径",
-        "Restart from config file after apply" => "应用后从配置文件重启",
         "Restarts the remote client process." => "重启远程客户端进程。",
         "Restarts the remote computer." => "重启远程计算机。",
         "Repository" => "仓库",
@@ -480,6 +503,10 @@ fn zh(key: &'static str) -> &'static str {
         "Save failed: {error}" => "保存失败：{error}",
         "Save preferences failed: {error}" => "保存偏好失败：{error}",
         "Save" => "保存",
+        "Save this client config and restart the client?" => "保存此客户端配置并重启客户端？",
+        "Save group failed" => "保存分组失败",
+        "Save Group" => "保存分组",
+        "Save Task" => "保存任务",
         "Save theme" => "保存主题",
         "Save settings" => "保存设置",
         "Schedule" => "计划",
@@ -494,8 +521,12 @@ fn zh(key: &'static str) -> &'static str {
         "Select client template" => "选择客户端模板",
         "Selected" => "已选择",
         "Send" => "发送",
+        "Send this command to the client?" => "发送此命令到客户端？",
         "Search by id, fingerprint, host, user, OS, or location" => {
             "按 ID、指纹、主机、用户、系统或位置搜索"
+        }
+        "Search by id, fingerprint, group, host, user, OS, or location" => {
+            "按 ID、指纹、分组、主机、用户、系统或位置搜索"
         }
         "Search by id, fingerprint, host, user, or OS" => "按 ID、指纹、主机、用户或系统搜索",
         "Sending" => "发送中",
@@ -527,6 +558,8 @@ fn zh(key: &'static str) -> &'static str {
         "Start" => "开始",
         "Start Capture" => "开始捕获",
         "Start Time" => "开始时间",
+        "Settings Summary" => "设置摘要",
+        "Source" => "来源",
         "Start a client or refresh after it connects." => "启动客户端，或在连接后刷新。",
         "Start proxy before testing" => "请先启动代理再测试",
         "Starting" => "正在启动",
@@ -561,8 +594,10 @@ fn zh(key: &'static str) -> &'static str {
         "Test target must be host:port" => "测试目标必须是 host:port",
         "Template" => "模板",
         "Task Name" => "任务名称",
+        "Task" => "任务",
         "Task Manager" => "任务管理器",
         "Task name is required" => "任务名称不能为空",
+        "Task Details" => "任务详情",
         "Template bytes cannot be read" => "无法读取模板内容",
         "Template cannot be read" => "无法读取模板",
         "Template not loaded" => "模板未加载",
@@ -571,9 +606,6 @@ fn zh(key: &'static str) -> &'static str {
         "Text Chat" => "文字聊天",
         "The client will disconnect after acknowledging the command." => {
             "客户端确认命令后将断开连接。"
-        }
-        "The client will restart with client.toml only; startup arguments are not carried over." => {
-            "客户端将仅使用 client.toml 重启；启动参数不会保留。"
         }
         "Theme" => "主题",
         "Theme changes apply immediately. System follows the OS appearance." => {
@@ -657,6 +689,30 @@ fn zh(key: &'static str) -> &'static str {
         "yes" => "是",
         "Decode" => "解码",
         "Texture" => "纹理",
+        "No existing groups" => "没有已有分组",
+        "Select existing group" => "选择已有分组",
+        "Config Path Source" => "配置路径来源",
+        "Loading client config..." => "正在加载客户端配置...",
+        "Builder Client" => "Builder 客户端",
+        "Builder/embedded client uses read-only embedded config; startup arguments and config file are shown only for reference." => {
+            "Builder/嵌入配置客户端使用只读嵌入配置；启动参数和配置文件仅用于查看。"
+        }
+        "Builder/embedded clients are read-only." => "Builder/嵌入配置客户端是只读的。",
+        "Reads Config File" => "读取配置文件",
+        "Read-only" => "只读",
+        "Runtime Config Path" => "运行配置路径",
+        "Save Config Path" => "保存配置路径",
+        "Saving client config..." => "正在保存客户端配置...",
+        "Saving writes the default client config path and restarts from that file." => {
+            "保存会写入默认客户端配置路径，并从该文件重启。"
+        }
+        "Startup Arguments" => "启动参数",
+        "Startup Command" => "启动命令",
+        "Startup Config File Content" => "启动配置文件内容",
+        "Startup Config Path" => "启动配置路径",
+        "Waiting for client config snapshot before changes are enabled." => {
+            "等待客户端配置快照返回后才可修改。"
+        }
         _ => key,
     }
 }

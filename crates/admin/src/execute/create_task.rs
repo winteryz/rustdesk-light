@@ -27,6 +27,8 @@ pub(super) struct TaskManagerState {
     action: Arc<Mutex<String>>,
     ready: Arc<AtomicBool>,
     form_open: Arc<AtomicBool>,
+    form_mode: Arc<Mutex<TaskFormMode>>,
+    pending_delete: Arc<Mutex<Option<TaskRow>>>,
 }
 
 impl Default for TaskManagerState {
@@ -40,6 +42,8 @@ impl Default for TaskManagerState {
             action: Arc::new(Mutex::new(ACTION_LIST.to_string())),
             ready: Arc::new(AtomicBool::new(false)),
             form_open: Arc::new(AtomicBool::new(false)),
+            form_mode: Arc::new(Mutex::new(TaskFormMode::Create)),
+            pending_delete: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -56,6 +60,7 @@ impl TaskManagerState {
         set_string(&self.time, "09:00");
         set_string(&self.selected, "");
         set_string(&self.action, ACTION_LIST);
+        set_form_mode(self, TaskFormMode::Create);
         self.form_open.store(true, Ordering::Relaxed);
     }
 
@@ -88,12 +93,9 @@ pub(super) fn render(
     let ready = state.ready.load(Ordering::Relaxed);
     render_manager_toolbar(ui, state, send_requested, ready, !rows.is_empty());
     ui.add_space(crate::theme::SECTION_GAP);
-    if let Some(message) = task_manager_message(&detail) {
-        render_task_message(ui, message);
-        ui.add_space(crate::theme::SECTION_GAP);
-    }
     render_task_table(ui, &rows, state, send_requested);
     render_create_window(ui.ctx(), state, send_requested, ready);
+    render_delete_confirm(ui.ctx(), state, send_requested);
 }
 
 fn render_manager_toolbar(
@@ -158,11 +160,21 @@ fn render_task_table(
             .column(Column::initial(92.0).at_least(72.0).clip(true))
             .column(Column::remainder().at_least(220.0).clip(true))
             .header(crate::theme::TABLE_HEADER_HEIGHT, |mut header| {
-                header.col(|ui| table_header(ui, t("Name")));
-                header.col(|ui| table_header(ui, t("Trigger")));
-                header.col(|ui| table_header(ui, t("Schedule")));
-                header.col(|ui| table_header(ui, t("Status")));
-                header.col(|ui| table_header(ui, t("Command")));
+                header.col(|ui| {
+                    crate::theme::table_header_label(ui, t("Name"));
+                });
+                header.col(|ui| {
+                    crate::theme::table_header_label(ui, t("Trigger"));
+                });
+                header.col(|ui| {
+                    crate::theme::table_header_label(ui, t("Schedule"));
+                });
+                header.col(|ui| {
+                    crate::theme::table_header_label(ui, t("Status"));
+                });
+                header.col(|ui| {
+                    crate::theme::table_header_label(ui, t("Command"));
+                });
             })
             .body(|body| {
                 body.rows(
@@ -176,7 +188,9 @@ fn render_task_table(
                         let trigger = trigger_label(&row.trigger);
                         let status = task_status_label(&row.status);
 
-                        let (_, response) = table_row.col(|ui| table_cell(ui, &row.name));
+                        let (_, response) = table_row.col(|ui| {
+                            crate::theme::table_body_label(ui, &row.name);
+                        });
                         row_context_menu(
                             &response,
                             row,
@@ -185,9 +199,13 @@ fn render_task_table(
                             &row_text,
                             row.name.clone(),
                         );
-                        let (_, response) = table_row.col(|ui| table_cell(ui, &trigger));
+                        let (_, response) = table_row.col(|ui| {
+                            crate::theme::table_body_label(ui, &trigger);
+                        });
                         row_context_menu(&response, row, state, send_requested, &row_text, trigger);
-                        let (_, response) = table_row.col(|ui| table_cell(ui, &row.schedule));
+                        let (_, response) = table_row.col(|ui| {
+                            crate::theme::table_body_label(ui, &row.schedule);
+                        });
                         row_context_menu(
                             &response,
                             row,
@@ -196,9 +214,13 @@ fn render_task_table(
                             &row_text,
                             row.schedule.clone(),
                         );
-                        let (_, response) = table_row.col(|ui| table_cell(ui, &status));
+                        let (_, response) = table_row.col(|ui| {
+                            crate::theme::table_body_label(ui, &status);
+                        });
                         row_context_menu(&response, row, state, send_requested, &row_text, status);
-                        let (_, response) = table_row.col(|ui| table_cell(ui, &row.command));
+                        let (_, response) = table_row.col(|ui| {
+                            crate::theme::table_body_label(ui, &row.command);
+                        });
                         row_context_menu(
                             &response,
                             row,
@@ -228,10 +250,11 @@ fn render_create_form(
     state: &TaskManagerState,
     send_requested: &Arc<AtomicBool>,
     ready: bool,
+    mode: TaskFormMode,
 ) -> bool {
-    ui.label(crate::theme::strong_body_text(t("Create or update task")));
+    ui.label(crate::theme::strong_body_text(t("Task Details")));
     ui.add_space(crate::theme::SECTION_GAP);
-    ui::render_text_field(ui, t("Task Name"), &state.name, "rdl-task");
+    render_task_name_field(ui, state, mode);
     ui.add_space(crate::theme::SECTION_GAP);
     ui::render_text_field(
         ui,
@@ -248,7 +271,7 @@ fn render_create_form(
     ui.horizontal(|ui| {
         ui.spacing_mut().interact_size.y = ui::TOOLBAR_CONTROL_HEIGHT;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let response = ui.add_enabled(ready, egui::Button::new(t("Create Task")));
+            let response = ui.add_enabled(ready, egui::Button::new(task_form_submit_label(mode)));
             if !ready {
                 response
                     .clone()
@@ -275,6 +298,26 @@ fn render_create_form(
     close_requested
 }
 
+fn render_task_name_field(ui: &mut egui::Ui, state: &TaskManagerState, mode: TaskFormMode) {
+    if mode == TaskFormMode::Create {
+        ui::render_text_field(ui, t("Task Name"), &state.name, "rdl-task");
+        return;
+    }
+
+    let mut text = lock_string(&state.name);
+    ui.label(
+        egui::RichText::new(t("Task Name"))
+            .size(12.0)
+            .color(crate::theme::palette().muted),
+    );
+    ui.add_enabled(
+        false,
+        egui::TextEdit::singleline(&mut text)
+            .desired_width(f32::INFINITY)
+            .vertical_align(egui::Align::Center),
+    );
+}
+
 fn render_create_window(
     ctx: &egui::Context,
     state: &TaskManagerState,
@@ -287,7 +330,8 @@ fn render_create_window(
     }
 
     let mut close_requested = false;
-    egui::Window::new(t("Create Task"))
+    let mode = task_form_mode(state);
+    egui::Window::new(task_form_title(mode))
         .id(egui::Id::new((
             "task_manager_create_window",
             Arc::as_ptr(&state.name),
@@ -298,24 +342,12 @@ fn render_create_window(
         .default_width(420.0)
         .show(ctx, |ui| {
             ui.set_min_width(380.0);
-            close_requested = render_create_form(ui, state, send_requested, ready);
+            close_requested = render_create_form(ui, state, send_requested, ready, mode);
         });
 
     state
         .form_open
         .store(open && !close_requested, Ordering::Relaxed);
-}
-
-fn render_task_message(ui: &mut egui::Ui, message: &str) {
-    crate::theme::panel_frame_with_margin(crate::theme::PANEL_MARGIN).show(ui, |ui| {
-        ui.label(crate::theme::muted_text(t("Message")).strong());
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(message)
-                .size(12.0)
-                .color(crate::theme::COLOR_WARN),
-        );
-    });
 }
 
 fn render_trigger(
@@ -466,6 +498,10 @@ fn row_context_menu(
             ui.close();
         }
         ui.separator();
+        if ui.button(t("Edit Task")).clicked() {
+            open_edit_task(row, state);
+            ui.close();
+        }
         if ui.button(t("Run Task")).clicked() {
             queue_row_action(row, state, send_requested, ACTION_RUN);
             ui.close();
@@ -479,10 +515,66 @@ fn row_context_menu(
             ui.close();
         }
         if ui.button(t("Delete")).clicked() {
-            queue_row_action(row, state, send_requested, ACTION_DELETE);
+            select_task(row, state);
+            if let Ok(mut pending) = state.pending_delete.lock() {
+                *pending = Some(row.clone());
+            }
             ui.close();
         }
     });
+}
+
+fn render_delete_confirm(
+    ctx: &egui::Context,
+    state: &TaskManagerState,
+    send_requested: &Arc<AtomicBool>,
+) {
+    let pending = state
+        .pending_delete
+        .lock()
+        .ok()
+        .and_then(|value| value.clone());
+    let Some(row) = pending else {
+        return;
+    };
+
+    egui::Window::new(t("Confirm Delete Task"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(460.0)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(t("Delete this task?"))
+                    .size(12.0)
+                    .color(crate::theme::palette().muted),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.label(crate::theme::muted_text(t("Task")));
+                ui.label(crate::theme::body_text(&row.name));
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new(t("Delete"))
+                            .color(crate::theme::COLOR_BAD)
+                            .strong(),
+                    ))
+                    .clicked()
+                {
+                    queue_row_action(&row, state, send_requested, ACTION_DELETE);
+                    if let Ok(mut pending) = state.pending_delete.lock() {
+                        *pending = None;
+                    }
+                    ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                }
+                if ui.button(t("Cancel")).clicked() {
+                    if let Ok(mut pending) = state.pending_delete.lock() {
+                        *pending = None;
+                    }
+                }
+            });
+        });
 }
 
 fn queue_row_action(
@@ -519,6 +611,12 @@ fn select_task(row: &TaskRow, state: &TaskManagerState) {
     }
 }
 
+fn open_edit_task(row: &TaskRow, state: &TaskManagerState) {
+    select_task(row, state);
+    set_form_mode(state, TaskFormMode::Edit);
+    state.form_open.store(true, Ordering::Relaxed);
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TaskRow {
     name: String,
@@ -539,15 +637,6 @@ fn parse_task_rows(detail: &str) -> Vec<TaskRow> {
 
 fn task_manager_ready(detail: &str) -> bool {
     detail.lines().any(|line| line.starts_with("Name\t"))
-}
-
-fn task_manager_message(detail: &str) -> Option<&str> {
-    let detail = detail.trim();
-    if detail.is_empty() || task_manager_ready(detail) {
-        None
-    } else {
-        Some(detail)
-    }
 }
 
 fn parse_task_row(line: &str) -> Option<TaskRow> {
@@ -610,12 +699,38 @@ fn task_status_label(value: &str) -> String {
     }
 }
 
-fn table_header(ui: &mut egui::Ui, label: &str) {
-    ui.label(crate::theme::muted_text(label).strong());
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TaskFormMode {
+    Create,
+    Edit,
 }
 
-fn table_cell(ui: &mut egui::Ui, value: &str) {
-    ui.label(crate::theme::body_text(value));
+fn set_form_mode(state: &TaskManagerState, mode: TaskFormMode) {
+    if let Ok(mut target) = state.form_mode.lock() {
+        *target = mode;
+    }
+}
+
+fn task_form_mode(state: &TaskManagerState) -> TaskFormMode {
+    state
+        .form_mode
+        .lock()
+        .map(|value| *value)
+        .unwrap_or(TaskFormMode::Create)
+}
+
+fn task_form_title(mode: TaskFormMode) -> &'static str {
+    match mode {
+        TaskFormMode::Create => t("New Task"),
+        TaskFormMode::Edit => t("Edit Task"),
+    }
+}
+
+fn task_form_submit_label(mode: TaskFormMode) -> &'static str {
+    match mode {
+        TaskFormMode::Create => t("Create Task"),
+        TaskFormMode::Edit => t("Save Task"),
+    }
 }
 
 fn sanitize_single_line(value: &str) -> String {

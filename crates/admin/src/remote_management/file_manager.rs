@@ -1489,28 +1489,11 @@ fn transfer_row_exists(transfers: &Arc<Mutex<Vec<FileTransferRow>>>, transfer_id
 }
 
 fn table_header_label(ui: &mut egui::Ui, text: &str) {
-    ui.add(
-        egui::Label::new(
-            egui::RichText::new(text)
-                .size(12.0)
-                .color(crate::theme::palette().text)
-                .strong(),
-        )
-        .selectable(false)
-        .sense(egui::Sense::hover()),
-    );
+    crate::theme::table_header_label(ui, text);
 }
 
 fn table_text(ui: &mut egui::Ui, text: &str) {
-    ui.add(
-        egui::Label::new(
-            egui::RichText::new(text)
-                .size(12.0)
-                .color(crate::theme::palette().text),
-        )
-        .selectable(false)
-        .sense(egui::Sense::hover()),
-    );
+    crate::theme::table_body_label(ui, text);
 }
 
 fn format_file_size(size: &str) -> String {

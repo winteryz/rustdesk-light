@@ -14,6 +14,13 @@ impl AdminApp {
         self.render_interaction_command_windows(ctx);
         self.render_session_command_windows(ctx);
         self.render_execute_windows(ctx);
+        if let Some(action) = client_groups::render_move_group_window(
+            ctx,
+            &mut self.move_group_window,
+            &self.client_groups,
+        ) {
+            self.apply_move_group_action(action);
+        }
         self.render_settings_window(ctx);
         self.render_about_window(ctx);
     }

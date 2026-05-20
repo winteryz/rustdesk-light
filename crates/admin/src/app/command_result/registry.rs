@@ -1,9 +1,9 @@
 use super::{
-    filtered_table_rows, normalized_table_header, parse_result_table, stable_hash,
-    table_cell_label, table_row_key, table_value, DisplayTableRow, ResultTable,
-    TABLE_BODY_CELL_HEIGHT, TABLE_BODY_TEXT_SIZE, TABLE_HEADER_CELL_HEIGHT, TABLE_HEADER_TEXT_SIZE,
+    filtered_table_rows, normalized_table_header, parse_result_table, stable_hash, table_row_key,
+    table_value, DisplayTableRow, ResultTable, TABLE_BODY_CELL_HEIGHT, TABLE_BODY_TEXT_SIZE,
+    TABLE_HEADER_CELL_HEIGHT, TABLE_HEADER_TEXT_SIZE,
 };
-use crate::i18n::t;
+use crate::{i18n::t, theme::table_cell_label};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use eframe::egui;
 use egui_extras::Column;

@@ -245,9 +245,19 @@ pub(crate) fn handle_ack(
         *status = result::status_text(accepted, detail);
     }
     if let Ok(mut target) = window.result_detail.lock() {
-        *target = result::output_text(detail);
+        if should_replace_result_detail(window.command.clone(), accepted, detail) {
+            *target = result::output_text(detail);
+        }
     }
     true
+}
+
+fn should_replace_result_detail(command: CommandKind, accepted: bool, detail: &str) -> bool {
+    command != CommandKind::CreateTask || !execute_detail_failed(accepted, detail)
+}
+
+fn execute_detail_failed(accepted: bool, detail: &str) -> bool {
+    !accepted || detail.lines().any(|line| line.trim() == "status=failed")
 }
 
 fn handle_language_ack(window: &mut ExecuteWindow, detail: &str) {

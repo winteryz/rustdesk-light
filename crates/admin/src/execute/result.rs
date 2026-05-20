@@ -5,18 +5,25 @@ use std::sync::{Arc, Mutex};
 
 pub(super) fn status_text(accepted: bool, detail: &str) -> String {
     if !accepted {
-        return t("Rejected").to_string();
+        return status_with_message(t("Rejected"), detail);
     }
     detail
         .lines()
         .find_map(|line| line.strip_prefix("status="))
         .map(|status| match status.trim() {
             "success" => t("Completed").to_string(),
-            "failed" => t("Failed").to_string(),
+            "failed" => status_with_message(t("Failed"), detail),
             other if !other.is_empty() => format!("{}: {other}", t("Status")),
             _ => t("Completed").to_string(),
         })
         .unwrap_or_else(|| t("Completed").to_string())
+}
+
+fn status_with_message(status: &'static str, detail: &str) -> String {
+    payload_field(detail, "message")
+        .filter(|message| !message.trim().is_empty())
+        .map(|message| format!("{status}: {message}"))
+        .unwrap_or_else(|| status.to_string())
 }
 
 pub(super) fn output_text(detail: &str) -> String {

@@ -1,11 +1,13 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
 use fs2::FileExt;
 use rdl_config::{ConfigKind, EmbeddedEndpointConfig, EndpointConfig, EndpointOverrides};
+use std::ffi::OsStr;
 use std::fs;
 use std::fs::File;
 use std::io;
 #[cfg(target_family = "unix")]
 use std::os::raw::{c_char, c_int};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -177,15 +179,29 @@ pub(crate) struct ClientConfigUpdate {
     pub(crate) accepted: bool,
     pub(crate) detail: String,
     pub(crate) restart: bool,
+    pub(crate) restart_config_path: PathBuf,
 }
 
 pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConfigUpdate {
     let request = ClientConfigUpdateRequest::parse(payload);
+    let (startup_config_path, _) = startup_config_file_path();
+    let save_config_path = default_client_config_path();
     if request.show {
+        let file_endpoint = config.endpoint();
         return ClientConfigUpdate {
             accepted: true,
-            detail: client_config_detail("current", config, config, None, false, "current config"),
+            detail: client_config_detail(
+                "current",
+                config,
+                config,
+                Some(&file_endpoint),
+                &startup_config_path,
+                &save_config_path,
+                false,
+                "client config loaded",
+            ),
             restart: false,
+            restart_config_path: save_config_path,
         };
     }
     if !request.confirm {
@@ -193,6 +209,7 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
             accepted: false,
             detail: "client_config\nstatus=refused\nmessage=confirm=true is required".to_string(),
             restart: false,
+            restart_config_path: save_config_path,
         };
     }
     if let Some(port) = request.invalid_port.as_ref() {
@@ -203,6 +220,7 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
                 clean_value(port)
             ),
             restart: false,
+            restart_config_path: save_config_path,
         };
     }
     if config.embedded_config_enabled() {
@@ -213,10 +231,84 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
                 config,
                 config,
                 None,
+                &startup_config_path,
+                &save_config_path,
                 false,
-                "embedded read-only config is active; client.toml is not loaded or saved",
+                "builder embedded config is read-only; client.toml is shown for reference only",
             ),
             restart: false,
+            restart_config_path: save_config_path,
+        };
+    }
+    if let Some(error) = request.invalid_config_file.as_ref() {
+        return ClientConfigUpdate {
+            accepted: false,
+            detail: format!(
+                "client_config\nstatus=error\nmessage={}",
+                clean_value(error)
+            ),
+            restart: false,
+            restart_config_path: save_config_path,
+        };
+    }
+    if let Some(config_text) = request.config_file.as_ref() {
+        if request.dry_run {
+            return ClientConfigUpdate {
+                accepted: true,
+                detail: client_config_detail(
+                    "dry_run",
+                    config,
+                    config,
+                    None,
+                    &startup_config_path,
+                    &save_config_path,
+                    false,
+                    "config file would be updated",
+                ),
+                restart: false,
+                restart_config_path: save_config_path,
+            };
+        }
+        if let Err(error) = write_client_config_text(&save_config_path, config_text) {
+            return ClientConfigUpdate {
+                accepted: false,
+                detail: format!(
+                    "client_config\nstatus=error\nmessage={}",
+                    clean_value(&error.to_string())
+                ),
+                restart: false,
+                restart_config_path: save_config_path,
+            };
+        }
+        let reloaded = match load_client_config_from_file(&save_config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                return ClientConfigUpdate {
+                    accepted: false,
+                    detail: format!(
+                    "client_config\nstatus=error\nmessage=config was written but reload failed: {}",
+                    clean_value(&error.to_string())
+                ),
+                    restart: false,
+                    restart_config_path: save_config_path,
+                }
+            }
+        };
+        let restart = request.restart;
+        return ClientConfigUpdate {
+            accepted: true,
+            detail: client_config_detail(
+                "updated",
+                config,
+                &reloaded,
+                None,
+                &startup_config_path,
+                &save_config_path,
+                restart,
+                "config file updated; client restart requested from default config file",
+            ),
+            restart,
+            restart_config_path: save_config_path,
         };
     }
 
@@ -232,6 +324,7 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
             accepted: false,
             detail: "client_config\nstatus=error\nmessage=ip cannot be empty".to_string(),
             restart: false,
+            restart_config_path: save_config_path,
         };
     }
     if request.ip.is_none() && request.port.is_none() {
@@ -239,17 +332,14 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
             accepted: false,
             detail: "client_config\nstatus=error\nmessage=ip or port is required".to_string(),
             restart: false,
+            restart_config_path: save_config_path,
         };
     }
 
     if request.dry_run {
         let mut next = config.clone();
-        if !config.cli_ip_overridden() {
-            next.ip = endpoint.ip.clone();
-        }
-        if !config.cli_port_overridden() {
-            next.port = endpoint.port;
-        }
+        next.ip = endpoint.ip.clone();
+        next.port = endpoint.port;
         return ClientConfigUpdate {
             accepted: true,
             detail: client_config_detail(
@@ -257,15 +347,18 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
                 config,
                 &next,
                 Some(&endpoint),
+                &startup_config_path,
+                &save_config_path,
                 false,
                 "config would be updated",
             ),
             restart: false,
+            restart_config_path: save_config_path,
         };
     }
 
     if let Err(error) =
-        rdl_config::write_endpoint_config(ConfigKind::Client, &config.config_path, &endpoint)
+        rdl_config::write_endpoint_config(ConfigKind::Client, &save_config_path, &endpoint)
     {
         return ClientConfigUpdate {
             accepted: false,
@@ -274,6 +367,7 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
                 clean_value(&error.to_string())
             ),
             restart: false,
+            restart_config_path: save_config_path,
         };
     }
     if let Some(auth_token) = request
@@ -282,7 +376,7 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
         .filter(|value| !value.trim().is_empty())
     {
         if let Err(error) =
-            rdl_config::write_auth_token_config(ConfigKind::Client, &config.config_path, auth_token)
+            rdl_config::write_auth_token_config(ConfigKind::Client, &save_config_path, auth_token)
         {
             return ClientConfigUpdate {
                 accepted: false,
@@ -291,11 +385,12 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
                     clean_value(&error.to_string())
                 ),
                 restart: false,
+                restart_config_path: save_config_path,
             };
         }
     }
 
-    let reloaded = match config.reload() {
+    let reloaded = match load_client_config_from_file(&save_config_path) {
         Ok(config) => config,
         Err(error) => {
             return ClientConfigUpdate {
@@ -305,13 +400,14 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
                     clean_value(&error.to_string())
                 ),
                 restart: false,
+                restart_config_path: save_config_path,
             }
         }
     };
     let effective_changed = reloaded.ip != config.ip || reloaded.port != config.port;
     let restart = request.restart;
     let message = if restart {
-        "config updated; client restart requested from config file"
+        "config updated; client restart requested from default config file"
     } else if effective_changed {
         "config updated; restart disabled"
     } else if config.cli_ip_overridden() || config.cli_port_overridden() {
@@ -327,10 +423,13 @@ pub(crate) fn update_client_config(config: &Config, payload: &str) -> ClientConf
             config,
             &reloaded,
             Some(&endpoint),
+            &startup_config_path,
+            &save_config_path,
             restart,
             message,
         ),
         restart,
+        restart_config_path: save_config_path,
     }
 }
 
@@ -341,6 +440,8 @@ struct ClientConfigUpdateRequest {
     show: bool,
     restart: bool,
     auth_token: Option<String>,
+    config_file: Option<String>,
+    invalid_config_file: Option<String>,
     ip: Option<String>,
     port: Option<u16>,
     invalid_port: Option<String>,
@@ -359,6 +460,10 @@ impl ClientConfigUpdateRequest {
                 .unwrap_or(true),
             auth_token: payload_field(payload, "auth_token")
                 .filter(|value| !value.trim().is_empty()),
+            config_file: payload_field(payload, "config_file_b64")
+                .and_then(|value| decode_payload_base64(&value).ok()),
+            invalid_config_file: payload_field(payload, "config_file_b64")
+                .and_then(|value| decode_payload_base64(&value).err()),
             ip: payload_field(payload, "ip").filter(|value| !value.trim().is_empty()),
             port: payload_field(payload, "port").and_then(|value| value.parse::<u16>().ok()),
             invalid_port: payload_field(payload, "port")
@@ -367,31 +472,66 @@ impl ClientConfigUpdateRequest {
     }
 }
 
+fn decode_payload_base64(value: &str) -> Result<String, String> {
+    let bytes = STANDARD
+        .decode(value)
+        .map_err(|error| format!("invalid base64 config file content: {error}"))?;
+    String::from_utf8(bytes).map_err(|error| format!("config file is not valid UTF-8: {error}"))
+}
+
 fn client_config_detail(
     status: &str,
     current: &Config,
     effective: &Config,
     file_endpoint: Option<&EndpointConfig>,
+    config_path: &Path,
+    save_config_path: &Path,
     restart: bool,
     message: &str,
 ) -> String {
     let file_endpoint = file_endpoint
         .cloned()
         .unwrap_or_else(|| effective.endpoint());
+    let snapshot = client_config_snapshot(current, config_path, save_config_path);
     [
         "client_config".to_string(),
         format!("status={status}"),
         format!("message={}", clean_value(message)),
         format!(
             "path={}",
-            clean_value(&current.config_path.display().to_string())
+            clean_value(&snapshot.config_path.display().to_string())
+        ),
+        format!(
+            "config_path={}",
+            clean_value(&snapshot.config_path.display().to_string())
+        ),
+        format!("config_path_source={}", snapshot.config_path_source),
+        format!(
+            "runtime_config_path={}",
+            clean_value(&runtime_config_path(current, &snapshot.config_path))
+        ),
+        format!(
+            "startup_config_path={}",
+            clean_value(&snapshot.config_path.display().to_string())
+        ),
+        format!(
+            "save_config_path={}",
+            clean_value(&snapshot.save_config_path.display().to_string())
         ),
         format!("config_ip={}", clean_value(&file_endpoint.ip)),
         format!("config_port={}", file_endpoint.port),
         format!("effective_ip={}", clean_value(&effective.ip)),
         format!("effective_port={}", effective.port),
+        format!(
+            "effective_server={}:{}",
+            clean_value(&effective.ip),
+            effective.port
+        ),
         format!("cli_ip_override={}", current.cli_ip_overridden()),
         format!("cli_port_override={}", current.cli_port_overridden()),
+        format!("builder_client={}", current.embedded_config_enabled()),
+        format!("config_editable={}", !current.embedded_config_enabled()),
+        format!("reads_config_file={}", !current.embedded_config_enabled()),
         format!("embedded_config={}", current.embedded_config_enabled()),
         format!("config_mode={}", clean_value(current.config_mode_label())),
         format!(
@@ -403,8 +543,169 @@ fn client_config_detail(
             "restart_mode={}",
             if restart { "config_file" } else { "none" }
         ),
+        format!(
+            "startup_command_b64={}",
+            STANDARD.encode(snapshot.startup_command)
+        ),
+        format!(
+            "startup_args_b64={}",
+            STANDARD.encode(snapshot.startup_args)
+        ),
+        format!("config_file_b64={}", STANDARD.encode(snapshot.config_file)),
     ]
     .join("\n")
+}
+
+fn load_client_config_from_file(config_path: &Path) -> Result<Config, rdl_config::ConfigError> {
+    Config::load(EndpointOverrides {
+        config_path: Some(config_path.to_path_buf()),
+        ..Default::default()
+    })
+}
+
+fn write_client_config_text(
+    config_path: &Path,
+    config_text: &str,
+) -> Result<(), rdl_config::ConfigError> {
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| rdl_config::ConfigError::Io {
+            path: parent.to_path_buf(),
+            error,
+        })?;
+    }
+    let validation_path = config_path.with_extension(format!(
+        "validate-{}-{}.toml",
+        std::process::id(),
+        rdl_protocol::now_epoch_ms()
+    ));
+    fs::write(&validation_path, config_text).map_err(|error| rdl_config::ConfigError::Io {
+        path: validation_path.clone(),
+        error,
+    })?;
+    let validation = load_client_config_from_file(&validation_path);
+    let _ = fs::remove_file(&validation_path);
+    validation?;
+    fs::write(config_path, config_text).map_err(|error| rdl_config::ConfigError::Io {
+        path: config_path.to_path_buf(),
+        error,
+    })
+}
+
+fn runtime_config_path(config: &Config, fallback: &Path) -> String {
+    if config.embedded_config_enabled() {
+        return std::env::current_exe()
+            .map(|path| format!("embedded:{}", path.display()))
+            .unwrap_or_else(|_| "embedded:<current exe>".to_string());
+    }
+    fallback.display().to_string()
+}
+
+struct ClientConfigSnapshot {
+    config_path: PathBuf,
+    save_config_path: PathBuf,
+    config_path_source: &'static str,
+    startup_command: String,
+    startup_args: String,
+    config_file: String,
+}
+
+fn client_config_snapshot(
+    config: &Config,
+    config_path: &Path,
+    save_config_path: &Path,
+) -> ClientConfigSnapshot {
+    let (detected_path, config_path_source) = startup_config_file_path();
+    let config_path = if config_path.as_os_str().is_empty() {
+        detected_path
+    } else {
+        config_path.to_path_buf()
+    };
+    let save_config_path = if save_config_path.as_os_str().is_empty() {
+        default_client_config_path()
+    } else {
+        save_config_path.to_path_buf()
+    };
+    let config_file = if let Some(embedded) = config.embedded_config.as_ref() {
+        embedded.raw_toml.clone()
+    } else {
+        fs::read_to_string(&config_path)
+            .unwrap_or_else(|error| format!("read config file failed: {error}"))
+    };
+    ClientConfigSnapshot {
+        config_path,
+        save_config_path,
+        config_path_source,
+        startup_command: startup_command_line(),
+        startup_args: startup_args_line(),
+        config_file,
+    }
+}
+
+fn startup_config_file_path() -> (PathBuf, &'static str) {
+    let (path, source) = startup_config_path_from_args()
+        .map(|path| (path, "startup_args"))
+        .unwrap_or_else(|| {
+            (
+                rdl_config::default_config_path(ConfigKind::Client),
+                "default_path",
+            )
+        });
+    (absolute_path(path), source)
+}
+
+fn default_client_config_path() -> PathBuf {
+    absolute_path(rdl_config::default_config_path(ConfigKind::Client))
+}
+
+fn startup_config_path_from_args() -> Option<PathBuf> {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        let arg_text = arg.to_string_lossy();
+        if arg_text == "--config" {
+            return args.next().map(PathBuf::from);
+        }
+        if let Some(path) = arg_text.strip_prefix("--config=") {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
+}
+
+fn absolute_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(&path))
+        .unwrap_or(path)
+}
+
+fn startup_command_line() -> String {
+    std::env::args_os()
+        .map(|arg| quote_command_arg(&arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn startup_args_line() -> String {
+    std::env::args_os()
+        .skip(1)
+        .map(|arg| quote_command_arg(&arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_command_arg(arg: &OsStr) -> String {
+    let value = arg.to_string_lossy();
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\'' | '\\'))
+    {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        value.to_string()
+    }
 }
 
 #[derive(Clone)]

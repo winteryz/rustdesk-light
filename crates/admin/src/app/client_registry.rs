@@ -61,6 +61,10 @@ impl AdminApp {
                     || row.info.hostname.to_ascii_lowercase().contains(&filter)
                     || row.info.username.to_ascii_lowercase().contains(&filter)
                     || row.info.os.to_ascii_lowercase().contains(&filter)
+                    || self
+                        .client_group(&row.info.id)
+                        .to_ascii_lowercase()
+                        .contains(&filter)
                     || client_location_label(&row.info)
                         .to_ascii_lowercase()
                         .contains(&filter)

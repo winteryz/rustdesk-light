@@ -64,7 +64,9 @@ impl AdminApp {
                 ui.add_sized(
                     [ui.available_width(), TOOLBAR_CONTROL_HEIGHT],
                     egui::TextEdit::singleline(&mut self.client_filter)
-                        .hint_text(t("Search by id, fingerprint, host, user, OS, or location"))
+                        .hint_text(t(
+                            "Search by id, fingerprint, group, host, user, OS, or location",
+                        ))
                         .vertical_align(egui::Align::Center),
                 );
             });
@@ -82,6 +84,11 @@ impl AdminApp {
                 .column(
                     egui_extras::Column::initial(190.0)
                         .at_least(140.0)
+                        .clip(true),
+                )
+                .column(
+                    egui_extras::Column::initial(120.0)
+                        .at_least(90.0)
                         .clip(true),
                 )
                 .column(
@@ -112,6 +119,7 @@ impl AdminApp {
                 .header(24.0, |mut header| {
                     header.col(|ui| table_header(ui, t("Status")));
                     header.col(|ui| table_header(ui, t("Client ID")));
+                    header.col(|ui| table_header(ui, t("Group")));
                     header.col(|ui| table_header(ui, t("IP")));
                     header.col(|ui| table_header(ui, t("Location")));
                     header.col(|ui| table_header(ui, t("Host")));
@@ -129,6 +137,11 @@ impl AdminApp {
                             centered_cell(ui, |ui| client_status_text(ui, row_data.status))
                         });
                         row.col(|ui| centered_cell(ui, |ui| cell_label(ui, &client.id)));
+                        row.col(|ui| {
+                            centered_cell(ui, |ui| {
+                                cell_label(ui, self.client_group_label(&client.id))
+                            })
+                        });
                         row.col(|ui| centered_cell(ui, |ui| cell_label(ui, &client.peer_addr)));
                         row.col(|ui| {
                             centered_cell(ui, |ui| cell_label(ui, client_location_label(client)))
@@ -160,6 +173,9 @@ impl AdminApp {
                                     ui,
                                     &client.id,
                                     client_status_display(row_data.status).0,
+                                    &mut |client_id, command| {
+                                        self.send_command(client_id, command);
+                                    },
                                 );
                             }
                         });
