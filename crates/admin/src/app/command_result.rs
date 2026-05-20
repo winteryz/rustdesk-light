@@ -3,7 +3,10 @@ use super::{
     payload::payload_field,
     ui::{COLOR_BAD, COLOR_GOOD, COLOR_WARN, TOOLBAR_CONTROL_HEIGHT},
 };
-use crate::i18n::{self, t};
+use crate::{
+    i18n::{self, t},
+    theme::table_cell_label,
+};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use eframe::egui;
 use egui_extras::Column;
@@ -39,13 +42,28 @@ pub(super) struct CommandResultWindow {
     pub(super) refresh_requested: Arc<AtomicBool>,
     pub(super) auto_refresh_enabled: Arc<AtomicBool>,
     pub(super) last_auto_refresh_at: Option<Instant>,
+    pub(super) process_kill_confirm: Arc<Mutex<Option<ProcessKillConfirm>>>,
     pub(super) process_kill_requested: Arc<Mutex<Option<String>>>,
+    pub(super) startup_delete_confirm: Arc<Mutex<Option<StartupDeleteConfirm>>>,
     pub(super) startup_action_requested: Arc<Mutex<Option<String>>>,
     pub(super) registry_key_requested: Arc<Mutex<Option<String>>>,
     pub(super) startup_add_form: Arc<Mutex<StartupAddForm>>,
     pub(super) table_filter: Arc<Mutex<String>>,
     pub(super) table_sort: Arc<Mutex<Option<TableSort>>>,
     pub(super) table_selected_row: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Clone)]
+pub(super) struct ProcessKillConfirm {
+    pid: String,
+    label: String,
+}
+
+#[derive(Clone)]
+pub(super) struct StartupDeleteConfirm {
+    payload: String,
+    name: String,
+    source: String,
 }
 
 #[derive(Default)]
@@ -259,7 +277,9 @@ pub(super) struct CommandResultRenderState<'a> {
     pub(super) refresh_requested: &'a Arc<AtomicBool>,
     pub(super) auto_refresh_enabled: &'a Arc<AtomicBool>,
     pub(super) refresh_in_flight: bool,
+    pub(super) process_kill_confirm: &'a Arc<Mutex<Option<ProcessKillConfirm>>>,
     pub(super) process_kill_requested: &'a Arc<Mutex<Option<String>>>,
+    pub(super) startup_delete_confirm: &'a Arc<Mutex<Option<StartupDeleteConfirm>>>,
     pub(super) startup_action_requested: &'a Arc<Mutex<Option<String>>>,
     pub(super) registry_key_requested: &'a Arc<Mutex<Option<String>>>,
     pub(super) startup_add_form: &'a Arc<Mutex<StartupAddForm>>,
@@ -314,6 +334,16 @@ pub(super) fn render_command_result(
                 return;
             }
             render_result_table(ui, command, &table, &state);
+            render_process_kill_confirm(
+                ui,
+                state.process_kill_confirm,
+                state.process_kill_requested,
+            );
+            render_startup_delete_confirm(
+                ui,
+                state.startup_delete_confirm,
+                state.startup_action_requested,
+            );
             return;
         }
         return;
@@ -383,12 +413,15 @@ fn render_performance_monitor_detail(
 }
 
 fn performance_monitor_pending_detail(detail: &str) -> bool {
-    matches!(
-        detail.trim(),
-        "Waiting for client result..."
-            | "Refreshing command result..."
-            | "Auto refreshing performance monitor..."
-    )
+    let detail = detail.trim();
+    detail == t("Waiting for client result...")
+        || detail == t("Refreshing...")
+        || matches!(
+            detail,
+            "Waiting for client result..."
+                | "Refreshing command result..."
+                | "Auto refreshing performance monitor..."
+        )
 }
 
 fn render_performance_metric_bars(ui: &mut egui::Ui, metrics: &PerformanceMetrics) {
@@ -548,7 +581,7 @@ fn parse_windows_memory_percent(detail: &str) -> Option<f32> {
 
 fn parse_linux_memory_percent(detail: &str) -> Option<f32> {
     detail.lines().find_map(|line| {
-        let rest = line.trim_start().strip_prefix("Mem:")?;
+        let rest = parse_linux_memory_line_rest(line)?;
         let values = rest
             .split_whitespace()
             .filter_map(first_number)
@@ -557,6 +590,19 @@ fn parse_linux_memory_percent(detail: &str) -> Option<f32> {
         let used = *values.get(1)?;
         (total > 0.0).then_some(used * 100.0 / total)
     })
+}
+
+fn parse_linux_memory_line_rest(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for label in ["mem:", "mem："] {
+        if lower.starts_with(label) {
+            return trimmed.get(label.len()..);
+        }
+    }
+    ["内存:", "内存："]
+        .into_iter()
+        .find_map(|label| trimmed.strip_prefix(label))
 }
 
 fn parse_macos_memory_percent(detail: &str) -> Option<f32> {
@@ -583,15 +629,41 @@ fn parse_vm_stat_pages(detail: &str, label: &str) -> Option<f32> {
 }
 
 fn parse_df_disk_percent(detail: &str) -> Option<f32> {
-    let mut lines = detail.lines();
-    while lines
-        .next()
-        .is_some_and(|line| !line.split_whitespace().any(|cell| cell == "Filesystem"))
-    {}
-    lines.find_map(|line| {
-        line.split_whitespace()
-            .find_map(|cell| cell.strip_suffix('%').and_then(first_number))
+    let mut after_header = false;
+    detail.lines().find_map(|line| {
+        if is_df_header_line(line) {
+            after_header = true;
+            return None;
+        }
+        if !after_header && !looks_like_df_row(line) {
+            return None;
+        }
+        parse_df_row_percent(line)
     })
+}
+
+fn is_df_header_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.split_whitespace().any(|cell| cell == "filesystem")
+        || lower.contains("mounted on")
+        || line.split_whitespace().any(|cell| cell == "文件系统")
+        || line.contains("挂载点")
+}
+
+fn looks_like_df_row(line: &str) -> bool {
+    let cells = line.split_whitespace().collect::<Vec<_>>();
+    cells.len() >= 5
+        && cells
+            .iter()
+            .any(|cell| cell.strip_suffix('%').and_then(first_number).is_some())
+}
+
+fn parse_df_row_percent(line: &str) -> Option<f32> {
+    if !looks_like_df_row(line) {
+        return None;
+    }
+    line.split_whitespace()
+        .find_map(|cell| cell.strip_suffix('%').and_then(first_number))
 }
 
 fn first_number(value: &str) -> Option<f32> {
@@ -1050,6 +1122,8 @@ fn render_result_table(
                         row.set_selected(is_selected);
                         let row_text = row_data.cells.join("\t");
                         let process_id = process_row_pid(command, &table.headers, &row_data.cells);
+                        let process_label =
+                            process_row_label(command, &table.headers, &row_data.cells);
                         let startup_action =
                             startup_row_action(command, &table.headers, &row_data.cells);
                         let startup_delete_payload =
@@ -1079,6 +1153,7 @@ fn render_result_table(
                             let row_text = row_text.clone();
                             let row_key = row_key.clone();
                             let process_id = process_id.clone();
+                            let process_label = process_label.clone();
                             let startup_action = startup_action.clone();
                             let startup_delete_payload = startup_delete_payload.clone();
                             cell_response.context_menu(|ui| {
@@ -1096,8 +1171,11 @@ fn render_result_table(
                                         if let Ok(mut selected) = state.table_selected_row.lock() {
                                             *selected = Some(row_key.clone());
                                         }
-                                        if let Ok(mut value) = state.process_kill_requested.lock() {
-                                            *value = Some(process_id.clone());
+                                        if let Ok(mut value) = state.process_kill_confirm.lock() {
+                                            *value = Some(ProcessKillConfirm {
+                                                pid: process_id.clone(),
+                                                label: process_label.clone(),
+                                            });
                                         }
                                         ui.close();
                                     }
@@ -1122,9 +1200,10 @@ fn render_result_table(
                                         if let Ok(mut selected) = state.table_selected_row.lock() {
                                             *selected = Some(row_key.clone());
                                         }
-                                        if let Ok(mut value) = state.startup_action_requested.lock()
-                                        {
-                                            *value = Some(startup_delete_payload);
+                                        if let Ok(mut value) = state.startup_delete_confirm.lock() {
+                                            *value = Some(startup_delete_confirm(
+                                                startup_delete_payload,
+                                            ));
                                         }
                                         ui.close();
                                     }
@@ -1156,6 +1235,128 @@ fn render_result_table(
                 .color(crate::theme::palette().muted),
         );
     }
+}
+
+fn render_process_kill_confirm(
+    ui: &mut egui::Ui,
+    process_kill_confirm: &Arc<Mutex<Option<ProcessKillConfirm>>>,
+    process_kill_requested: &Arc<Mutex<Option<String>>>,
+) {
+    let pending = process_kill_confirm
+        .lock()
+        .ok()
+        .and_then(|value| value.clone());
+    let Some(pending) = pending else {
+        return;
+    };
+
+    egui::Window::new(t("Confirm Kill Process"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(460.0)
+        .show(ui.ctx(), |ui| {
+            ui.label(
+                egui::RichText::new(t("Kill this process?"))
+                    .size(12.0)
+                    .color(crate::theme::palette().muted),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.label(crate::theme::muted_text(t("PID")));
+                ui.label(crate::theme::body_text(&pending.pid));
+            });
+            if !pending.label.trim().is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(crate::theme::muted_text(t("Process")));
+                    ui.label(crate::theme::body_text(&pending.label));
+                });
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new(t("Kill Process"))
+                            .color(COLOR_BAD)
+                            .strong(),
+                    ))
+                    .clicked()
+                {
+                    if let Ok(mut value) = process_kill_requested.lock() {
+                        *value = Some(pending.pid.clone());
+                    }
+                    if let Ok(mut value) = process_kill_confirm.lock() {
+                        *value = None;
+                    }
+                    ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                }
+                if ui.button(t("Cancel")).clicked() {
+                    if let Ok(mut value) = process_kill_confirm.lock() {
+                        *value = None;
+                    }
+                }
+            });
+        });
+}
+
+fn render_startup_delete_confirm(
+    ui: &mut egui::Ui,
+    startup_delete_confirm: &Arc<Mutex<Option<StartupDeleteConfirm>>>,
+    startup_action_requested: &Arc<Mutex<Option<String>>>,
+) {
+    let pending = startup_delete_confirm
+        .lock()
+        .ok()
+        .and_then(|value| value.clone());
+    let Some(pending) = pending else {
+        return;
+    };
+
+    egui::Window::new(t("Confirm Delete Startup Item"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(460.0)
+        .show(ui.ctx(), |ui| {
+            ui.label(
+                egui::RichText::new(t("Delete this startup item?"))
+                    .size(12.0)
+                    .color(crate::theme::palette().muted),
+            );
+            if !pending.name.trim().is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(crate::theme::muted_text(t("Name")));
+                    ui.label(crate::theme::body_text(&pending.name));
+                });
+            }
+            if !pending.source.trim().is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(crate::theme::muted_text(t("Source")));
+                    ui.label(crate::theme::body_text(&pending.source));
+                });
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new(t("Delete Startup Item"))
+                            .color(COLOR_BAD)
+                            .strong(),
+                    ))
+                    .clicked()
+                {
+                    if let Ok(mut value) = startup_action_requested.lock() {
+                        *value = Some(pending.payload.clone());
+                    }
+                    if let Ok(mut value) = startup_delete_confirm.lock() {
+                        *value = None;
+                    }
+                    ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                }
+                if ui.button(t("Cancel")).clicked() {
+                    if let Ok(mut value) = startup_delete_confirm.lock() {
+                        *value = None;
+                    }
+                }
+            });
+        });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1363,6 +1564,14 @@ fn startup_row_delete_payload(
     ))
 }
 
+fn startup_delete_confirm(payload: String) -> StartupDeleteConfirm {
+    StartupDeleteConfirm {
+        name: payload_field(&payload, "name").unwrap_or_default(),
+        source: payload_field(&payload, "source").unwrap_or_default(),
+        payload,
+    }
+}
+
 fn startup_row_is_deleteable(source: &str, name: &str) -> bool {
     let source = source.trim();
     let name = name.trim();
@@ -1477,24 +1686,6 @@ fn command_result_table_id(
     )
 }
 
-fn table_cell_label(
-    ui: &mut egui::Ui,
-    text: &str,
-    size: f32,
-    color: egui::Color32,
-    align: egui::Align,
-    sense: egui::Sense,
-) -> egui::Response {
-    ui.add_sized(
-        [ui.available_width(), ui.available_height()],
-        egui::Label::new(egui::RichText::new(text).size(size).color(color))
-            .selectable(false)
-            .truncate()
-            .halign(align)
-            .sense(sense),
-    )
-}
-
 fn process_row_pid(command: &CommandKind, headers: &[String], row: &[String]) -> Option<String> {
     if !matches!(
         command,
@@ -1511,6 +1702,28 @@ fn process_row_pid(command: &CommandKind, headers: &[String], row: &[String]) ->
     } else {
         None
     }
+}
+
+fn process_row_label(command: &CommandKind, headers: &[String], row: &[String]) -> String {
+    if !matches!(
+        command,
+        CommandKind::ProcessManager | CommandKind::WindowManager
+    ) {
+        return String::new();
+    }
+
+    ["name", "processname", "comm", "command", "title"]
+        .iter()
+        .find_map(|wanted| {
+            headers
+                .iter()
+                .position(|header| normalized_table_header(header) == *wanted)
+                .and_then(|index| row.get(index))
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_default()
 }
 
 fn table_column_widths(
@@ -1729,6 +1942,32 @@ fn estimated_table_text_width(value: &str) -> f32 {
             }
         })
         .sum::<f32>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_localized_ubuntu_performance_snapshot() {
+        let detail = "\
+performance_snapshot:
+09:34:57 up 21 min,  1 user,  load average: 2.51, 1.92, 1.21
+total        used        free      shared  buff/cache   available
+内存：          1594         693         111          22         971         901
+交换：          3357         450        2907
+文件系统        容量  已用  可用 已用% 挂载点
+/dev/sda2        20G   16G  2.8G   86% /
+";
+
+        let metrics = parse_performance_metrics(detail);
+
+        assert!(metrics.cpu.is_some());
+        let memory = metrics.memory.expect("memory metric");
+        assert!((memory.percent - (693.0 * 100.0 / 1594.0)).abs() < 0.1);
+        let disk = metrics.disk.expect("disk metric");
+        assert!((disk.percent - 86.0).abs() < f32::EPSILON);
+    }
 }
 
 pub(super) fn command_title(command: &CommandKind) -> String {

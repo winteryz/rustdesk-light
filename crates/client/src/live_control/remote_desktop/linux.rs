@@ -315,7 +315,10 @@ pub(crate) mod capture {
 }
 
 pub(crate) mod input {
+    use std::os::unix::process::CommandExt;
     use std::process::Command;
+
+    use super::super::KeyModifiers;
 
     pub(crate) fn move_mouse(x: i32, y: i32) -> String {
         let x = x.to_string();
@@ -336,6 +339,129 @@ pub(crate) mod input {
         }
     }
 
+    pub(crate) fn mouse_button(x: i32, y: i32, button: &str, down: bool) -> String {
+        let button_id = if button == "right" { "3" } else { "1" };
+        let action = if down { "mousedown" } else { "mouseup" };
+        let x = x.to_string();
+        let y = y.to_string();
+        match run_xdotool(&["mousemove", &x, &y, action, button_id]) {
+            Ok(()) => {
+                let state = if down { "down" } else { "up" };
+                format!("remote_desktop_input\nmessage=mouse {button} {state} {x} {y}")
+            }
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    pub(crate) fn key(name: &str, modifiers: KeyModifiers) -> String {
+        let Some(key_name) = xdotool_key(name) else {
+            return format!("remote_desktop_error\nmessage=unsupported key {name}");
+        };
+        let modifiers = modifier_key_names(modifiers);
+        let mut args = Vec::new();
+        for modifier in &modifiers {
+            args.push("keydown".to_string());
+            args.push((*modifier).to_string());
+        }
+        args.push("keydown".to_string());
+        args.push(key_name.clone());
+        args.push("keyup".to_string());
+        args.push(key_name.clone());
+        for modifier in modifiers.iter().rev() {
+            args.push("keyup".to_string());
+            args.push((*modifier).to_string());
+        }
+        match run_xdotool_owned(&args) {
+            Ok(()) => format!("remote_desktop_input\nmessage=key {name}"),
+            Err(error) => {
+                let _ = release_key_combo(&key_name, &modifiers);
+                format!("remote_desktop_error\nmessage={error}")
+            }
+        }
+    }
+
+    pub(crate) fn text(text: &str) -> String {
+        match run_xdotool(&["type", "--clearmodifiers", "--delay", "0", text]) {
+            Ok(()) => "remote_desktop_input\nmessage=text sent".to_string(),
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    fn xdotool_key(name: &str) -> Option<String> {
+        let value = match name {
+            "arrow_down" => "Down",
+            "arrow_left" => "Left",
+            "arrow_right" => "Right",
+            "arrow_up" => "Up",
+            "escape" => "Escape",
+            "tab" => "Tab",
+            "backspace" => "BackSpace",
+            "enter" => "Return",
+            "space" => "space",
+            "insert" => "Insert",
+            "delete" => "Delete",
+            "home" => "Home",
+            "end" => "End",
+            "page_up" => "Page_Up",
+            "page_down" => "Page_Down",
+            "colon" => "colon",
+            "comma" => "comma",
+            "backslash" => "backslash",
+            "slash" => "slash",
+            "pipe" => "bar",
+            "questionmark" => "question",
+            "exclamationmark" => "exclam",
+            "open_bracket" => "bracketleft",
+            "close_bracket" => "bracketright",
+            "open_curly_bracket" => "braceleft",
+            "close_curly_bracket" => "braceright",
+            "backtick" => "grave",
+            "minus" => "minus",
+            "period" => "period",
+            "plus" => "plus",
+            "equals" => "equal",
+            "semicolon" => "semicolon",
+            "quote" => "apostrophe",
+            "browser_back" => "XF86Back",
+            key if key.len() == 1 && key.as_bytes()[0].is_ascii_alphanumeric() => {
+                return Some(key.to_string());
+            }
+            key if key.starts_with('f') => {
+                let number = key.strip_prefix('f')?.parse::<u8>().ok()?;
+                if (1..=35).contains(&number) {
+                    return Some(format!("F{number}"));
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        Some(value.to_string())
+    }
+
+    fn modifier_key_names(modifiers: KeyModifiers) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if modifiers.shift {
+            keys.push("Shift_L");
+        }
+        if modifiers.ctrl || modifiers.command {
+            keys.push("Control_L");
+        }
+        if modifiers.alt {
+            keys.push("Alt_L");
+        }
+        keys
+    }
+
+    fn release_key_combo(key_name: &str, modifiers: &[&str]) -> Result<(), String> {
+        let mut args = vec!["keyup".to_string(), key_name.to_string()];
+        for modifier in modifiers.iter().rev() {
+            args.push("keyup".to_string());
+            args.push((*modifier).to_string());
+        }
+        run_xdotool_owned(&args)
+    }
+
     fn run_xdotool(args: &[&str]) -> Result<(), String> {
         if std::env::var("WAYLAND_DISPLAY").is_ok() && std::env::var("DISPLAY").is_err() {
             return Err(
@@ -343,8 +469,10 @@ pub(crate) mod input {
                     .to_string(),
             );
         }
-        let output = Command::new("xdotool")
-            .args(args)
+        let mut command = Command::new("xdotool");
+        command.args(args);
+        command.process_group(0);
+        let output = command
             .output()
             .map_err(|error| format!("xdotool failed: {error}; install xdotool for X11 input"))?;
         if output.status.success() {
@@ -355,5 +483,10 @@ pub(crate) mod input {
                 String::from_utf8_lossy(&output.stderr).trim()
             ))
         }
+    }
+
+    fn run_xdotool_owned(args: &[String]) -> Result<(), String> {
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        run_xdotool(&refs)
     }
 }

@@ -66,7 +66,12 @@ pub fn render_toolbar_actions(
     );
 }
 
-pub fn render_unavailable_client_menu(ui: &mut egui::Ui, client_id: &str, status: &str) {
+pub fn render_unavailable_client_menu(
+    ui: &mut egui::Ui,
+    client_id: &str,
+    status: &str,
+    send_command: &mut impl FnMut(&str, CommandKind),
+) {
     prepare_menu_ui(ui, CONTEXT_MENU_MIN_WIDTH);
     ui.add(
         egui::Label::new(egui::RichText::new(format!("{} {status}", t("Client"))).strong())
@@ -77,6 +82,14 @@ pub fn render_unavailable_client_menu(ui: &mut egui::Ui, client_id: &str, status
             "Remote commands are disabled until this client reconnects.",
         ))
         .wrap_mode(egui::TextWrapMode::Extend),
+    );
+    ui.separator();
+    menu_command(
+        ui,
+        client_id,
+        "Move To Group",
+        CommandKind::MoveToGroup,
+        send_command,
     );
     ui.separator();
     if ui.add(menu_button(t("Copy Client ID"))).clicked() {
@@ -128,13 +141,6 @@ fn render_session(
             client_id,
             "Move To Group",
             CommandKind::MoveToGroup,
-            send_command,
-        );
-        menu_command(
-            ui,
-            client_id,
-            "Clone Client Settings",
-            CommandKind::CloneClientSettings,
             send_command,
         );
         menu_command(
@@ -390,16 +396,8 @@ fn render_execute(
         menu_command(
             ui,
             client_id,
-            "Create Task",
+            "Task Manager",
             CommandKind::CreateTask,
-            send_command,
-        );
-        ui.separator();
-        menu_command(
-            ui,
-            client_id,
-            "Command Preset",
-            CommandKind::CommandPreset,
             send_command,
         );
     });
@@ -527,6 +525,7 @@ fn command_is_implemented(command: &CommandKind) -> bool {
             | CommandKind::KillClientProcess
             | CommandKind::Shutdown
             | CommandKind::Reboot
+            | CommandKind::MoveToGroup
             | CommandKind::ClientConfig
             | CommandKind::DeleteClient
             | CommandKind::ComputerInfo
@@ -553,5 +552,6 @@ fn command_is_implemented(command: &CommandKind) -> bool {
             | CommandKind::ExecuteFile
             | CommandKind::ExecuteCode
             | CommandKind::ExecuteStaticCommand
+            | CommandKind::CreateTask
     )
 }

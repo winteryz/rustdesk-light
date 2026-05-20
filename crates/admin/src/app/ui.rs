@@ -102,7 +102,7 @@ pub(super) fn section_title(ui: &mut egui::Ui, title: &str) {
 }
 
 pub(super) fn table_header(ui: &mut egui::Ui, title: &str) {
-    ui.label(crate::theme::muted_text(title).strong());
+    crate::theme::table_header_label(ui, title);
 }
 
 pub(super) fn about_row(ui: &mut egui::Ui, label: &str, value: impl Into<String>) {
@@ -144,11 +144,7 @@ pub(super) fn cell_label_with_hover(
 ) {
     let text = text.into();
     let hover_text = hover_text.into();
-    let response = ui.add(
-        egui::Label::new(egui::RichText::new(text.clone()).size(12.0))
-            .selectable(false)
-            .sense(egui::Sense::hover()),
-    );
+    let response = crate::theme::table_body_label(ui, text.clone());
     if response.hovered() {
         response.on_hover_text(hover_text);
     }

@@ -1469,19 +1469,11 @@ fn render_connection_table(
 }
 
 fn table_header_label(ui: &mut egui::Ui, text: &str) {
-    ui.add(
-        egui::Label::new(crate::theme::muted_text(text).strong())
-            .selectable(false)
-            .sense(egui::Sense::hover()),
-    );
+    crate::theme::table_header_label(ui, text);
 }
 
 fn table_text(ui: &mut egui::Ui, text: &str) {
-    ui.add(
-        egui::Label::new(crate::theme::body_text(text))
-            .selectable(false)
-            .sense(egui::Sense::hover()),
-    );
+    crate::theme::table_body_label(ui, text);
 }
 
 fn remember_pre_open_failure(

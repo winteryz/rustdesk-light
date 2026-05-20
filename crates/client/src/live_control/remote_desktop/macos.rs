@@ -231,8 +231,14 @@ pub(crate) mod input {
     use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::geometry::CGPoint;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
+
+    use super::super::KeyModifiers;
+
+    static LEFT_BUTTON_DOWN: AtomicBool = AtomicBool::new(false);
+    static RIGHT_BUTTON_DOWN: AtomicBool = AtomicBool::new(false);
 
     pub(crate) fn move_mouse(x: i32, y: i32) -> String {
         match post_move(x, y) {
@@ -248,10 +254,41 @@ pub(crate) mod input {
         }
     }
 
+    pub(crate) fn mouse_button(x: i32, y: i32, button: &str, down: bool) -> String {
+        match post_mouse_button(x, y, button, down) {
+            Ok(()) => {
+                let state = if down { "down" } else { "up" };
+                format!("remote_desktop_input\nmessage=mouse {button} {state} {x} {y}")
+            }
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    pub(crate) fn key(name: &str, modifiers: KeyModifiers) -> String {
+        match post_key(name, modifiers) {
+            Ok(()) => format!("remote_desktop_input\nmessage=key {name}"),
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
+    pub(crate) fn text(text: &str) -> String {
+        match post_text(text) {
+            Ok(()) => "remote_desktop_input\nmessage=text sent".to_string(),
+            Err(error) => format!("remote_desktop_error\nmessage={error}"),
+        }
+    }
+
     fn post_move(x: i32, y: i32) -> Result<(), String> {
         ensure_accessibility_permission()?;
         let source = event_source()?;
-        post_mouse_event(&source, CGEventType::MouseMoved, CGMouseButton::Left, x, y)
+        let (event_type, button) = if LEFT_BUTTON_DOWN.load(Ordering::Relaxed) {
+            (CGEventType::LeftMouseDragged, CGMouseButton::Left)
+        } else if RIGHT_BUTTON_DOWN.load(Ordering::Relaxed) {
+            (CGEventType::RightMouseDragged, CGMouseButton::Right)
+        } else {
+            (CGEventType::MouseMoved, CGMouseButton::Left)
+        };
+        post_mouse_event(&source, event_type, button, x, y)
     }
 
     fn post_click(x: i32, y: i32, button: &str) -> Result<(), String> {
@@ -275,6 +312,80 @@ pub(crate) mod input {
         post_mouse_event(&source, up, mouse_button, x, y)
     }
 
+    fn post_mouse_button(x: i32, y: i32, button: &str, down: bool) -> Result<(), String> {
+        ensure_accessibility_permission()?;
+        let source = event_source()?;
+        let (event_type, mouse_button, state) = match (button, down) {
+            ("right", true) => (
+                CGEventType::RightMouseDown,
+                CGMouseButton::Right,
+                &RIGHT_BUTTON_DOWN,
+            ),
+            ("right", false) => (
+                CGEventType::RightMouseUp,
+                CGMouseButton::Right,
+                &RIGHT_BUTTON_DOWN,
+            ),
+            (_, true) => (
+                CGEventType::LeftMouseDown,
+                CGMouseButton::Left,
+                &LEFT_BUTTON_DOWN,
+            ),
+            (_, false) => (
+                CGEventType::LeftMouseUp,
+                CGMouseButton::Left,
+                &LEFT_BUTTON_DOWN,
+            ),
+        };
+        post_mouse_event(&source, CGEventType::MouseMoved, mouse_button, x, y)?;
+        post_mouse_event(&source, event_type, mouse_button, x, y)?;
+        state.store(down, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn post_key(name: &str, modifiers: KeyModifiers) -> Result<(), String> {
+        ensure_accessibility_permission()?;
+        let source = event_source()?;
+        let key_code = key_code(name).ok_or_else(|| format!("unsupported key {name}"))?;
+        let modifiers = modifier_key_codes(modifiers);
+        let result = (|| {
+            for modifier in &modifiers {
+                post_keyboard_event(&source, *modifier, true)?;
+            }
+            post_keyboard_event(&source, key_code, true)?;
+            post_keyboard_event(&source, key_code, false)?;
+            for modifier in modifiers.iter().rev() {
+                post_keyboard_event(&source, *modifier, false)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = post_keyboard_event(&source, key_code, false);
+            for modifier in modifiers.iter().rev() {
+                let _ = post_keyboard_event(&source, *modifier, false);
+            }
+        }
+        result
+    }
+
+    fn post_text(text: &str) -> Result<(), String> {
+        ensure_accessibility_permission()?;
+        let source = event_source()?;
+        for ch in text.chars() {
+            let (key_code, shift) = text_key_code(ch)
+                .ok_or_else(|| format!("unsupported macOS text character U+{:04X}", ch as u32))?;
+            if shift {
+                post_keyboard_event(&source, 56, true)?;
+            }
+            post_keyboard_event(&source, key_code, true)?;
+            post_keyboard_event(&source, key_code, false)?;
+            if shift {
+                post_keyboard_event(&source, 56, false)?;
+            }
+        }
+        Ok(())
+    }
+
     fn event_source() -> Result<CGEventSource, String> {
         CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .map_err(|_| "CGEventSourceCreate failed".to_string())
@@ -292,6 +403,169 @@ pub(crate) mod input {
             .map_err(|_| "CGEventCreateMouseEvent failed".to_string())?;
         event.post(CGEventTapLocation::HID);
         Ok(())
+    }
+
+    fn post_keyboard_event(
+        source: &CGEventSource,
+        key_code: u16,
+        pressed: bool,
+    ) -> Result<(), String> {
+        let event = CGEvent::new_keyboard_event(source.clone(), key_code, pressed)
+            .map_err(|_| "CGEventCreateKeyboardEvent failed".to_string())?;
+        event.post(CGEventTapLocation::HID);
+        Ok(())
+    }
+
+    fn modifier_key_codes(modifiers: KeyModifiers) -> Vec<u16> {
+        let mut keys = Vec::new();
+        if modifiers.shift {
+            keys.push(56);
+        }
+        if modifiers.ctrl {
+            keys.push(59);
+        }
+        if modifiers.alt {
+            keys.push(58);
+        }
+        if modifiers.command {
+            keys.push(55);
+        }
+        keys
+    }
+
+    fn text_key_code(ch: char) -> Option<(u16, bool)> {
+        if ch.is_ascii_alphabetic() {
+            return key_code(&ch.to_ascii_lowercase().to_string())
+                .map(|code| (code, ch.is_ascii_uppercase()));
+        }
+        if ch.is_ascii_digit() {
+            return key_code(&ch.to_string()).map(|code| (code, false));
+        }
+        Some(match ch {
+            ' ' => (49, false),
+            '\t' => (48, false),
+            '\n' | '\r' => (36, false),
+            '!' => (18, true),
+            '@' => (19, true),
+            '#' => (20, true),
+            '$' => (21, true),
+            '%' => (23, true),
+            '^' => (22, true),
+            '&' => (26, true),
+            '*' => (28, true),
+            '(' => (25, true),
+            ')' => (29, true),
+            '-' => (27, false),
+            '_' => (27, true),
+            '=' => (24, false),
+            '+' => (24, true),
+            '[' => (33, false),
+            '{' => (33, true),
+            ']' => (30, false),
+            '}' => (30, true),
+            '\\' => (42, false),
+            '|' => (42, true),
+            ';' => (41, false),
+            ':' => (41, true),
+            '\'' => (39, false),
+            '"' => (39, true),
+            ',' => (43, false),
+            '<' => (43, true),
+            '.' => (47, false),
+            '>' => (47, true),
+            '/' => (44, false),
+            '?' => (44, true),
+            '`' => (50, false),
+            '~' => (50, true),
+            _ => return None,
+        })
+    }
+
+    fn key_code(name: &str) -> Option<u16> {
+        Some(match name {
+            "a" => 0,
+            "s" => 1,
+            "d" => 2,
+            "f" => 3,
+            "h" => 4,
+            "g" => 5,
+            "z" => 6,
+            "x" => 7,
+            "c" => 8,
+            "v" => 9,
+            "b" => 11,
+            "q" => 12,
+            "w" => 13,
+            "e" => 14,
+            "r" => 15,
+            "y" => 16,
+            "t" => 17,
+            "1" => 18,
+            "2" => 19,
+            "3" => 20,
+            "4" => 21,
+            "6" => 22,
+            "5" => 23,
+            "equals" | "plus" => 24,
+            "9" => 25,
+            "7" => 26,
+            "minus" => 27,
+            "8" => 28,
+            "0" => 29,
+            "close_bracket" | "close_curly_bracket" => 30,
+            "o" => 31,
+            "u" => 32,
+            "open_bracket" | "open_curly_bracket" => 33,
+            "i" => 34,
+            "p" => 35,
+            "enter" => 36,
+            "l" => 37,
+            "j" => 38,
+            "quote" => 39,
+            "k" => 40,
+            "semicolon" | "colon" => 41,
+            "backslash" | "pipe" => 42,
+            "comma" => 43,
+            "slash" | "questionmark" => 44,
+            "n" => 45,
+            "m" => 46,
+            "period" => 47,
+            "tab" => 48,
+            "space" => 49,
+            "backtick" => 50,
+            "backspace" => 51,
+            "escape" => 53,
+            "f1" => 122,
+            "f2" => 120,
+            "f3" => 99,
+            "f4" => 118,
+            "f5" => 96,
+            "f6" => 97,
+            "f7" => 98,
+            "f8" => 100,
+            "f9" => 101,
+            "f10" => 109,
+            "f11" => 103,
+            "f12" => 111,
+            "f13" => 105,
+            "f14" => 107,
+            "f15" => 113,
+            "f16" => 106,
+            "f17" => 64,
+            "f18" => 79,
+            "f19" => 80,
+            "f20" => 90,
+            "home" => 115,
+            "page_up" => 116,
+            "delete" => 117,
+            "end" => 119,
+            "page_down" => 121,
+            "arrow_left" => 123,
+            "arrow_right" => 124,
+            "arrow_down" => 125,
+            "arrow_up" => 126,
+            _ => return None,
+        })
     }
 
     fn ensure_accessibility_permission() -> Result<(), String> {
