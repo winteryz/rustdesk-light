@@ -1708,7 +1708,7 @@ impl AdminApp {
                 if ui.button(format!("🌐 {}", t("Client Map"))).clicked() {
                     self.client_map_window.open();
                 }
-                if ui.button(t("Client Builder")).clicked() {
+                if ui.button(format!("🛠 {}", t("Client Builder"))).clicked() {
                     self.client_builder_open = true;
                 }
                 ui.menu_button(format!("🔧 {}", t("Tools")), |ui| {
