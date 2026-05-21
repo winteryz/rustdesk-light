@@ -470,7 +470,7 @@ struct V4l2PixFormat {
 #[repr(C)]
 union V4l2FormatUnion {
     pix: V4l2PixFormat,
-    raw_data: [u8; 200],
+    raw_data: [u64; 25],
 }
 
 #[repr(C)]
