@@ -99,10 +99,11 @@ macOS/Linux:
 The scripts build `rdl-client-gui` and `rdl-admin-gui`, then write packages to
 `dist/apps/<platform>/`. Client and admin are packaged separately. The GUI app
 packages include the application icon, config templates, and a short README.
-On Windows, only the copied executables inside `dist/apps/` are rewritten to
-the Windows GUI subsystem so they do not open a terminal window; the normal
-`target/release` binaries remain console executables so logs stay visible when
-run directly. macOS packages are `.app` bundles; Linux packages are AppDir style
+On Windows, the normal `target/release` GUI binaries remain console executables
+so terminal runs show logs and wait for command output like `--version`. The
+packaging script rewrites only the copied executables inside `dist/apps/` to the
+Windows GUI subsystem, so packaged app double-clicks do not open a terminal
+window. macOS packages are `.app` bundles; Linux packages are AppDir style
 directories with `.desktop` metadata and icons.
 
 `rdl-client-cli` is not included in these app packages because it is a
