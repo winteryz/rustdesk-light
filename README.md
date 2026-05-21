@@ -79,6 +79,36 @@ cargo build-admin-gui --release
 
 Debug binaries go to `target/debug`; release binaries go to `target/release`. Windows adds `.exe`.
 
+## Local App Packages
+
+Use the local packaging scripts to create separate double-clickable app packages
+for the GUI client and admin console:
+
+Windows:
+
+```powershell
+.\scripts\package-apps.ps1 --release
+```
+
+macOS/Linux:
+
+```sh
+./scripts/package-apps.sh --release
+```
+
+The scripts build `rdl-client-gui` and `rdl-admin-gui`, then write packages to
+`dist/apps/<platform>/`. Client and admin are packaged separately. The GUI app
+packages include the application icon, config templates, and a short README.
+On Windows, only the copied executables inside `dist/apps/` are rewritten to
+the Windows GUI subsystem so they do not open a terminal window; the normal
+`target/release` binaries remain console executables so logs stay visible when
+run directly. macOS packages are `.app` bundles; Linux packages are AppDir style
+directories with `.desktop` metadata and icons.
+
+`rdl-client-cli` is not included in these app packages because it is a
+terminal-only client. Build it separately with `cargo build-client-cli --release`
+when you need the CLI endpoint.
+
 ## Configuration
 
 Config files are created automatically on first run:
@@ -202,15 +232,6 @@ On macOS, clear quarantine metadata after extracting a downloaded archive if nee
 xattr -cr ./rdl-client-gui
 xattr -cr ./rdl-admin-gui
 xattr -cr ./rdl-server-cli
-```
-
-## Version Info
-
-```sh
-rdl-server-cli --version
-rdl-client-gui --version
-rdl-client-cli --version
-rdl-admin-gui --version
 ```
 
 Tagged builds use the git tag; local builds use the workspace version unless `RDL_BUILD_VERSION` is set.
