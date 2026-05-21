@@ -7,6 +7,11 @@ mod camera;
 pub(crate) mod realtime_video;
 #[cfg(feature = "gui")]
 mod remote_desktop;
+#[cfg(all(
+    feature = "gui",
+    any(target_os = "windows", target_os = "linux", target_os = "macos")
+))]
+mod tile_diff;
 
 #[cfg(feature = "gui")]
 pub(crate) use audio_listen::{
@@ -123,8 +128,9 @@ pub(crate) fn disabled_detail(command: &CommandKind) -> String {
 pub(crate) fn open_remote_desktop_capture(
     screen_index: usize,
     quality: &str,
+    tile_diff_enabled: bool,
 ) -> Result<RemoteDesktopCapture, String> {
-    RemoteDesktopCapture::new(screen_index, quality)
+    RemoteDesktopCapture::new(screen_index, quality, tile_diff_enabled)
 }
 
 #[cfg(not(feature = "gui"))]
@@ -134,6 +140,7 @@ pub(crate) struct CameraCapture;
 pub(crate) fn open_remote_desktop_capture(
     _screen_index: usize,
     _quality: &str,
+    _tile_diff_enabled: bool,
 ) -> Result<RemoteDesktopCapture, String> {
     Err(gui_unavailable_message())
 }
