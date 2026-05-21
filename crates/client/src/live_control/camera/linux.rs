@@ -38,7 +38,7 @@ pub(super) fn capture_frame(request: &CameraRequest) -> Result<CameraVideoFrame,
 pub(super) fn capture_stream_frame(
     capture: &mut CameraCapture,
 ) -> Result<CameraVideoFrame, String> {
-    let mut last_error = String::new();
+    let mut last_error = capture.stream_error.clone().unwrap_or_default();
     if !capture.ffmpeg_stream_failed {
         match capture_ffmpeg_stream_frame(capture) {
             Ok(frame) => return Ok(frame),
@@ -46,6 +46,7 @@ pub(super) fn capture_stream_frame(
                 capture.ffmpeg_stream = None;
                 capture.ffmpeg_stream_failed = true;
                 last_error = format!("ffmpeg stream failed: {error}");
+                capture.stream_error = Some(last_error.clone());
             }
         }
     }
@@ -60,6 +61,7 @@ pub(super) fn capture_stream_frame(
                 } else {
                     format!("{last_error}; v4l2 stream failed: {error}")
                 };
+                capture.stream_error = Some(last_error.clone());
             }
         }
     }

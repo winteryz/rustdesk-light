@@ -33,6 +33,8 @@ pub(crate) struct CameraCapture {
     v4l2_stream: Option<linux::V4l2CameraStream>,
     #[cfg(target_os = "linux")]
     v4l2_stream_failed: bool,
+    #[cfg(target_os = "linux")]
+    stream_error: Option<String>,
 }
 
 impl CameraCapture {
@@ -49,6 +51,7 @@ impl CameraCapture {
                 ffmpeg_stream_failed: false,
                 v4l2_stream: None,
                 v4l2_stream_failed: false,
+                stream_error: None,
             });
         }
         #[cfg(any(target_os = "windows", target_os = "macos"))]
