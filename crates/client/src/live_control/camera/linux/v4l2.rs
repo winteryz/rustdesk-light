@@ -28,7 +28,7 @@ const VIDIOC_DQBUF: c_ulong = ioctl_readwrite::<V4l2Buffer>(b'V', 17);
 const VIDIOC_STREAMON: c_ulong = ioctl_write::<u32>(b'V', 18);
 const VIDIOC_STREAMOFF: c_ulong = ioctl_write::<u32>(b'V', 19);
 
-pub(super) struct V4l2CameraStream {
+pub(crate) struct V4l2CameraStream {
     file: File,
     buffers: Vec<MappedBuffer>,
     format: V4l2FrameFormat,
