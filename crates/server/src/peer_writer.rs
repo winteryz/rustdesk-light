@@ -1,7 +1,11 @@
 use crate::realtime_video::RealtimeVideoReceiver;
-use rdl_protocol::{write_envelope, FileTransferAction, FileTransferDirection, Message, Role};
+use rdl_protocol::{
+    write_envelope_with_version, FileTransferAction, FileTransferDirection, Message, Role,
+};
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -13,6 +17,7 @@ pub(crate) fn writer_loop(
     high_rx: Receiver<Message>,
     video_rx: RealtimeVideoReceiver<Message>,
     bulk_rx: Receiver<Message>,
+    protocol_version: Arc<AtomicU16>,
 ) {
     let mut next_message_id = 1u64;
     let mut high_open = true;
@@ -22,7 +27,13 @@ pub(crate) fn writer_loop(
         loop {
             match high_rx.try_recv() {
                 Ok(message) => {
-                    if !write_server_message(peer_id, &mut writer, &mut next_message_id, message) {
+                    if !write_server_message(
+                        peer_id,
+                        &mut writer,
+                        &mut next_message_id,
+                        &protocol_version,
+                        message,
+                    ) {
                         return;
                     }
                 }
@@ -37,7 +48,13 @@ pub(crate) fn writer_loop(
         loop {
             match video_rx.try_recv() {
                 Ok(message) => {
-                    if !write_server_message(peer_id, &mut writer, &mut next_message_id, message) {
+                    if !write_server_message(
+                        peer_id,
+                        &mut writer,
+                        &mut next_message_id,
+                        &protocol_version,
+                        message,
+                    ) {
                         return;
                     }
                 }
@@ -56,7 +73,13 @@ pub(crate) fn writer_loop(
 
         match bulk_rx.recv_timeout(Duration::from_millis(BULK_POLL_MS)) {
             Ok(message) => {
-                if !write_server_message(peer_id, &mut writer, &mut next_message_id, message) {
+                if !write_server_message(
+                    peer_id,
+                    &mut writer,
+                    &mut next_message_id,
+                    &protocol_version,
+                    message,
+                ) {
                     return;
                 }
             }
@@ -74,9 +97,18 @@ fn write_server_message(
     peer_id: usize,
     writer: &mut TcpStream,
     next_message_id: &mut u64,
+    protocol_version: &AtomicU16,
     message: Message,
 ) -> bool {
-    let result = write_envelope(writer, Role::Server, *next_message_id, None, message);
+    let version = protocol_version.load(Ordering::Relaxed);
+    let result = write_envelope_with_version(
+        writer,
+        version,
+        Role::Server,
+        *next_message_id,
+        None,
+        message,
+    );
     *next_message_id = next_message_id.saturating_add(1);
     if let Err(error) = result {
         eprintln!("peer {peer_id} write failed: {error}");
