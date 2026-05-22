@@ -17,7 +17,8 @@ authors = ["marlkiller <marlkiller369@gmail.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/marlkiller/rust-desk-light"
 
-[profile.release]
+[profile.release-size]
+inherits = "release"
 opt-level = "z"
 strip = "symbols"
 lto = true

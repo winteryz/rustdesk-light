@@ -92,6 +92,8 @@ cargo build-client-cli --release
 cargo build-admin-gui --release
 ```
 
+Use `--profile release-size` for a smaller `rdl-client-cli` when needed.
+
 Debug binaries go to `target/debug`; release binaries go to `target/release`.
 Windows adds `.exe`.
 
