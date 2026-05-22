@@ -1527,6 +1527,8 @@ pub struct Envelope {
 }
 
 pub fn encode_envelope(envelope: &Envelope) -> Result<Vec<u8>, ProtocolError> {
+    let message_kind = envelope.message.kind_code();
+
     let mut payload = BinaryWriter::default();
     envelope.message.encode_payload(&mut payload);
     let payload = payload.into_inner();
@@ -1547,7 +1549,7 @@ pub fn encode_envelope(envelope: &Envelope) -> Result<Vec<u8>, ProtocolError> {
     frame.extend_from_slice(&envelope.message_id.to_be_bytes());
     frame.extend_from_slice(&envelope.correlation_id.unwrap_or_default().to_be_bytes());
     frame.push(envelope.role.to_code());
-    frame.extend_from_slice(&envelope.message.kind_code().to_be_bytes());
+    frame.extend_from_slice(&message_kind.to_be_bytes());
     frame.extend_from_slice(&(token.len() as u32).to_be_bytes());
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(token);
@@ -1564,9 +1566,6 @@ pub fn decode_envelope(frame: &[u8]) -> Result<Envelope, ProtocolError> {
     }
 
     let version = u16::from_be_bytes([frame[4], frame[5]]);
-    if version != PROTOCOL_VERSION {
-        return Err(ProtocolError::UnsupportedVersion(version));
-    }
 
     let remaining_len = u32::from_be_bytes([frame[6], frame[7], frame[8], frame[9]]) as usize;
     if remaining_len > MAX_FRAME_LEN as usize {
@@ -1611,6 +1610,25 @@ pub fn write_envelope(
     write_envelope_with_token(writer, role, message_id, correlation_id, "", message)
 }
 
+pub fn write_envelope_with_version(
+    writer: &mut impl Write,
+    version: u16,
+    role: Role,
+    message_id: u64,
+    correlation_id: Option<u64>,
+    message: Message,
+) -> io::Result<()> {
+    write_envelope_with_token_and_version(
+        writer,
+        version,
+        role,
+        message_id,
+        correlation_id,
+        "",
+        message,
+    )
+}
+
 pub fn write_envelope_with_token(
     writer: &mut impl Write,
     role: Role,
@@ -1619,8 +1637,28 @@ pub fn write_envelope_with_token(
     session_token: &str,
     message: Message,
 ) -> io::Result<()> {
+    write_envelope_with_token_and_version(
+        writer,
+        PROTOCOL_VERSION,
+        role,
+        message_id,
+        correlation_id,
+        session_token,
+        message,
+    )
+}
+
+pub fn write_envelope_with_token_and_version(
+    writer: &mut impl Write,
+    version: u16,
+    role: Role,
+    message_id: u64,
+    correlation_id: Option<u64>,
+    session_token: &str,
+    message: Message,
+) -> io::Result<()> {
     let envelope = Envelope {
-        version: PROTOCOL_VERSION,
+        version,
         message_id,
         correlation_id,
         role,
@@ -1636,10 +1674,6 @@ pub fn read_envelope(reader: &mut impl Read) -> io::Result<Envelope> {
     reader.read_exact(&mut header)?;
     if header[0..4] != FRAME_MAGIC {
         return Err(to_invalid_data(ProtocolError::InvalidMagic));
-    }
-    let version = u16::from_be_bytes([header[4], header[5]]);
-    if version != PROTOCOL_VERSION {
-        return Err(to_invalid_data(ProtocolError::UnsupportedVersion(version)));
     }
     let remaining_len = u32::from_be_bytes([header[6], header[7], header[8], header[9]]);
     if remaining_len > MAX_FRAME_LEN {
@@ -1716,7 +1750,6 @@ impl Default for EnvelopeDecoder {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProtocolError {
     InvalidMagic,
-    UnsupportedVersion(u16),
     InvalidFrameLength,
     TruncatedFrame,
     FrameTooLarge,
@@ -1739,9 +1772,6 @@ impl fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidMagic => write!(f, "invalid frame magic"),
-            Self::UnsupportedVersion(version) => {
-                write!(f, "unsupported protocol version: {version}")
-            }
             Self::InvalidFrameLength => write!(f, "invalid frame length"),
             Self::TruncatedFrame => write!(f, "truncated frame"),
             Self::FrameTooLarge => write!(f, "frame too large"),
@@ -1763,6 +1793,60 @@ impl fmt::Display for ProtocolError {
 }
 
 impl std::error::Error for ProtocolError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OLD_PROTOCOL_VERSION: u16 = 2;
+
+    #[test]
+    fn accepts_v2_hello_and_writes_v2_session() {
+        let hello = Envelope {
+            version: OLD_PROTOCOL_VERSION,
+            message_id: 1,
+            correlation_id: None,
+            role: Role::Client,
+            session_token: String::new(),
+            message: Message::Hello {
+                role: Role::Client,
+                auth_token: "token".to_string(),
+                id: "client-1".to_string(),
+                fingerprint: "fp".to_string(),
+                hostname: "host".to_string(),
+                os: "windows".to_string(),
+                username: "user".to_string(),
+                gui_available: true,
+            },
+        };
+
+        let frame = encode_envelope(&hello).expect("v2 hello should encode");
+        let decoded = decode_envelope(&frame).expect("v2 hello should decode");
+        assert_eq!(decoded.version, OLD_PROTOCOL_VERSION);
+        assert_eq!(decoded.message, hello.message);
+
+        let mut response = Vec::new();
+        write_envelope_with_version(
+            &mut response,
+            OLD_PROTOCOL_VERSION,
+            Role::Server,
+            1,
+            None,
+            Message::Session {
+                token: "session".to_string(),
+            },
+        )
+        .expect("v2 session should write");
+        let decoded_response = decode_envelope(&response).expect("v2 session should decode");
+        assert_eq!(decoded_response.version, OLD_PROTOCOL_VERSION);
+        assert_eq!(
+            decoded_response.message,
+            Message::Session {
+                token: "session".to_string()
+            }
+        );
+    }
+}
 
 pub fn now_epoch_ms() -> u128 {
     SystemTime::now()

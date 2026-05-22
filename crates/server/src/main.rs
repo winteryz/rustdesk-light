@@ -1,14 +1,16 @@
 use geoip::GeoIpLocator;
 use rdl_protocol::{
     now_epoch_ms, read_envelope, AudioSource, ClientInfo, FileTransferAction,
-    FileTransferDirection, Message, P2pAction, Role, VideoSource,
+    FileTransferDirection, Message, P2pAction, Role, VideoSource, PROTOCOL_VERSION,
 };
 use realtime_video::{latest_video_channel, RealtimeVideoSender};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -165,6 +167,7 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
     let (high_tx, high_rx) = mpsc::channel::<Message>();
     let (video_tx, video_rx) = latest_video_channel();
     let (bulk_tx, bulk_rx) = mpsc::channel::<Message>();
+    let protocol_version = Arc::new(AtomicU16::new(PROTOCOL_VERSION));
     if events_tx
         .send(ServerEvent::Connected {
             peer_id,
@@ -188,9 +191,20 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
         }
     };
 
-    thread::spawn(move || peer_writer::writer_loop(peer_id, writer, high_rx, video_rx, bulk_rx));
+    let writer_protocol_version = Arc::clone(&protocol_version);
+    thread::spawn(move || {
+        peer_writer::writer_loop(
+            peer_id,
+            writer,
+            high_rx,
+            video_rx,
+            bulk_rx,
+            writer_protocol_version,
+        )
+    });
 
     let mut reader = stream;
+    let mut warned_protocol_mismatch = false;
     loop {
         let envelope = match read_envelope(&mut reader) {
             Ok(envelope) => envelope,
@@ -199,6 +213,14 @@ fn handle_peer(peer_id: usize, stream: TcpStream, events_tx: Sender<ServerEvent>
                 break;
             }
         };
+        protocol_version.store(envelope.version, Ordering::Relaxed);
+        if envelope.version != PROTOCOL_VERSION && !warned_protocol_mismatch {
+            eprintln!(
+                "peer {peer_id} warning: protocol version {} differs from server protocol {}; compatibility mode enabled",
+                envelope.version, PROTOCOL_VERSION
+            );
+            warned_protocol_mismatch = true;
+        }
 
         match envelope.message {
             Message::Hello {
