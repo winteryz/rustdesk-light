@@ -15,10 +15,10 @@
 
 | Binary | Type | Purpose |
 | --- | --- | --- |
-| `rdl-admin-gui` | GUI | Operator console for clients, commands, live control, files, and terminals. |
-| `rdl-server-cli` | CLI | Relay for registration, sessions, presence, routing, and UDP audio. |
-| `rdl-client-gui` | GUI | Graphical endpoint for status, live control, media capture, desktop access, and terminal fallback. |
-| `rdl-client-cli` | CLI | Command-line endpoint with live control, media capture, and desktop access. |
+| `rdl-admin-gui` | GUI | Client control console. |
+| `rdl-server-cli` | CLI | Session and traffic relay. |
+| `rdl-client-gui` | GUI | Graphical endpoint client. |
+| `rdl-client-cli` | CLI | Headless endpoint client. |
 
 Linux desktop control targets X11 tools such as `maim`, ImageMagick `import`,
 and `xdotool`. macOS remote control needs Accessibility permission for the app
