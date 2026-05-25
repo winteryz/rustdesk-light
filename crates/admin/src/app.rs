@@ -1324,7 +1324,6 @@ impl AdminApp {
             process_kill_confirm: Arc::new(Mutex::new(None)),
             process_kill_requested: Arc::new(Mutex::new(None)),
             startup_delete_confirm: Arc::new(Mutex::new(None)),
-            startup_detail: Arc::new(Mutex::new(None)),
             startup_action_requested: Arc::new(Mutex::new(None)),
             registry_key_requested: Arc::new(Mutex::new(None)),
             registry_expanded_keys: Arc::new(Mutex::new(HashSet::new())),
@@ -1609,7 +1608,6 @@ impl AdminApp {
             process_kill_confirm: Arc::new(Mutex::new(None)),
             process_kill_requested: Arc::new(Mutex::new(None)),
             startup_delete_confirm: Arc::new(Mutex::new(None)),
-            startup_detail: Arc::new(Mutex::new(None)),
             startup_action_requested: Arc::new(Mutex::new(None)),
             registry_key_requested: Arc::new(Mutex::new(None)),
             registry_expanded_keys: Arc::new(Mutex::new(HashSet::new())),
@@ -2014,7 +2012,6 @@ impl AdminApp {
             let process_kill_confirm = window.process_kill_confirm.clone();
             let process_kill_requested = window.process_kill_requested.clone();
             let startup_delete_confirm = window.startup_delete_confirm.clone();
-            let startup_detail = window.startup_detail.clone();
             let startup_action_requested = window.startup_action_requested.clone();
             let registry_key_requested = window.registry_key_requested.clone();
             let registry_expanded_keys = window.registry_expanded_keys.clone();
@@ -2058,7 +2055,6 @@ impl AdminApp {
                                             process_kill_confirm: &process_kill_confirm,
                                             process_kill_requested: &process_kill_requested,
                                             startup_delete_confirm: &startup_delete_confirm,
-                                            startup_detail: &startup_detail,
                                             startup_action_requested: &startup_action_requested,
                                             registry_key_requested: &registry_key_requested,
                                             registry_expanded_keys: &registry_expanded_keys,
