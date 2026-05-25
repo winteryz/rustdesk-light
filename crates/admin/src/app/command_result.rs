@@ -1285,6 +1285,19 @@ fn render_result_table(
                                     ui.ctx().copy_text(row_text.clone());
                                     ui.close();
                                 }
+                                if let Some(startup_detail_payload) = startup_detail_payload.clone()
+                                {
+                                    if ui.button(t("Details")).clicked() {
+                                        if let Ok(mut selected) = state.table_selected_row.lock() {
+                                            *selected = Some(row_key.clone());
+                                        }
+                                        if let Ok(mut value) = state.startup_detail_requested.lock()
+                                        {
+                                            *value = Some(startup_detail_payload);
+                                        }
+                                        ui.close();
+                                    }
+                                }
                                 if let Some(process_id) = process_id.clone() {
                                     ui.separator();
                                     if ui.button(t("Kill Process")).clicked() {
@@ -1300,8 +1313,10 @@ fn render_result_table(
                                         ui.close();
                                     }
                                 }
-                                if let Some(startup_action) = startup_action.clone() {
+                                if startup_action.is_some() || startup_delete_payload.is_some() {
                                     ui.separator();
+                                }
+                                if let Some(startup_action) = startup_action.clone() {
                                     if ui.button(t(startup_action.label)).clicked() {
                                         if let Ok(mut selected) = state.table_selected_row.lock() {
                                             *selected = Some(row_key.clone());
@@ -1313,23 +1328,8 @@ fn render_result_table(
                                         ui.close();
                                     }
                                 }
-                                if let Some(startup_detail_payload) = startup_detail_payload.clone()
-                                {
-                                    ui.separator();
-                                    if ui.button(t("Details")).clicked() {
-                                        if let Ok(mut selected) = state.table_selected_row.lock() {
-                                            *selected = Some(row_key.clone());
-                                        }
-                                        if let Ok(mut value) = state.startup_detail_requested.lock()
-                                        {
-                                            *value = Some(startup_detail_payload);
-                                        }
-                                        ui.close();
-                                    }
-                                }
                                 if let Some(startup_delete_payload) = startup_delete_payload.clone()
                                 {
-                                    ui.separator();
                                     if ui.button(t("Delete Startup Item")).clicked() {
                                         if let Ok(mut selected) = state.table_selected_row.lock() {
                                             *selected = Some(row_key.clone());
