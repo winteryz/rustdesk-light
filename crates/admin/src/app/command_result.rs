@@ -48,6 +48,9 @@ pub(super) struct CommandResultWindow {
     pub(super) process_kill_requested: Arc<Mutex<Option<String>>>,
     pub(super) startup_delete_confirm: Arc<Mutex<Option<StartupDeleteConfirm>>>,
     pub(super) startup_action_requested: Arc<Mutex<Option<String>>>,
+    pub(super) startup_detail_requested: Arc<Mutex<Option<String>>>,
+    pub(super) startup_detail_pending: Arc<AtomicBool>,
+    pub(super) startup_detail: Arc<Mutex<Option<StartupDetailDialog>>>,
     pub(super) registry_key_requested: Arc<Mutex<Option<String>>>,
     pub(super) registry_expanded_keys: Arc<Mutex<HashSet<String>>>,
     pub(super) startup_add_form: Arc<Mutex<StartupAddForm>>,
@@ -67,6 +70,13 @@ pub(super) struct StartupDeleteConfirm {
     payload: String,
     name: String,
     source: String,
+}
+
+#[derive(Clone)]
+pub(super) struct StartupDetailDialog {
+    pub(super) open: bool,
+    pub(super) title: String,
+    pub(super) detail: String,
 }
 
 #[derive(Default)]
@@ -369,6 +379,9 @@ pub(super) struct CommandResultRenderState<'a> {
     pub(super) process_kill_requested: &'a Arc<Mutex<Option<String>>>,
     pub(super) startup_delete_confirm: &'a Arc<Mutex<Option<StartupDeleteConfirm>>>,
     pub(super) startup_action_requested: &'a Arc<Mutex<Option<String>>>,
+    pub(super) startup_detail_requested: &'a Arc<Mutex<Option<String>>>,
+    pub(super) startup_detail_pending: &'a Arc<AtomicBool>,
+    pub(super) startup_detail: &'a Arc<Mutex<Option<StartupDetailDialog>>>,
     pub(super) registry_key_requested: &'a Arc<Mutex<Option<String>>>,
     pub(super) registry_expanded_keys: &'a Arc<Mutex<HashSet<String>>>,
     pub(super) startup_add_form: &'a Arc<Mutex<StartupAddForm>>,
@@ -434,6 +447,7 @@ pub(super) fn render_command_result(
                 state.startup_delete_confirm,
                 state.startup_action_requested,
             );
+            render_startup_detail_dialog(ui, state.startup_detail, state.startup_detail_pending);
             return;
         }
         return;
@@ -1061,6 +1075,15 @@ pub(super) fn detail_has_result_table(detail: &str) -> bool {
     parse_result_table(detail).is_some()
 }
 
+pub(super) fn startup_detail_result(detail: &str) -> bool {
+    detail
+        .lines()
+        .skip_while(|line| line.trim().is_empty() || line.trim_end().ends_with(':'))
+        .next()
+        .map(|line| line.trim() == "startup_item_details")
+        .unwrap_or(false)
+}
+
 fn parse_result_table(detail: &str) -> Option<ResultTable> {
     let normalized = detail.replace("`t", "\t");
     let body = normalized
@@ -1222,6 +1245,8 @@ fn render_result_table(
                             startup_row_action(command, &table.headers, &row_data.cells);
                         let startup_delete_payload =
                             startup_row_delete_payload(command, &table.headers, &row_data.cells);
+                        let startup_detail_payload =
+                            startup_row_details_payload(command, &table.headers, &row_data.cells);
                         let startup_row_fill =
                             startup_client_row_fill(command, &table.headers, &row_data.cells);
 
@@ -1250,6 +1275,7 @@ fn render_result_table(
                             let process_label = process_label.clone();
                             let startup_action = startup_action.clone();
                             let startup_delete_payload = startup_delete_payload.clone();
+                            let startup_detail_payload = startup_detail_payload.clone();
                             cell_response.context_menu(|ui| {
                                 if ui.button(t("Copy Cell")).clicked() {
                                     ui.ctx().copy_text(cell_text.clone());
@@ -1283,6 +1309,20 @@ fn render_result_table(
                                         if let Ok(mut value) = state.startup_action_requested.lock()
                                         {
                                             *value = Some(startup_action.payload.clone());
+                                        }
+                                        ui.close();
+                                    }
+                                }
+                                if let Some(startup_detail_payload) = startup_detail_payload.clone()
+                                {
+                                    ui.separator();
+                                    if ui.button(t("Details")).clicked() {
+                                        if let Ok(mut selected) = state.table_selected_row.lock() {
+                                            *selected = Some(row_key.clone());
+                                        }
+                                        if let Ok(mut value) = state.startup_detail_requested.lock()
+                                        {
+                                            *value = Some(startup_detail_payload);
                                         }
                                         ui.close();
                                     }
@@ -1448,6 +1488,111 @@ fn render_startup_delete_confirm(
                     if let Ok(mut value) = startup_delete_confirm.lock() {
                         *value = None;
                     }
+                }
+            });
+        });
+}
+
+fn startup_detail_body(detail: &str) -> String {
+    detail
+        .lines()
+        .skip_while(|line| line.trim().is_empty() || line.trim_end().ends_with(':'))
+        .skip_while(|line| line.trim() == "startup_item_details")
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_start()
+        .to_string()
+}
+
+fn render_startup_detail_dialog(
+    ui: &mut egui::Ui,
+    startup_detail: &Arc<Mutex<Option<StartupDetailDialog>>>,
+    startup_detail_pending: &Arc<AtomicBool>,
+) {
+    let pending = startup_detail_pending.load(Ordering::Relaxed);
+    let snapshot = startup_detail.lock().ok().and_then(|value| value.clone());
+    if !pending && snapshot.as_ref().map(|dialog| dialog.open) != Some(true) {
+        return;
+    }
+
+    let mut open = snapshot.as_ref().map(|dialog| dialog.open).unwrap_or(true);
+    let title = snapshot
+        .as_ref()
+        .map(|dialog| dialog.title.clone())
+        .unwrap_or_else(|| t("Startup Item Details").to_string());
+    let detail = snapshot
+        .as_ref()
+        .map(|dialog| dialog.detail.clone())
+        .unwrap_or_default();
+
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(720.0)
+        .default_height(420.0)
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            if pending {
+                ui.label(
+                    egui::RichText::new(t("Loading startup item details..."))
+                        .size(12.0)
+                        .color(crate::theme::palette().muted),
+                );
+                ui.add_space(8.0);
+            }
+            let mut detail = startup_detail_body(&detail);
+            if detail.trim().is_empty() {
+                if !pending {
+                    ui.label(crate::theme::muted_text(t("No data")));
+                }
+                return;
+            }
+            render_startup_detail_text(ui, &mut detail);
+        });
+
+    if let Ok(mut value) = startup_detail.lock() {
+        if let Some(dialog) = value.as_mut() {
+            dialog.open = open;
+        } else if open && pending {
+            *value = Some(StartupDetailDialog {
+                open,
+                title: t("Startup Item Details").to_string(),
+                detail: String::new(),
+            });
+        }
+    }
+}
+
+fn render_startup_detail_text(ui: &mut egui::Ui, detail: &mut String) {
+    let copy_text = detail.clone();
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button(t("Copy All")).clicked() {
+                ui.ctx().copy_text(copy_text.clone());
+            }
+        });
+    });
+    ui.add_space(4.0);
+
+    let height = ui.available_height().max(120.0);
+    let rows = detail.lines().count().clamp(8, 200);
+    let content_height = (rows as f32 * 18.0 + 18.0).max(height);
+    egui::ScrollArea::vertical()
+        .id_salt(("startup_detail_scroll", stable_hash(detail)))
+        .auto_shrink([false, false])
+        .max_height(height)
+        .show(ui, |ui| {
+            let response = ui.add_sized(
+                [ui.available_width(), content_height],
+                egui::TextEdit::multiline(detail)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(rows),
+            );
+            response.context_menu(|ui| {
+                if ui.button(t("Copy All")).clicked() {
+                    ui.ctx().copy_text(copy_text.clone());
+                    ui.close();
                 }
             });
         });
@@ -1654,6 +1799,39 @@ fn startup_row_delete_payload(
     ))
 }
 
+fn startup_row_details_payload(
+    command: &CommandKind,
+    headers: &[String],
+    row: &[String],
+) -> Option<String> {
+    if !matches!(command, CommandKind::StartupManager) {
+        return None;
+    }
+
+    let status = table_value(headers, row, "status")?;
+    let status_key = status.trim().to_ascii_lowercase();
+    if status_key == "info" || status_key == "error" {
+        return None;
+    }
+
+    let source = table_value(headers, row, "source")?;
+    let name = table_value(headers, row, "name")?;
+    if !startup_cell_is_actionable(source) || !startup_cell_is_actionable(name) {
+        return None;
+    }
+
+    let scope = table_value(headers, row, "scope").unwrap_or_default();
+    let startup_command = table_value(headers, row, "command").unwrap_or_default();
+    let status = table_value(headers, row, "status").unwrap_or_default();
+    Some(startup_detail_payload(
+        scope,
+        source,
+        name,
+        startup_command,
+        status,
+    ))
+}
+
 fn startup_delete_confirm(payload: String) -> StartupDeleteConfirm {
     StartupDeleteConfirm {
         name: payload_field(&payload, "name").unwrap_or_default(),
@@ -1697,6 +1875,23 @@ fn startup_action_payload(
         STANDARD.encode(source),
         STANDARD.encode(name),
         STANDARD.encode(command)
+    )
+}
+
+fn startup_detail_payload(
+    scope: &str,
+    source: &str,
+    name: &str,
+    command: &str,
+    status: &str,
+) -> String {
+    format!(
+        "action=details\nscope_b64={}\nsource_b64={}\nname_b64={}\ncommand_b64={}\nstatus_b64={}",
+        STANDARD.encode(scope),
+        STANDARD.encode(source),
+        STANDARD.encode(name),
+        STANDARD.encode(command),
+        STANDARD.encode(status)
     )
 }
 

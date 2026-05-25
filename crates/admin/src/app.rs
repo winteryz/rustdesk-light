@@ -41,8 +41,9 @@ use self::{
         detail_has_result_table, detail_status, kill_target_process_succeeded,
         performance_auto_refresh_due, quiet_user_interaction_command, refresh_command_window,
         render_command_result, render_command_window_status_bar,
-        session_command_requires_confirmation, update_command_window, CommandResultRenderState,
-        CommandResultStatus, CommandResultWindow, StartupAddForm,
+        session_command_requires_confirmation, startup_detail_result, update_command_window,
+        CommandResultRenderState, CommandResultStatus, CommandResultWindow, StartupAddForm,
+        StartupDetailDialog,
     },
     event::{AdminEvent, AdminEventSink, AdminInput, ReconnectEndpoint},
     file_transfer::{
@@ -1325,6 +1326,9 @@ impl AdminApp {
             process_kill_requested: Arc::new(Mutex::new(None)),
             startup_delete_confirm: Arc::new(Mutex::new(None)),
             startup_action_requested: Arc::new(Mutex::new(None)),
+            startup_detail_requested: Arc::new(Mutex::new(None)),
+            startup_detail_pending: Arc::new(AtomicBool::new(false)),
+            startup_detail: Arc::new(Mutex::new(None)),
             registry_key_requested: Arc::new(Mutex::new(None)),
             registry_expanded_keys: Arc::new(Mutex::new(HashSet::new())),
             startup_add_form: Arc::new(Mutex::new(StartupAddForm::default())),
@@ -1549,6 +1553,35 @@ impl AdminApp {
                 window.last_auto_refresh_at = None;
                 return;
             }
+            if window.command == CommandKind::StartupManager && startup_detail_result(&detail) {
+                window
+                    .startup_detail_pending
+                    .store(false, Ordering::Relaxed);
+                window.status = if accepted {
+                    CommandResultStatus::Accepted
+                } else {
+                    CommandResultStatus::Failed
+                };
+                window.hostname = hostname;
+                window.username = username;
+                window.status_notice = Some(
+                    t(if accepted {
+                        "Startup item details loaded"
+                    } else {
+                        "Startup item details failed"
+                    })
+                    .to_string(),
+                );
+                window.open = true;
+                if let Ok(mut value) = window.startup_detail.lock() {
+                    *value = Some(StartupDetailDialog {
+                        open: true,
+                        title: t("Startup Item Details").to_string(),
+                        detail,
+                    });
+                }
+                return;
+            }
             update_command_window(window, accepted, detail, hostname, username);
             return;
         }
@@ -1559,6 +1592,35 @@ impl AdminApp {
             .rev()
             .find(|window| window.client_id == client_id && window.command == command)
         {
+            if window.command == CommandKind::StartupManager && startup_detail_result(&detail) {
+                window
+                    .startup_detail_pending
+                    .store(false, Ordering::Relaxed);
+                window.status = if accepted {
+                    CommandResultStatus::Accepted
+                } else {
+                    CommandResultStatus::Failed
+                };
+                window.hostname = hostname;
+                window.username = username;
+                window.status_notice = Some(
+                    t(if accepted {
+                        "Startup item details loaded"
+                    } else {
+                        "Startup item details failed"
+                    })
+                    .to_string(),
+                );
+                window.open = true;
+                if let Ok(mut value) = window.startup_detail.lock() {
+                    *value = Some(StartupDetailDialog {
+                        open: true,
+                        title: t("Startup Item Details").to_string(),
+                        detail,
+                    });
+                }
+                return;
+            }
             update_command_window(window, accepted, detail, hostname, username);
             return;
         }
@@ -1609,6 +1671,9 @@ impl AdminApp {
             process_kill_requested: Arc::new(Mutex::new(None)),
             startup_delete_confirm: Arc::new(Mutex::new(None)),
             startup_action_requested: Arc::new(Mutex::new(None)),
+            startup_detail_requested: Arc::new(Mutex::new(None)),
+            startup_detail_pending: Arc::new(AtomicBool::new(false)),
+            startup_detail: Arc::new(Mutex::new(None)),
             registry_key_requested: Arc::new(Mutex::new(None)),
             registry_expanded_keys: Arc::new(Mutex::new(HashSet::new())),
             startup_add_form: Arc::new(Mutex::new(StartupAddForm::default())),
@@ -1906,6 +1971,11 @@ impl AdminApp {
                 window.last_auto_refresh_at = None;
             }
             if window.refresh_requested.swap(false, Ordering::Relaxed) {
+                if window.command == CommandKind::StartupManager {
+                    window
+                        .startup_detail_pending
+                        .store(false, Ordering::Relaxed);
+                }
                 refresh_command_window(
                     &self.input_tx,
                     window,
@@ -1934,6 +2004,9 @@ impl AdminApp {
                 if let Some(payload) = startup_payload {
                     let action = payload_field(&payload, "action")
                         .unwrap_or_else(|| "startup_action".to_string());
+                    window
+                        .startup_detail_pending
+                        .store(false, Ordering::Relaxed);
                     let _ = self.input_tx.send(AdminInput::Command {
                         target_id: window.client_id.clone(),
                         command: CommandKind::StartupManager,
@@ -1946,6 +2019,23 @@ impl AdminApp {
                         "startup manager {} on {}",
                         action, window.client_id
                     ));
+                }
+                let startup_detail_payload = window
+                    .startup_detail_requested
+                    .lock()
+                    .ok()
+                    .and_then(|mut value| value.take());
+                if let Some(payload) = startup_detail_payload {
+                    let _ = self.input_tx.send(AdminInput::Command {
+                        target_id: window.client_id.clone(),
+                        command: CommandKind::StartupManager,
+                        payload,
+                    });
+                    window.startup_detail_pending.store(true, Ordering::Relaxed);
+                    window.status = CommandResultStatus::Pending;
+                    window.status_notice = Some(t("Loading startup item details...").to_string());
+                    window.open = true;
+                    pending_logs.push(format!("startup item details on {}", window.client_id));
                 }
             }
             if window.command == CommandKind::RegistryManager {
@@ -2013,6 +2103,9 @@ impl AdminApp {
             let process_kill_requested = window.process_kill_requested.clone();
             let startup_delete_confirm = window.startup_delete_confirm.clone();
             let startup_action_requested = window.startup_action_requested.clone();
+            let startup_detail_requested = window.startup_detail_requested.clone();
+            let startup_detail_pending = window.startup_detail_pending.clone();
+            let startup_detail = window.startup_detail.clone();
             let registry_key_requested = window.registry_key_requested.clone();
             let registry_expanded_keys = window.registry_expanded_keys.clone();
             let startup_add_form = window.startup_add_form.clone();
@@ -2056,6 +2149,9 @@ impl AdminApp {
                                             process_kill_requested: &process_kill_requested,
                                             startup_delete_confirm: &startup_delete_confirm,
                                             startup_action_requested: &startup_action_requested,
+                                            startup_detail_requested: &startup_detail_requested,
+                                            startup_detail_pending: &startup_detail_pending,
+                                            startup_detail: &startup_detail,
                                             registry_key_requested: &registry_key_requested,
                                             registry_expanded_keys: &registry_expanded_keys,
                                             startup_add_form: &startup_add_form,
