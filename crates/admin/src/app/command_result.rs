@@ -1565,15 +1565,6 @@ fn render_startup_detail_dialog(
 
 fn render_startup_detail_text(ui: &mut egui::Ui, detail: &mut String) {
     let copy_text = detail.clone();
-    ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button(t("Copy All")).clicked() {
-                ui.ctx().copy_text(copy_text.clone());
-            }
-        });
-    });
-    ui.add_space(4.0);
-
     let height = ui.available_height().max(120.0);
     let rows = detail.lines().count().clamp(8, 200);
     let content_height = (rows as f32 * 18.0 + 18.0).max(height);

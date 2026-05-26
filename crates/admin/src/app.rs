@@ -2090,7 +2090,7 @@ impl AdminApp {
                 command_window_identity_title(&window.hostname, &window.username)
             );
             let viewport_id = egui::ViewportId::from_hash_of(("command_result", window.id));
-            let builder = windowing::child_viewport_builder(title, [760.0, 460.0], [260.0, 180.0]);
+            let builder = windowing::child_viewport_builder(title, [880.0, 540.0], [260.0, 180.0]);
 
             let command = window.command.clone();
             let status = window.status;
