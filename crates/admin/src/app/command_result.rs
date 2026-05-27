@@ -429,7 +429,7 @@ pub(super) fn render_command_result(
                 Some(
                     table
                         .as_ref()
-                        .map(startup_client_autostart_status)
+                        .map(|t| startup_client_autostart_status(command, t))
                         .unwrap_or(StartupClientAutostartStatus::Unknown),
                 )
             } else {
@@ -951,6 +951,7 @@ fn render_table_toolbar(
                     "disable_client_autostart",
                     "Enable",
                     "Disable",
+                    "Client Autostart",
                 );
             });
         }
@@ -965,6 +966,7 @@ fn render_table_toolbar(
                     "disable_client_service",
                     "Enable",
                     "Disable",
+                    "Client Service",
                 );
             });
         }
@@ -979,10 +981,11 @@ fn render_client_autostart_menu(
     disable_action: &str,
     enable_label: &str,
     disable_label: &str,
+    label_prefix: &str,
 ) {
-    let style = startup_client_autostart_style(status);
+    let style = startup_client_autostart_style(status, label_prefix);
     let button = egui::Button::new(
-        egui::RichText::new(t(style.label))
+        egui::RichText::new(t(&style.label))
             .size(12.0)
             .color(style.text),
     )
@@ -999,7 +1002,12 @@ fn render_client_autostart_menu(
             ui.close();
         }
     });
-    response.on_hover_text(t("Configure login autostart for this client"));
+    let hover_text = if label_prefix == "Client Service" {
+        t("Configure system service for this client")
+    } else {
+        t("Configure login autostart for this client")
+    };
+    response.on_hover_text(hover_text);
 }
 
 fn queue_startup_action(startup_action_requested: &Arc<Mutex<Option<String>>>, action: &str) {
@@ -1786,9 +1794,8 @@ enum StartupClientAutostartStatus {
     Unknown,
 }
 
-#[derive(Clone, Copy)]
 struct StartupClientAutostartStyle {
-    label: &'static str,
+    label: String,
     fill: egui::Color32,
     stroke: egui::Color32,
     text: egui::Color32,
@@ -1796,23 +1803,25 @@ struct StartupClientAutostartStyle {
 
 fn startup_client_autostart_style(
     status: StartupClientAutostartStatus,
+    label_prefix: &str,
 ) -> StartupClientAutostartStyle {
     let palette = crate::theme::palette();
+    let label = |suffix: &str| format!("{label_prefix}: {suffix}");
     match status {
         StartupClientAutostartStatus::Enabled => StartupClientAutostartStyle {
-            label: "Client Autostart: On",
+            label: label("On"),
             fill: palette.success_bg,
             stroke: palette.border,
             text: palette.good,
         },
         StartupClientAutostartStatus::Disabled => StartupClientAutostartStyle {
-            label: "Client Autostart: Off",
+            label: label("Off"),
             fill: palette.danger_bg,
             stroke: palette.border,
             text: palette.bad,
         },
         StartupClientAutostartStatus::Unknown => StartupClientAutostartStyle {
-            label: "Client Autostart: Unknown",
+            label: label("Unknown"),
             fill: palette.neutral_bg,
             stroke: palette.border,
             text: palette.muted,
@@ -1820,7 +1829,10 @@ fn startup_client_autostart_style(
     }
 }
 
-fn startup_client_autostart_status(table: &ResultTable) -> StartupClientAutostartStatus {
+fn startup_client_autostart_status(
+    command: &CommandKind,
+    table: &ResultTable,
+) -> StartupClientAutostartStatus {
     let mut saw_enabled = false;
     let mut saw_disabled = false;
     let mut saw_unknown = false;
@@ -1828,7 +1840,7 @@ fn startup_client_autostart_status(table: &ResultTable) -> StartupClientAutostar
         if !startup_row_is_client_autostart(&table.headers, row) {
             continue;
         }
-        match startup_row_status(&table.headers, row) {
+        match startup_row_status(command, &table.headers, row) {
             Some(StartupClientAutostartStatus::Enabled) => saw_enabled = true,
             Some(StartupClientAutostartStatus::Disabled) => saw_disabled = true,
             Some(StartupClientAutostartStatus::Unknown) => saw_unknown = true,
@@ -1857,14 +1869,33 @@ fn startup_client_row_fill(
     {
         return None;
     }
-    let status = startup_row_status(headers, row)?;
+    let status = startup_row_status(command, headers, row)?;
     if status == StartupClientAutostartStatus::Unknown {
         return None;
     }
-    Some(startup_client_autostart_style(status).fill)
+    let label_prefix = if matches!(command, CommandKind::ServiceManager) {
+        "Client Service"
+    } else {
+        "Client Autostart"
+    };
+    Some(startup_client_autostart_style(status, label_prefix).fill)
 }
 
-fn startup_row_status(headers: &[String], row: &[String]) -> Option<StartupClientAutostartStatus> {
+fn startup_row_status(
+    command: &CommandKind,
+    headers: &[String],
+    row: &[String],
+) -> Option<StartupClientAutostartStatus> {
+    if matches!(command, CommandKind::ServiceManager) {
+        if let Some(active) = table_value(headers, row, "active") {
+            return match active.trim().to_ascii_lowercase().as_str() {
+                "active" => Some(StartupClientAutostartStatus::Enabled),
+                "inactive" => Some(StartupClientAutostartStatus::Disabled),
+                _ => None,
+            };
+        }
+    }
+
     if let Some(start_type) = table_value(headers, row, "starttype") {
         let lower = start_type.trim().to_ascii_lowercase();
         if lower.contains("automatic") || lower.contains("enabled") || lower.contains("auto") {
@@ -1888,7 +1919,9 @@ fn startup_row_status(headers: &[String], row: &[String]) -> Option<StartupClien
 }
 
 fn startup_row_is_client_autostart(headers: &[String], row: &[String]) -> bool {
-    let Some(name) = table_value(headers, row, "name") else {
+    let Some(name) = table_value(headers, row, "name")
+        .or_else(|| table_value(headers, row, "unit"))
+    else {
         return false;
     };
     matches!(
