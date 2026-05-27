@@ -1331,6 +1331,8 @@ fn render_result_table(
                             startup_row_details_payload(command, &table.headers, &row_data.cells);
                         let service_detail_payload = if matches!(command, CommandKind::ServiceManager) {
                             table_value(&table.headers, &row_data.cells, "name")
+                                .or_else(|| table_value(&table.headers, &row_data.cells, "unit"))
+                                .or_else(|| table_value(&table.headers, &row_data.cells, "label"))
                                 .map(|name| service_detail_payload(name))
                         } else {
                             None
@@ -1921,6 +1923,7 @@ fn startup_row_status(
 fn startup_row_is_client_autostart(headers: &[String], row: &[String]) -> bool {
     let Some(name) = table_value(headers, row, "name")
         .or_else(|| table_value(headers, row, "unit"))
+        .or_else(|| table_value(headers, row, "label"))
     else {
         return false;
     };
@@ -1958,7 +1961,10 @@ fn service_row_actions(
     if !matches!(command, CommandKind::ServiceManager) {
         return Vec::new();
     }
-    let name = match table_value(headers, row, "name") {
+    let name = match table_value(headers, row, "name")
+        .or_else(|| table_value(headers, row, "unit"))
+        .or_else(|| table_value(headers, row, "label"))
+    {
         Some(name) => name,
         None => return Vec::new(),
     };
