@@ -1969,12 +1969,23 @@ fn service_row_actions(
         None => return Vec::new(),
     };
 
+    let mut actions = Vec::new();
+
     let status = table_value(headers, row, "status")
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let mut actions = Vec::new();
+    let active = table_value(headers, row, "active")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
 
-    if status.contains("running") || status.contains("active") {
+    let is_running = status.contains("running")
+        || active == "active"
+        || (status == "0" && table_value(headers, row, "pid").is_some_and(|p| p != "-"));
+    let is_stopped = status.contains("stopped")
+        || active == "inactive"
+        || (status != "-" && !status.is_empty() && status != "0");
+
+    if is_running {
         actions.push(CommandRowAction {
             label: "Stop Service",
             payload: format!("action=stop\nname={name}"),
@@ -1983,7 +1994,7 @@ fn service_row_actions(
             label: "Restart Service",
             payload: format!("action=restart\nname={name}"),
         });
-    } else if status.contains("stopped") || status.contains("inactive") {
+    } else if is_stopped {
         actions.push(CommandRowAction {
             label: "Start Service",
             payload: format!("action=start\nname={name}"),
@@ -2015,7 +2026,7 @@ fn service_row_actions(
                 payload: format!("action=disable\nname={name}"),
             });
         }
-    } else if cfg!(target_os = "linux") && !status.is_empty() && status != "-" {
+    } else if cfg!(target_os = "linux") && !active.is_empty() && active != "-" {
         actions.push(CommandRowAction {
             label: "Enable Service",
             payload: format!("action=enable\nname={name}"),
