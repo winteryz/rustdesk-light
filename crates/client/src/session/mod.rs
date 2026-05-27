@@ -404,7 +404,7 @@ fn schedule_restart(current_exe: &Path, args: &[OsString]) -> io::Result<()> {
 #[cfg(target_os = "linux")]
 fn schedule_restart(current_exe: &Path, args: &[OsString]) -> io::Result<()> {
     if running_as_service() {
-        let svc = crate::remote_management::client_autostart::LINUX_SYSTEMD_SERVICE_NAME;
+        let svc = crate::remote_management::LINUX_SYSTEMD_SERVICE_NAME;
         let script = format!(
             "while kill -0 {} 2>/dev/null; do sleep 0.2; done; systemctl --user start {} || systemctl start {}",
             std::process::id(), svc, svc
@@ -424,7 +424,7 @@ fn schedule_restart(current_exe: &Path, args: &[OsString]) -> io::Result<()> {
 #[cfg(target_os = "macos")]
 fn schedule_restart(current_exe: &Path, args: &[OsString]) -> io::Result<()> {
     if running_as_service() {
-        let label = crate::remote_management::client_autostart::MACOS_LAUNCH_AGENT_LABEL;
+        let label = crate::remote_management::MACOS_LAUNCH_AGENT_LABEL;
         let script = format!(
             "while kill -0 {} 2>/dev/null; do sleep 0.2; done; launchctl kickstart -k gui/$(id -u)/{}",
             std::process::id(), label
@@ -501,7 +501,7 @@ fn schedule_replace_and_restart(
     args: &[OsString],
 ) -> io::Result<()> {
     if running_as_service() {
-        let svc = crate::remote_management::client_autostart::LINUX_SYSTEMD_SERVICE_NAME;
+        let svc = crate::remote_management::LINUX_SYSTEMD_SERVICE_NAME;
         let script = format!(
             "while kill -0 {} 2>/dev/null; do sleep 0.2; done; \
              i=0; while [ \"$i\" -lt 60 ]; do cp {} {} && chmod +x {} && break; i=$((i + 1)); sleep 0.25; done; \
@@ -536,7 +536,7 @@ fn schedule_replace_and_restart(
     args: &[OsString],
 ) -> io::Result<()> {
     if running_as_service() {
-        let label = crate::remote_management::client_autostart::MACOS_LAUNCH_AGENT_LABEL;
+        let label = crate::remote_management::MACOS_LAUNCH_AGENT_LABEL;
         let script = format!(
             "while kill -0 {} 2>/dev/null; do sleep 0.2; done; \
              i=0; while [ \"$i\" -lt 60 ]; do cp {} {} && chmod +x {} && break; i=$((i + 1)); sleep 0.25; done; \

@@ -7,6 +7,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod client_autostart;
+
+#[cfg(target_os = "linux")]
+pub(crate) use client_autostart::LINUX_SYSTEMD_SERVICE_NAME;
+#[cfg(target_os = "macos")]
+pub(crate) use client_autostart::MACOS_LAUNCH_AGENT_LABEL;
 mod file_manager;
 mod registry_manager;
 mod remote_terminal;
