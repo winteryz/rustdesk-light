@@ -28,7 +28,9 @@ pub(super) fn apply_service_manager_action(action: &str) -> Result<(), String> {
     let paths = AutostartPaths::detect_system()?;
     match action {
         "enable" => {
+            let current_paths = AutostartPaths::detect()?;
             install_current_binary(&paths)?;
+            install_config(&current_paths.config_path, &paths.config_path)?;
             enable_service(&paths)
         }
         "disable" => disable_service(&paths),
