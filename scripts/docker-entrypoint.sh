@@ -39,28 +39,13 @@ guided_setup() {
   esac
   echo
   echo "--- GeoIP ---"
+  mmdb_auto=""
   if [ -d "/geoip" ]; then
-    mmdb_files=()
-    while IFS= read -r -d '' f; do
-      mmdb_files+=("$f")
-    done < <(find /geoip -maxdepth 1 -name '*.mmdb' -print0 2>/dev/null)
-    if [ "${#mmdb_files[@]}" -gt 0 ]; then
-      echo "Found GeoIP database(s):"
-      i=0
-      for f in "${mmdb_files[@]}"; do
-        i=$((i+1))
-        echo "  $i) $f"
-      done
-      read -r -p "Select GeoIP db [1/$i] or empty to skip: " geoip_choice
-      if [ -n "$geoip_choice" ] && [ "$geoip_choice" -ge 1 ] 2>/dev/null && [ "$geoip_choice" -le "$i" ] 2>/dev/null; then
-        RDL_GEOIP_DB="${mmdb_files[$((geoip_choice-1))]}"
-      fi
-    else
-      read -r -p "GeoIP db path (empty to skip): " geoip_input
-      if [ -n "$geoip_input" ] && [ -f "$geoip_input" ]; then
-        RDL_GEOIP_DB="$geoip_input"
-      fi
-    fi
+    mmdb_auto=$(find /geoip -maxdepth 1 -name '*.mmdb' -print 2>/dev/null | head -1)
+  fi
+  if [ -n "$mmdb_auto" ]; then
+    echo "  Auto-detected: $mmdb_auto"
+    RDL_GEOIP_DB="$mmdb_auto"
   else
     read -r -p "GeoIP db path (empty to skip): " geoip_input
     if [ -n "$geoip_input" ] && [ -f "$geoip_input" ]; then
