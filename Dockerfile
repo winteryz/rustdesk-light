@@ -36,5 +36,5 @@ VOLUME ["/etc/rust-desk-light", "/var/lib/rust-desk-light"]
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["rdl-server-cli"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/usr/local/bin/rdl-server-cli"]

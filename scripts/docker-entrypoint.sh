@@ -108,14 +108,14 @@ STOP_REQUESTED=0
 trap 'echo "Shutdown requested..."; STOP_REQUESTED=1' TERM INT
 
 if [ "${RDL_DISABLE_RESTART:-}" = "1" ]; then
-  exec rdl-server-cli "${ARGS[@]}"
+  exec /usr/local/bin/rdl-server-cli "${ARGS[@]}"
 fi
 
 MAX_RESTART_DELAY=30
 RESTART_DELAY=1
 
 while [ "$STOP_REQUESTED" -eq 0 ]; do
-  if rdl-server-cli "${ARGS[@]}"; then
+  if /usr/local/bin/rdl-server-cli "${ARGS[@]}"; then
     exit_code=0
   else
     exit_code=$?
