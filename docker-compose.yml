@@ -12,7 +12,7 @@ services:
     environment:
       RDL_IP: "0.0.0.0"
       RDL_PORT: "5169"
-      RDL_AUTH_TOKEN: "change-me"
+      # RDL_AUTH_TOKEN: "change-me"       # pass via env, or server auto-generates one
       RDL_REQUIRE_CLIENT_AUTH: "false"
     volumes:
       - rdl-config:/etc/rust-desk-light
