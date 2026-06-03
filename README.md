@@ -57,7 +57,7 @@ bash scripts/server-up.sh
 Or pass environment variables for non-interactive use:
 
 ```sh
-RDL_AUTH_TOKEN="mekiller" bash scripts/server-up.sh
+RDL_AUTH_TOKEN="change-me" bash scripts/server-up.sh
 ```
 
 The Docker image is built automatically using multi-stage build.
