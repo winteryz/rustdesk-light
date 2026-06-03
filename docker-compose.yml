@@ -17,7 +17,7 @@ services:
     volumes:
       - rdl-config:/etc/rust-desk-light
       - rdl-data:/var/lib/rust-desk-light
-      - ./data/geoip:/geoip:ro
+      - ./third_party/geoip:/geoip:ro
 
 volumes:
   rdl-config:
