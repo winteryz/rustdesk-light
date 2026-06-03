@@ -1,0 +1,15 @@
+target/
+.git/
+.github/
+.gitignore
+*.md
+*.ps1
+*.bat
+dist/
+docs/
+scripts/*.bat
+scripts/*.ps1
+scripts/start-dev.sh
+scripts/start-server-release.sh
+scripts/geoip-db.sh
+third_party/
