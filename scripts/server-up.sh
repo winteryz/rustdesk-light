@@ -28,7 +28,7 @@ prompt_with_default RDL_PORT "Listen port" "${RDL_PORT:-5169}"
 echo
 
 echo "--- Auth ---"
-prompt_with_default RDL_AUTH_TOKEN "Auth token (leave empty to auto-generate)" "${RDL_AUTH_TOKEN:-mekiller}"
+prompt_with_default RDL_AUTH_TOKEN "Auth token (leave empty to auto-generate)" "${RDL_AUTH_TOKEN:-change-me}"
 read -r -p "Require client auth? [y/N]: " auth_choice
 case "$auth_choice" in
   y|Y|yes|YES) RDL_REQUIRE_CLIENT_AUTH="true" ;;
