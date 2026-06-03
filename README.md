@@ -46,6 +46,32 @@ permission.
 
 ## Quick Start
 
+### Docker (recommended)
+
+One-command server startup with interactive prompts:
+
+```sh
+bash scripts/server-up.sh
+```
+
+Or pass environment variables for non-interactive use:
+
+```sh
+RDL_AUTH_TOKEN="mekiller" bash scripts/server-up.sh
+```
+
+The Docker image is built automatically using multi-stage build.
+Server listens on `0.0.0.0:5169` by default.
+GeoIP database at `third_party/geoip/GeoLite2-City.mmdb` is auto-detected.
+
+Stop the server:
+
+```sh
+docker compose down
+```
+
+### Local development
+
 Start the local development stack:
 
 ```sh
@@ -180,10 +206,11 @@ Useful environment variables:
 
 | Variable | Purpose |
 | --- | --- |
-| `RDL_IP` | Default IP used by helper scripts. |
-| `RDL_PORT` | Default port used by helper scripts. |
+| `RDL_IP` | Default IP used by helper scripts and Docker. |
+| `RDL_PORT` | Default port used by helper scripts and Docker. |
 | `RDL_AUTH_TOKEN` | Shared registration token for server/admin/client. |
 | `RDL_GEOIP_DB` | Path to a MaxMind GeoLite2/GeoIP2 City database. |
+| `RDL_REQUIRE_CLIENT_AUTH` | Set to `true` to require auth from clients too. |
 | `RDL_BUILD_VERSION` | Overrides the displayed build version. |
 
 ## Architecture
