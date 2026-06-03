@@ -20,8 +20,16 @@ if [ -f "$SERVER_CONF" ]; then
   ARGS+=("--config" "$SERVER_CONF")
 fi
 
-if [ -n "${RDL_GEOIP_DB:-}" ] && [ -f "$RDL_GEOIP_DB" ]; then
-  ARGS+=("--geoip-db" "$RDL_GEOIP_DB")
+if [ -n "${RDL_GEOIP_DB:-}" ]; then
+  if [ -f "$RDL_GEOIP_DB" ]; then
+    ARGS+=("--geoip-db" "$RDL_GEOIP_DB")
+  fi
+elif [ -d "/geoip" ]; then
+  MMDB=$(ls /geoip/*.mmdb 2>/dev/null | head -1)
+  if [ -n "$MMDB" ]; then
+    ARGS+=("--geoip-db" "$MMDB")
+    RDL_GEOIP_DB="$MMDB"
+  fi
 fi
 
 if [ "${RDL_REQUIRE_CLIENT_AUTH:-}" = "1" ] || [ "${RDL_REQUIRE_CLIENT_AUTH:-}" = "true" ]; then
