@@ -1,0 +1,24 @@
+services:
+  rdl-server:
+    image: rust-desk-light-server:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rdl-server
+    restart: unless-stopped
+    ports:
+      - "5169:5169/tcp"
+      - "5169:5169/udp"
+    environment:
+      RDL_IP: "0.0.0.0"
+      RDL_PORT: "5169"
+      RDL_AUTH_TOKEN: "${RDL_AUTH_TOKEN}"
+      RDL_REQUIRE_CLIENT_AUTH: "${RDL_REQUIRE_CLIENT_AUTH:-false}"
+    volumes:
+      - rdl-config:/etc/rust-desk-light
+      - rdl-data:/var/lib/rust-desk-light
+      - ./third_party/geoip:/geoip:ro
+
+volumes:
+  rdl-config:
+  rdl-data:
