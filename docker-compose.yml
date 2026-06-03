@@ -17,7 +17,7 @@ services:
     volumes:
       - rdl-config:/etc/rust-desk-light
       - rdl-data:/var/lib/rust-desk-light
-      # - ./data/geoip:/geoip:ro          # uncomment and place GeoLite2-City.mmdb here for GeoIP
+      - ./data/geoip:/geoip:ro
 
 volumes:
   rdl-config:
