@@ -1356,6 +1356,7 @@ impl AdminApp {
             table_filter: Arc::new(Mutex::new(String::new())),
             table_sort: Arc::new(Mutex::new(None)),
             table_selected_row: Arc::new(Mutex::new(None)),
+            service_help_popup: Arc::new(Mutex::new(None)),
         });
     }
 
@@ -1716,6 +1717,7 @@ impl AdminApp {
             table_filter: Arc::new(Mutex::new(String::new())),
             table_sort: Arc::new(Mutex::new(None)),
             table_selected_row: Arc::new(Mutex::new(None)),
+            service_help_popup: Arc::new(Mutex::new(None)),
         });
     }
 
@@ -2189,6 +2191,7 @@ impl AdminApp {
             let table_sort = window.table_sort.clone();
             let table_selected_row = window.table_selected_row.clone();
             let service_delete_confirm = window.service_delete_confirm.clone();
+            let service_help_popup = window.service_help_popup.clone();
             let status_notice =
                 explicit_status_notice.or_else(|| command_status_notice(&command, status, &detail));
 
@@ -2233,6 +2236,7 @@ impl AdminApp {
                                             registry_key_requested: &registry_key_requested,
                                             registry_expanded_keys: &registry_expanded_keys,
                                             startup_add_form: &startup_add_form,
+                                            service_help_popup: &service_help_popup,
                                         };
                                         render_command_result(
                                             ui,

@@ -45,10 +45,15 @@ fn macos_enable_service(paths: &AutostartPaths) -> Result<(), String> {
     let label = "com.rust-desk-light.client";
     let daemon_dir = PathBuf::from("/Library/LaunchDaemons");
     let plist_path = daemon_dir.join(format!("{label}.plist"));
+    let disabled_path = daemon_dir.join(format!("{label}.plist.disabled"));
 
     fs::create_dir_all(&daemon_dir).map_err(|error| {
         format!("create LaunchDaemons directory failed: {error}")
     })?;
+
+    let bin_path = super::client_autostart::path_text(&paths.target_exe);
+    let cfg_path = super::client_autostart::path_text(&paths.config_path);
+    let user = std::env::var("USER").unwrap_or_else(|_| "unknown-user".to_string());
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -59,15 +64,22 @@ fn macos_enable_service(paths: &AutostartPaths) -> Result<(), String> {
     <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{}</string>
+        <string>{bin_path}</string>
         <string>--service</string>
         <string>--config</string>
-        <string>{}</string>
+        <string>{cfg_path}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/var/root</string>
+        <key>USER</key>
+        <string>{user}</string>
+    </dict>
     <key>StandardOutPath</key>
     <string>/var/log/rust-desk-light-client.log</string>
     <key>StandardErrorPath</key>
@@ -75,36 +87,61 @@ fn macos_enable_service(paths: &AutostartPaths) -> Result<(), String> {
 </dict>
 </plist>
 "#,
-        super::client_autostart::path_text(&paths.target_exe),
-        super::client_autostart::path_text(&paths.config_path),
     );
 
-    fs::write(&plist_path, plist).map_err(|error| {
+    fs::write(&plist_path, &plist).map_err(|error| {
         format!("write launch daemon plist failed: {error}")
     })?;
 
-    let load_output = crate::support::run_command(
+    if disabled_path.exists() {
+        fs::remove_file(&disabled_path).map_err(|error| {
+            format!("remove disabled plist failed: {error}")
+        })?;
+    }
+
+    // bootout old registration first so updated plist takes effect
+    let _ = crate::support::run_command(
         "launchctl",
-        &["load", "-w", &plist_path.display().to_string()],
+        &["bootout", "system/", &plist_path.display().to_string()],
+        15,
+    );
+
+    // enable first to clear any disabled state (from prior disable actions)
+    let _ = crate::support::run_command("launchctl", &["enable", &format!("system/{label}")], 10);
+
+    let bootstrap_result = crate::support::run_command(
+        "launchctl",
+        &["bootstrap", "system/", &plist_path.display().to_string()],
         30,
     );
-    super::startup_command_result(load_output, "load macOS launch daemon")
+
+    if bootstrap_result.contains("Bootstrap failed: 5:") {
+        Ok(())
+    } else {
+        super::startup_command_result(bootstrap_result, "bootstrap macOS launch daemon")
+    }
 }
 
 fn macos_disable_service(_paths: &AutostartPaths) -> Result<(), String> {
     let label = "com.rust-desk-light.client";
     let daemon_dir = PathBuf::from("/Library/LaunchDaemons");
     let plist_path = daemon_dir.join(format!("{label}.plist"));
+    let disabled_path = daemon_dir.join(format!("{label}.plist.disabled"));
 
     if plist_path.exists() {
-        let unload_output = crate::support::run_command(
+        let _ = crate::support::run_command(
             "launchctl",
-            &["unload", "-w", &plist_path.display().to_string()],
-            30,
+            &["bootout", "system/", &plist_path.display().to_string()],
+            15,
         );
-        super::startup_command_result(unload_output, "unload macOS launch daemon")?;
-        fs::remove_file(&plist_path).map_err(|error| {
-            format!("remove launch daemon plist failed: {error}")
+
+        if disabled_path.exists() {
+            fs::remove_file(&disabled_path).map_err(|error| {
+                format!("remove old disabled plist failed: {error}")
+            })?;
+        }
+        fs::rename(&plist_path, &disabled_path).map_err(|error| {
+            format!("rename plist to .disabled failed: {error}")
         })?;
     }
 
