@@ -156,7 +156,7 @@ pub(crate) fn run_terminal(config: Config, print_startup_notice: bool) -> io::Re
     thread::spawn(move || {
         let event_sink = ClientEventSink::new(event_tx, None);
         if let Err(error) =
-            client_network_loop(config, identity, false, event_sink.clone(), input_rx)
+            client_network_loop(config, identity, cfg!(feature = "gui"), event_sink.clone(), input_rx)
         {
             event_sink.send(ClientEvent::Log(format!("network stopped: {error}")));
         }
