@@ -267,19 +267,32 @@ if command -v launchctl >/dev/null 2>&1; then
     esac
     printf '%s\t%s\t%s\n' "$label" "$status_display" "$pid_display"
   done
+  launchctl print system 2>/dev/null | awk '
+    /^[[:space:]]*services = \{/ { in_services = 1; next }
+    in_services && /^\}/ { in_services = 0 }
+    in_services {
+      pid = $1; status = $2; label = $3
+      if (pid == "" || label == "" || label == "PID") next
+      if (pid == "-") pid_disp = "-"; else pid_disp = pid
+      if (status == 0 || status == "-") stat_disp = "Loaded"
+      else if (status == 78) stat_disp = "Unloaded"
+      else stat_disp = "Error(" status ")"
+      printf "%s\t%s\t%s\n", label, stat_disp, pid_disp
+    }
+  '
 else
   printf '-\t-\t-\n'
 fi
 "#,
         ],
-        60,
+        500,
     )
 }
 
 fn macos_apply_service_action(name: &str, action: &str) -> Result<(), String> {
     match action {
         "start" => {
-            let output = run_command("launchctl", &["kickstart", "-kp", "system/", name], 30);
+            let output = run_command("launchctl", &["kickstart", "-kp", &format!("system/{}", name)], 30);
             startup_command_result(output, "start macOS service")
         }
         "stop" => {
@@ -287,7 +300,7 @@ fn macos_apply_service_action(name: &str, action: &str) -> Result<(), String> {
             startup_command_result(output, "stop macOS service")
         }
         "restart" => {
-            let output = run_command("launchctl", &["kickstart", "-kp", "system/", name], 30);
+            let output = run_command("launchctl", &["kickstart", "-kp", &format!("system/{}", name)], 30);
             startup_command_result(output, "restart macOS service")
         }
         "enable" => {
@@ -299,9 +312,9 @@ fn macos_apply_service_action(name: &str, action: &str) -> Result<(), String> {
             startup_command_result(output, "disable macOS service")
         }
         "delete" => {
-            let unload = run_command("launchctl", &["unload", "-w", &format!("/Library/LaunchDaemons/{}.plist", name)], 30);
-            let _ = startup_command_result(unload, "unload macOS service");
             let plist_path = format!("/Library/LaunchDaemons/{}.plist", name);
+            let _ = run_command("launchctl", &["bootout", "system/", &plist_path], 30);
+            let _ = run_command("launchctl", &["disable", &format!("system/{}", name)], 10);
             let _ = std::fs::remove_file(&plist_path);
             Ok(())
         }

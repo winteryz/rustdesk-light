@@ -58,6 +58,7 @@ pub(super) struct CommandResultWindow {
     pub(super) table_filter: Arc<Mutex<String>>,
     pub(super) table_sort: Arc<Mutex<Option<TableSort>>>,
     pub(super) table_selected_row: Arc<Mutex<Option<String>>>,
+    pub(super) service_help_popup: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone)]
@@ -414,6 +415,7 @@ pub(super) struct CommandResultRenderState<'a> {
     pub(super) registry_key_requested: &'a Arc<Mutex<Option<String>>>,
     pub(super) registry_expanded_keys: &'a Arc<Mutex<HashSet<String>>>,
     pub(super) startup_add_form: &'a Arc<Mutex<StartupAddForm>>,
+    pub(super) service_help_popup: &'a Arc<Mutex<Option<String>>>,
 }
 
 pub(super) fn render_command_result(
@@ -436,6 +438,12 @@ pub(super) fn render_command_result(
                 None
             };
 
+        let service_help = if matches!(command, CommandKind::ServiceManager) {
+            table.as_ref().and_then(|t| client_service_help(t))
+        } else {
+            None
+        };
+
         render_table_toolbar(
             ui,
             command,
@@ -445,7 +453,11 @@ pub(super) fn render_command_result(
             state.startup_add_form,
             state.startup_action_requested,
             startup_client_status,
+            service_help.as_deref(),
+            state.service_help_popup,
         );
+
+        render_service_help_popup(ui, state.service_help_popup);
         if matches!(command, CommandKind::StartupManager) {
             render_startup_add_form(
                 ui,
@@ -889,6 +901,8 @@ fn render_table_toolbar(
     startup_add_form: &Arc<Mutex<StartupAddForm>>,
     startup_action_requested: &Arc<Mutex<Option<String>>>,
     startup_client_status: Option<StartupClientAutostartStatus>,
+    service_help: Option<&str>,
+    service_help_popup: &Arc<Mutex<Option<String>>>,
 ) {
     let mut filter = table_filter
         .lock()
@@ -952,6 +966,8 @@ fn render_table_toolbar(
                     "Enable",
                     "Disable",
                     "Client Autostart",
+                    None,
+                    service_help_popup,
                 );
             });
         }
@@ -967,6 +983,8 @@ fn render_table_toolbar(
                     "Enable",
                     "Disable",
                     "Client Service",
+                    service_help,
+                    service_help_popup,
                 );
             });
         }
@@ -982,6 +1000,8 @@ fn render_client_autostart_menu(
     enable_label: &str,
     disable_label: &str,
     label_prefix: &str,
+    service_help: Option<&str>,
+    service_help_popup: &Arc<Mutex<Option<String>>>,
 ) {
     let style = startup_client_autostart_style(status, label_prefix);
     let button = egui::Button::new(
@@ -1002,12 +1022,93 @@ fn render_client_autostart_menu(
             ui.close();
         }
     });
+    if let Some(help) = service_help {
+        if ui.add(
+            egui::Button::new("?")
+                .corner_radius(10.0)
+                .min_size(egui::vec2(18.0, TOOLBAR_CONTROL_HEIGHT)),
+        ).clicked() {
+            if let Ok(mut value) = service_help_popup.lock() {
+                *value = Some(help.to_string());
+            }
+        }
+    }
+
     let hover_text = if label_prefix == "Client Service" {
         t("Configure system service for this client")
     } else {
         t("Configure login autostart for this client")
     };
     response.on_hover_text(hover_text);
+}
+
+fn client_service_help(table: &ResultTable) -> Option<String> {
+    let has = |name: &str| table.headers.iter().any(|h| h.eq_ignore_ascii_case(name));
+    let client_name = || -> Option<String> {
+        for row in &table.rows {
+            if startup_row_is_client_autostart(&table.headers, row) {
+                return table_value(&table.headers, row, "name")
+                    .or_else(|| table_value(&table.headers, row, "unit"))
+                    .or_else(|| table_value(&table.headers, row, "displayname"))
+                    .map(|s| s.to_string());
+            }
+        }
+        None
+    };
+    let name = client_name().unwrap_or_else(|| "com.rust-desk-light.client".into());
+
+    if has("pid") {
+        Some(format!(
+            "macOS launchd service: {name}\n\
+             \n\
+             # Enable\n\
+             sudo launchctl enable system/{name}\n\
+             sudo launchctl bootstrap system/ /Library/LaunchDaemons/{name}.plist\n\
+             # Disable\n\
+             sudo launchctl bootout system/{name}\n\
+             sudo launchctl disable system/{name}\n\
+             # Start\n\
+             sudo launchctl kickstart system/{name}\n\
+             # Stop\n\
+             sudo launchctl kill SIGTERM system/{name}\n\
+             # Status\n\
+             launchctl list\n\
+             sudo launchctl print system/{name}"
+        ))
+    } else if has("unit") {
+        let svc = name.strip_suffix(".service").unwrap_or(&name);
+        Some(format!(
+            "Linux systemd service: {name}\n\
+             \n\
+             # Enable\n\
+             sudo systemctl enable {svc}\n\
+             # Disable\n\
+             sudo systemctl disable {svc}\n\
+             # Start\n\
+             sudo systemctl start {svc}\n\
+             # Stop\n\
+             sudo systemctl stop {svc}\n\
+             # Restart\n\
+             sudo systemctl restart {svc}\n\
+             # Status\n\
+             systemctl status {svc}"
+        ))
+    } else if has("displayname") {
+        Some(format!(
+            "Windows service: {name}\n\
+             \n\
+             # Enable (Admin PowerShell)\n\
+             Set-Service -Name {name} -StartupType Automatic\n\
+             # Disable (Admin PowerShell)\n\
+             Set-Service -Name {name} -StartupType Disabled\n\
+             # Start\n\
+             Start-Service -Name {name}\n\
+             # Stop\n\
+             Stop-Service -Name {name} -Force"
+        ))
+    } else {
+        None
+    }
 }
 
 fn queue_startup_action(startup_action_requested: &Arc<Mutex<Option<String>>>, action: &str) {
@@ -1637,6 +1738,31 @@ fn render_startup_delete_confirm(
         });
 }
 
+fn render_service_help_popup(ui: &mut egui::Ui, popup: &Arc<Mutex<Option<String>>>) {
+    let text = popup.lock().ok().and_then(|v| v.clone());
+    let Some(text) = text else { return };
+    let mut open = true;
+    egui::Window::new(t("Service Management Help"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(500.0)
+        .show(ui.ctx(), |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(&text)
+                        .size(12.0)
+                        .family(egui::FontFamily::Monospace),
+                );
+            });
+        });
+    if !open {
+        if let Ok(mut value) = popup.lock() {
+            *value = None;
+        }
+    }
+}
+
 fn render_service_delete_confirm(
     ui: &mut egui::Ui,
     service_delete_confirm: &Arc<Mutex<Option<ServiceDeleteConfirm>>>,
@@ -1855,7 +1981,7 @@ fn startup_client_autostart_status(
     } else if saw_disabled {
         StartupClientAutostartStatus::Disabled
     } else if saw_unknown {
-        StartupClientAutostartStatus::Unknown
+        StartupClientAutostartStatus::Disabled
     } else {
         StartupClientAutostartStatus::Disabled
     }
@@ -1915,8 +2041,8 @@ fn startup_row_status(
         "disabled" | "mismatch" | "outdated" | "stale" | "stopped" => {
             Some(StartupClientAutostartStatus::Disabled)
         }
-        "error" => Some(StartupClientAutostartStatus::Unknown),
-        _ => None,
+        "error" => Some(StartupClientAutostartStatus::Disabled),
+        _ => Some(StartupClientAutostartStatus::Disabled),
     }
 }
 
