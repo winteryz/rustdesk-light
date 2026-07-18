@@ -1,4 +1,4 @@
-name: Build mipsel (zigbuild + build-std)
+name: Build mipsel (Zig soft-float locked)
 
 on:
   workflow_dispatch:
@@ -17,45 +17,50 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. Nightly + rust-src（必须，供 build-std 现场编 std）
       - name: Install Rust nightly + rust-src
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly
           components: rust-src
 
-      # 2. Zig（提供 musl sysroot / crt / unwind）
-      - name: Install Zig
+      # 用 Zig 0.11（最稳的 MIPS sf 支持，0.13 才改的硬浮点默认）
+      - name: Install Zig (0.11 for mips soft-float)
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.13.0
+          version: 0.11.0
 
-      # 3. cargo-zigbuild
-      - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild --locked
+      # 关键：wrapper 里同时声明 target + soft-float
+      - name: Create zig-softfloat wrapper
+        run: |
+          cat > zig-mips-sf.sh << 'EOF'
+          #!/bin/sh
+          exec zig cc -target mipsel-linux-musl -msoft-float "$@"
+          EOF
+          chmod +x zig-mips-sf.sh
 
-      # 4. 缝合：zigbuild 负责链接，build-std 负责 std
       - name: Build rdl-server-cli
         run: |
-          cargo zigbuild \
+          RUSTFLAGS="\
+            -C linker=$(pwd)/zig-mips-sf.sh \
+            -C target-feature=+crt-static \
+            -C panic=abort" \
+          cargo +nightly build \
             --release \
             --target ${{ env.TARGET }} \
             -Z build-std=core,std,alloc,panic_abort \
             -p rust-desk-light-server \
             --bin rdl-server-cli
 
-      - name: Strip & inspect
+      - name: Strip & verify
         run: |
           zig objcopy --strip-all \
             target/${{ env.TARGET }}/release/rdl-server-cli \
             target/${{ env.TARGET }}/release/rdl-server-cli
-
-          echo "=== Binary Info ==="
+          echo "=== Binary ==="
           file target/${{ env.TARGET }}/release/rdl-server-cli
-          readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep NEEDED || echo "✅ Fully static — ready for router"
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: rdl-server-cli-mipsel-router
+          name: rdl-server-cli-mipsel-sf
           path: target/${{ env.TARGET }}/release/rdl-server-cli
