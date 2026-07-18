@@ -38,8 +38,9 @@ jobs:
 
       - name: Build rdl-server-cli (static, soft-float)
         run: |
-          RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes" \
-          cargo +nightly build-server-cli --release --target ${{ env.TARGET }} -Z build-std
+         RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes" \
+         cargo +nightly build --release --target mipsel-unknown-linux-musl -Z build-std \
+         -p rust-desk-light-server --bin rdl-server-cli
 
       - name: Strip binary
         run: |
