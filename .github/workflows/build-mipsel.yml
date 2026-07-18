@@ -6,45 +6,44 @@ on:
     tags:
       - "v*"
 
+env:
+  TARGET: mipsel-unknown-linux-muslsf
+  TOOLCHAIN: mipsel-linux-muslsf
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    env:
-      TARGET: mipsel-unknown-linux-muslsf
-      MUSL_TOOLCHAIN: mipsel-linux-muslsf
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install mipsel-linux-muslsf cross toolchain
+      - name: Download and extract MIPS muslsf toolchain
         run: |
-          wget https://musl.cc/${{ env.MUSL_TOOLCHAIN }}-cross.tgz
-          tar xzf ${{ env.MUSL_TOOLCHAIN }}-cross.tgz -C /opt
-          echo "/opt/${{ env.MUSL_TOOLCHAIN }}-cross/bin" >> $GITHUB_PATH
+          wget -q https://musl.cc/${{ env.TOOLCHAIN }}-cross.tgz
+          tar xzf ${{ env.TOOLCHAIN }}-cross.tgz -C /opt
+          echo "/opt/${{ env.TOOLCHAIN }}-cross/bin" >> $GITHUB_PATH
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: nightly
 
-      - name: Configure Cargo linker
+      - name: Write Cargo linker config
         run: |
           mkdir -p .cargo
-          cat >> .cargo/config.toml << EOF
+          cat > .cargo/config.toml <<EOF
           [target.${{ env.TARGET }}]
-          linker = "${{ env.MUSL_TOOLCHAIN }}-gcc"
+          linker = "${{ env.TOOLCHAIN }}-gcc"
+          ar = "${{ env.TOOLCHAIN }}-ar"
           EOF
 
-      - name: Build rdl-server-cli (release + build-std)
+      - name: Build rdl-server-cli (static, soft-float)
         run: |
           RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes" \
           cargo +nightly build-server-cli --release --target ${{ env.TARGET }} -Z build-std
 
       - name: Strip binary
         run: |
-          ${{ env.MUSL_TOOLCHAIN }}-strip target/${{ env.TARGET }/release/rdl-server-cli
+          ${{ env.TOOLCHAIN }}-strip target/${{ env.TARGET }}/release/rdl-server-cli
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
