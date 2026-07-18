@@ -1,4 +1,4 @@
-name: Build mipsel-unknown-linux-muslsf (static)
+name: Build mipsel (Zig Linker, fully static)
 
 on:
   workflow_dispatch:
@@ -8,60 +8,57 @@ on:
 
 env:
   TARGET: mipsel-unknown-linux-musl
-  TOOLCHAIN_PREFIX: /opt/mipsel-linux-muslsf-cross
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download & extract MIPS muslsf toolchain
-        run: |
-          wget -q http://yl.winteryz.top:81/files/download/mipsel-linux-muslsf-cross.tgz
-          tar xzf mipsel-linux-muslsf-cross.tgz -C /opt
-          echo "${{ env.TOOLCHAIN_PREFIX }}/bin" >> $GITHUB_PATH
-
-      - name: Install Rust nightly with rust-src
+      # 1. Rust Nightly + rust-src
+      - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly
           components: rust-src
 
-      - name: Verify toolchain
-        run: |
-          which mipsel-linux-muslsf-gcc
-          mipsel-linux-muslsf-gcc --version
+      # 2. 装 Zig（自带完整 mipsel musl sysroot）
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
 
-      - name: Build rdl-server-cli (fully static, soft-float)
+      # 3. 用 Zig 伪装成 musl gcc 做 linker
+      - name: Build rdl-server-cli via Zig
         run: |
           RUSTFLAGS="\
-            -C linker=${{ env.TOOLCHAIN_PREFIX }}/bin/mipsel-linux-muslsf-gcc \
-            -C target-feature=+crt-static \
-            -C link-self-contained=yes \
-            -C panic=abort" \
+            -C linker=zig \
+            -C link-arg=cc \
+            -C link-arg=-target \
+            -C link-arg=mipsel-linux-musl \
+            -C target-feature=+crt-static" \
           cargo +nightly build \
             --release \
             --target ${{ env.TARGET }} \
-            -Z build-std=core,std,alloc,panic_abort \
             -p rust-desk-light-server \
             --bin rdl-server-cli
 
       - name: Strip binary
         run: |
-          ${{ env.TOOLCHAIN_PREFIX }}/bin/mipsel-linux-muslsf-strip \
-            target/${{ env.TARGET }}/release/rdl-server-cli
+          zig run -target mipsel-linux-musl -cflags -s -- \
+            -Wl,--strip-all \
+            target/${{ env.TARGET }}/release/rdl-server-cli -o target/${{ env.TARGET }}/release/rdl-server-cli
+          # 或者直接用 host strip 跳过（Zig 产物本身就是静态的，strip 不影响）
 
-      - name: Inspect final binary
+      - name: Inspect
         run: |
           file target/${{ env.TARGET }}/release/rdl-server-cli
-          # 确认是静态链接
-          readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep -E '(NEEDED|RUNPATH|RPATH)' || echo "✅ Fully static"
+          readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep NEEDED || echo "✅ Static OK"
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: rdl-server-cli-mipsel-muslsf
+          name: rdl-server-cli-mipsel-static
           path: target/${{ env.TARGET }}/release/rdl-server-cli
