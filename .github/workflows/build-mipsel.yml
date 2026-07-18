@@ -1,4 +1,4 @@
-name: Build mipsel (Zig linker + build-std)
+name: Build mipsel (Zig wrapper)
 
 on:
   workflow_dispatch:
@@ -17,24 +17,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust nightly with rust-src
+      - name: Install Rust nightly + rust-src
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly
           components: rust-src
 
-      - name: Install Zig (provides full musl sysroot)
+      - name: Install Zig
         uses: mlugg/setup-zig@v1
         with:
           version: 0.13.0
 
+      # 关键：写一个 wrapper，让 Rust 以为这是一个普通的 gcc
+      - name: Create zig-cc wrapper
+        run: |
+          cat > zig-mipsel-wrapper.sh << 'EOF'
+          #!/bin/sh
+          exec zig cc -target mipsel-linux-musl "$@"
+          EOF
+          chmod +x zig-mipsel-wrapper.sh
+
       - name: Build rdl-server-cli
         run: |
           RUSTFLAGS="\
-            -C linker=zig \
-            -C link-arg=cc \
-            -C link-arg=-target \
-            -C link-arg=mipsel-linux-musl \
+            -C linker=$(pwd)/zig-mipsel-wrapper.sh \
             -C target-feature=+crt-static \
             -C panic=abort" \
           cargo +nightly build \
@@ -44,15 +50,13 @@ jobs:
             -p rust-desk-light-server \
             --bin rdl-server-cli
 
-      - name: Strip & verify
+      - name: Strip & inspect
         run: |
-          # Zig 自带的 strip 兼容 musl
           zig objcopy --strip-all \
             target/${{ env.TARGET }}/release/rdl-server-cli \
             target/${{ env.TARGET }}/release/rdl-server-cli
-
           file target/${{ env.TARGET }}/release/rdl-server-cli
-          readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep NEEDED || echo "✅ Fully static"
+          readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep NEEDED || echo "✅ Static OK"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
