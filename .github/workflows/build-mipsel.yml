@@ -18,11 +18,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download and extract MIPS muslsf toolchain
+      - name: Download MIPS muslsf toolchain (via GH raw / mirror)
         run: |
-          wget -q https://musl.cc/${{ env.TOOLCHAIN }}-cross.tgz
-          tar xzf ${{ env.TOOLCHAIN }}-cross.tgz -C /opt
-          echo "/opt/${{ env.TOOLCHAIN }}-cross/bin" >> $GITHUB_PATH
+          # 用 GitHub 自己的 CDN 中转一份，或者用备用源
+          wget -q https://github.com/richfelker/musl-cross-make/releases/download/20240302/mipsel-linux-muslsf-cross.tgz -O mipsel.tgz
+          tar xzf mipsel.tgz -C /opt
+          echo "/opt/mipsel-linux-muslsf-cross/bin" >> $GITHUB_PATH
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
