@@ -13,41 +13,23 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download and extract MIPS muslsf toolchain
+      - name: Install Rust nightly with rust-src
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Download mipsel-linux-muslsf toolchain
         run: |
           wget -q http://yl.winteryz.top:81/files/download/mipsel-linux-muslsf-cross.tgz
-          tar xzf ${{ env.TOOLCHAIN }}-cross.tgz -C /opt
-          echo "/opt/${{ env.TOOLCHAIN }}-cross/bin" >> $GITHUB_PATH
+          tar xzf mipsel-linux-muslsf-cross.tgz -C /opt
+          echo "/opt/mipsel-linux-muslsf-cross/bin" >> $GITHUB_PATH
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Write Cargo linker config
+      - name: Build rdl-server-cli (mipsel muslsf static)
         run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<EOF
-          [target.${{ env.TARGET }}]
-          linker = "${{ env.TOOLCHAIN }}-gcc"
-          ar = "${{ env.TOOLCHAIN }}-ar"
-          EOF
-
-      - name: Build rdl-server-cli (static, soft-float)
-        run: |
-         RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes" \
-         cargo +nightly build --release --target mipsel-unknown-linux-musl -Z build-std \
-         -p rust-desk-light-server --bin rdl-server-cli
-
-      - name: Strip binary
-        run: |
-          ${{ env.TOOLCHAIN }}-strip target/${{ env.TARGET }}/release/rdl-server-cli
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rdl-server-cli-${{ env.TARGET }}
-          path: target/${{ env.TARGET }}/release/rdl-server-cli
+          RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes" \
+          cargo +nightly build --release --target mipsel-unknown-linux-musl -Z build-std \
+            -p rust-desk-light-server --bin rdl-server-cli
