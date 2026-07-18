@@ -1,4 +1,4 @@
-name: Build mipsel (Zig Linker, fully static)
+name: Build mipsel (Zig linker + build-std)
 
 on:
   workflow_dispatch:
@@ -17,48 +17,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. Rust Nightly + rust-src
-      - name: Install Rust nightly
+      - name: Install Rust nightly with rust-src
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly
           components: rust-src
 
-      # 2. 装 Zig（自带完整 mipsel musl sysroot）
-      - name: Install Zig
+      - name: Install Zig (provides full musl sysroot)
         uses: mlugg/setup-zig@v1
         with:
           version: 0.13.0
 
-      # 3. 用 Zig 伪装成 musl gcc 做 linker
-      - name: Build rdl-server-cli via Zig
+      - name: Build rdl-server-cli
         run: |
           RUSTFLAGS="\
             -C linker=zig \
             -C link-arg=cc \
             -C link-arg=-target \
             -C link-arg=mipsel-linux-musl \
-            -C target-feature=+crt-static" \
+            -C target-feature=+crt-static \
+            -C panic=abort" \
           cargo +nightly build \
             --release \
             --target ${{ env.TARGET }} \
+            -Z build-std=core,std,alloc,panic_abort \
             -p rust-desk-light-server \
             --bin rdl-server-cli
 
-      - name: Strip binary
+      - name: Strip & verify
         run: |
-          zig run -target mipsel-linux-musl -cflags -s -- \
-            -Wl,--strip-all \
-            target/${{ env.TARGET }}/release/rdl-server-cli -o target/${{ env.TARGET }}/release/rdl-server-cli
-          # 或者直接用 host strip 跳过（Zig 产物本身就是静态的，strip 不影响）
+          # Zig 自带的 strip 兼容 musl
+          zig objcopy --strip-all \
+            target/${{ env.TARGET }}/release/rdl-server-cli \
+            target/${{ env.TARGET }}/release/rdl-server-cli
 
-      - name: Inspect
-        run: |
           file target/${{ env.TARGET }}/release/rdl-server-cli
-          readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep NEEDED || echo "✅ Static OK"
+          readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep NEEDED || echo "✅ Fully static"
 
-      - name: Upload
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rdl-server-cli-mipsel-static
+          name: rdl-server-cli-mipsel
           path: target/${{ env.TARGET }}/release/rdl-server-cli
