@@ -1,4 +1,4 @@
-name: Build mipsel (Zig wrapper)
+name: Build mipsel (cargo-zigbuild)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
       - "v*"
 
 env:
-  TARGET: mipsel-unknown-linux-musl
+  TARGET: mipsel-linux-musl
 
 jobs:
   build:
@@ -17,36 +17,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust nightly + rust-src
+      # 1. 装 Nightly（不需要 rust-src，zigbuild 自带 std）
+      - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly
-          components: rust-src
 
+      # 2. 装 Zig
       - name: Install Zig
         uses: mlugg/setup-zig@v1
         with:
           version: 0.13.0
 
-      # 关键：写一个 wrapper，让 Rust 以为这是一个普通的 gcc
-      - name: Create zig-cc wrapper
-        run: |
-          cat > zig-mipsel-wrapper.sh << 'EOF'
-          #!/bin/sh
-          exec zig cc -target mipsel-linux-musl "$@"
-          EOF
-          chmod +x zig-mipsel-wrapper.sh
+      # 3. 装 cargo-zigbuild
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
 
+      # 4. 直接编译（zigbuild 自动处理 crt + 静态）
       - name: Build rdl-server-cli
         run: |
-          RUSTFLAGS="\
-            -C linker=$(pwd)/zig-mipsel-wrapper.sh \
-            -C target-feature=+crt-static \
-            -C panic=abort" \
-          cargo +nightly build \
+          cargo zigbuild \
             --release \
             --target ${{ env.TARGET }} \
-            -Z build-std=core,std,alloc,panic_abort \
             -p rust-desk-light-server \
             --bin rdl-server-cli
 
@@ -55,8 +47,9 @@ jobs:
           zig objcopy --strip-all \
             target/${{ env.TARGET }}/release/rdl-server-cli \
             target/${{ env.TARGET }}/release/rdl-server-cli
+          
           file target/${{ env.TARGET }}/release/rdl-server-cli
-          readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep NEEDED || echo "✅ Static OK"
+          readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep NEEDED || echo "✅ Fully static"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
