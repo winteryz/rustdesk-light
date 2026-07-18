@@ -7,7 +7,7 @@ on:
       - "v*"
 
 env:
-  TARGET: mipsel-linux-musl
+  TARGET: mipsel-unknown-linux-musl   # ← 关键：用 Rust 官方名，zigbuild 内部自己转 Zig
 
 jobs:
   build:
@@ -17,23 +17,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. 装 Nightly（不需要 rust-src，zigbuild 自带 std）
+      # 1. Rust nightly（zigbuild 用 rustc 查 target，不需要 rust-src）
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly
 
-      # 2. 装 Zig
+      # 2. Zig（提供 mipsel musl sysroot + crt）
       - name: Install Zig
         uses: mlugg/setup-zig@v1
         with:
           version: 0.13.0
 
-      # 3. 装 cargo-zigbuild
+      # 3. cargo-zigbuild
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
 
-      # 4. 直接编译（zigbuild 自动处理 crt + 静态）
+      # 4. 编译（不写 -Z build-std，zigbuild 走 Zig 的预编译 std）
       - name: Build rdl-server-cli
         run: |
           cargo zigbuild \
@@ -47,7 +47,6 @@ jobs:
           zig objcopy --strip-all \
             target/${{ env.TARGET }}/release/rdl-server-cli \
             target/${{ env.TARGET }}/release/rdl-server-cli
-          
           file target/${{ env.TARGET }}/release/rdl-server-cli
           readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep NEEDED || echo "✅ Fully static"
 
