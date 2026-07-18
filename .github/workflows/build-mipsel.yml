@@ -1,4 +1,4 @@
-name: Build mipsel-unknown-linux-muslsf (rdl-server-cli)
+name: Build mipsel-unknown-linux-muslsf (static)
 
 on:
   workflow_dispatch:
@@ -8,39 +8,37 @@ on:
 
 env:
   TARGET: mipsel-unknown-linux-musl
-  TOOLCHAIN: mipsel-linux-muslsf
+  TOOLCHAIN_PREFIX: /opt/mipsel-linux-muslsf-cross
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      # ✅ 安装 Nightly + rust-src（必须，用于 -Z build-std）
+      - name: Download & extract MIPS muslsf toolchain
+        run: |
+          wget -q http://yl.winteryz.top:81/files/download/mipsel-linux-muslsf-cross.tgz
+          tar xzf mipsel-linux-muslsf-cross.tgz -C /opt
+          echo "${{ env.TOOLCHAIN_PREFIX }}/bin" >> $GITHUB_PATH
+
       - name: Install Rust nightly with rust-src
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly
           components: rust-src
 
-      # ✅ 下载并解压 MIPS muslsf 交叉工具链
-      - name: Download & setup MIPS muslsf toolchain
+      - name: Verify toolchain
         run: |
-          wget -q http://yl.winteryz.top:81/files/download/mipsel-linux-muslsf-cross.tgz
-          tar xzf ${{ env.TOOLCHAIN }}-cross.tgz -C /opt
-          echo "/opt/${{ env.TOOLCHAIN }}-cross/bin" >> $GITHUB_PATH
+          which mipsel-linux-muslsf-gcc
+          mipsel-linux-muslsf-gcc --version
 
-      # ✅ 验证工具链可用
-      - name: Verify cross compiler
-        run: ${{ env.TOOLCHAIN }}-gcc --version
-
-      # ✅ 构建 rdl-server-cli（静态、软浮点、不依赖 alias）
-      - name: Build rdl-server-cli (static, soft-float)
+      - name: Build rdl-server-cli (fully static, soft-float)
         run: |
           RUSTFLAGS="\
-            -C linker=/opt/${{ env.TOOLCHAIN }}-cross/bin/${{ env.TOOLCHAIN }}-gcc \
+            -C linker=${{ env.TOOLCHAIN_PREFIX }}/bin/mipsel-linux-muslsf-gcc \
             -C target-feature=+crt-static \
             -C link-self-contained=yes \
             -C panic=abort" \
@@ -51,17 +49,19 @@ jobs:
             -p rust-desk-light-server \
             --bin rdl-server-cli
 
-      # ✅ Strip 并验证产物
-      - name: Strip & verify binary
+      - name: Strip binary
         run: |
-          /opt/${{ env.TOOLCHAIN }}-cross/bin/${{ env.TOOLCHAIN }}-strip \
+          ${{ env.TOOLCHAIN_PREFIX }}/bin/mipsel-linux-muslsf-strip \
             target/${{ env.TARGET }}/release/rdl-server-cli
 
+      - name: Inspect final binary
+        run: |
           file target/${{ env.TARGET }}/release/rdl-server-cli
+          # 确认是静态链接
+          readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep -E '(NEEDED|RUNPATH|RPATH)' || echo "✅ Fully static"
 
-      # ✅ 上传 Artifact
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rdl-server-cli-${{ env.TARGET }}
+          name: rdl-server-cli-mipsel-muslsf
           path: target/${{ env.TARGET }}/release/rdl-server-cli
