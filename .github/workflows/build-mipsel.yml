@@ -29,27 +29,48 @@ jobs:
         with:
           version: 0.11.0
 
-      # 关键：wrapper 里同时声明 target + soft-float
-      - name: Create zig-softfloat wrapper
+      - name: Create fixed zig-cc wrapper (eat -nostartfiles + force sysroot)
+              run: |
+                cat > zig-mips-sf.sh << 'EOF'
+                #!/bin/sh
+                # 1. 拿到 Zig 的 musl sysroot 绝对路径
+                SYSROOT=$(zig env | grep '"lib_dir"' | sed 's/.*"\(.*\)".*/\1/')/lib/libc/musl
+      
+                ARGS=""
+                for arg in "$@"; do
+                  # 2. 吃掉 Rust build-std 强行塞进来的 -nostartfiles / -nodefaultlibs
+                  case "$arg" in
+                    -nostartfiles|-nodefaultlibs) continue ;;
+                    *) ARGS="$ARGS $arg" ;;
+                  esac
+                done
+
+                # 3. 显式把 crt 路径和 sysroot 喂给 Zig
+                exec zig cc \
+                  -target mipsel-linux-musl \
+                  -msoft-float \
+                  --sysroot "$SYSROOT" \
+                  -L "$SYSROOT/lib" \
+                  $ARGS
+                EOF
+                chmod +x zig-mips-sf.sh
+
+      - name: Verify wrapper invocation
         run: |
-          cat > zig-mips-sf.sh << 'EOF'
-          #!/bin/sh
-          exec zig cc -target mipsel-linux-musl -msoft-float "$@"
-          EOF
-          chmod +x zig-mips-sf.sh
+          ./zig-mips-sf.sh -v -nostartfiles -x crt1.o -o /dev/null 2>&1 | head -5 || true
 
       - name: Build rdl-server-cli
-        run: |
-          RUSTFLAGS="\
-            -C linker=$(pwd)/zig-mips-sf.sh \
-            -C target-feature=+crt-static \
-            -C panic=abort" \
-          cargo +nightly build \
-            --release \
-            --target ${{ env.TARGET }} \
-            -Z build-std=core,std,alloc,panic_abort \
-            -p rust-desk-light-server \
-            --bin rdl-server-cli
+              run: |
+                RUSTFLAGS="\
+                  -C linker=$(pwd)/zig-mips-sf.sh \
+                  -C target-feature=+crt-static \
+                  -C panic=abort" \
+                cargo +nightly build \
+                  --release \
+                  --target mipsel-unknown-linux-musl \
+                  -Z build-std=core,std,alloc,panic_abort \
+                  -p rust-desk-light-server \
+                  --bin rdl-server-cli
 
       - name: Strip & verify
         run: |
