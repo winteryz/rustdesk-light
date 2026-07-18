@@ -43,3 +43,48 @@ jobs:
               *) filtered="$filtered \"$1\"" ;;
             esac
             shift
+          done
+          # 用 eval 保留参数原意，强制软浮点
+          eval zig cc -target mipsel-linux-musl -msoft-float $filtered
+          EOF
+          chmod +x zigwrap.sh
+          ./zigwrap.sh --version || zig --version
+
+      # ── 4. 编译 rdl-server-cli ──
+      - name: Build rdl-server-cli
+        run: |
+          RUSTFLAGS="\
+            -C linker=$(pwd)/zigwrap.sh \
+            -C target-feature=+crt-static \
+            -C panic=abort" \
+          cargo +nightly build \
+            --release \
+            --target ${{ env.TARGET }} \
+            -Z build-std=core,std,alloc,panic_abort \
+            -p rust-desk-light-server \
+            --bin rdl-server-cli
+
+      # ── 5. Strip 并自检 ──
+      - name: Strip & inspect binary
+        run: |
+          zig objcopy --strip-all \
+            target/${{ env.TARGET }}/release/rdl-server-cli \
+            target/${{ env.TARGET }}/release/rdl-server-cli
+
+          echo "====== File type ======"
+          file target/${{ env.TARGET }}/release/rdl-server-cli
+
+          echo "====== Dynamic deps ======"
+          if readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep -q NEEDED; then
+            echo "⚠️  Not fully static!"
+            readelf -d target/${{ env.TARGET }}/release/rdl-server-cli | grep NEEDED
+          else
+            echo "✅ Fully static — ready for RT-AC54U"
+          fi
+
+      # ── 6. 打包上传 ──
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdl-server-cli-mipsel-router
+          path: target/${{ env.TARGET }}/release/rdl-server-cli
